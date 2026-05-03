@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use std::future::Future;
+#[cfg(test)]
 use std::io::BufRead;
 
 use crate::agent_loop::ModelStreamer;
@@ -238,6 +239,7 @@ fn extract_assistant_text(stream: &str) -> Result<String> {
     read_assistant_text(std::io::Cursor::new(stream.as_bytes()), |_| Ok(()))
 }
 
+#[cfg(test)]
 fn read_assistant_text(
     mut reader: impl BufRead,
     mut on_delta: impl FnMut(&str) -> Result<()>,

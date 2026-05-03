@@ -194,6 +194,7 @@ pub(crate) struct AgentLoop {
 
 impl AgentLoop {
     /// Creates an agent loop for one session.
+    #[cfg(test)]
     pub(crate) fn new(session_id: SessionId) -> Self {
         Self::with_context_window(session_id, ContextWindowConfig::default())
     }
