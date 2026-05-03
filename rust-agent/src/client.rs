@@ -170,7 +170,7 @@ impl ModelStreamer for ChatGptClient {
         parallel_tool_calls: bool,
         session_id: SessionId,
         model: &'a str,
-        on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 

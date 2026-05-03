@@ -1,7 +1,7 @@
 # Configuration Architecture
 
 `AppConfig` collects runtime settings from environment variables and splits them
-into client, model, context-window, output, and telemetry configuration.
+into client, model, context-window, output, server, and telemetry configuration.
 
 ## Flow
 
@@ -10,8 +10,9 @@ into client, model, context-window, output, and telemetry configuration.
 3. `ModelConfig` configures the default model and backend allowlist.
 4. `ContextWindowConfig` configures prompt history bounds.
 5. `OutputConfig` configures terminal delta buffering.
-6. `TelemetryConfig` configures optional terminal telemetry output.
-7. The resulting values are passed into long-lived services.
+6. `ServerConfig` configures HTTP compatibility and native HTTP/3 listeners.
+7. `TelemetryConfig` configures optional terminal telemetry output.
+8. The resulting values are passed into long-lived services.
 
 ## Environment Variables
 
@@ -30,6 +31,13 @@ into client, model, context-window, output, and telemetry configuration.
 - `RUST_AGENT_HISTORY_MAX_BYTES`
 - `RUST_AGENT_DELTA_FLUSH_INTERVAL_MS`
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
+- `RUST_AGENT_SERVER_HTTP_ADDR`
+- `RUST_AGENT_SERVER_H3_ADDR`
+- `RUST_AGENT_SERVER_TLS_CERT`
+- `RUST_AGENT_SERVER_TLS_KEY`
+- `RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY`
+- `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
+- `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_CACHE_HEALTH`
 
 ## Responsibilities
@@ -44,6 +52,8 @@ into client, model, context-window, output, and telemetry configuration.
 - Configuration is loaded once, not per turn.
 - Model changes validate against an in-memory allowlist.
 - Prompt, history, and output limits are plain copyable values.
+- Server bind addresses, queue capacity, stream limits, and idle timeout are
+  loaded once before listeners start.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,
@@ -52,5 +62,7 @@ into client, model, context-window, output, and telemetry configuration.
 ## Current Scope
 
 Configuration is environment-only. Auth tokens are stored separately in
-`auth.json`. File config, dynamic reload, and per-request overrides should be
-added only when endpoint behavior requires them.
+`auth.json`. HTTP/3 uses a generated self-signed development certificate unless
+`RUST_AGENT_SERVER_TLS_CERT` and `RUST_AGENT_SERVER_TLS_KEY` are set together.
+File config, dynamic reload, and per-request overrides should be added only when
+endpoint behavior requires them.

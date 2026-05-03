@@ -1,8 +1,8 @@
 # Service Layer Architecture
 
 `AgentService` is the backend-facing boundary around the agent loop. It owns one
-long-lived model client and a session map, so future HTTP or streaming endpoints
-can submit work without rebuilding transport state for every request.
+long-lived model client and a session map, so terminal and server endpoints can
+submit work without rebuilding transport state for every request.
 
 ## Flow
 
@@ -15,8 +15,8 @@ can submit work without rebuilding transport state for every request.
 6. The session loop streams the selected model response, executes any requested
    built-in tools, and emits `AgentEvent`s, including tool lifecycle events and
    the completed assistant message.
-7. The caller decides how to translate events into terminal output, SSE, or
-   WebSocket messages.
+7. The caller decides how to translate events into terminal output or server
+   stream frames.
 
 ## Responsibilities
 
@@ -41,6 +41,8 @@ can submit work without rebuilding transport state for every request.
   history limits.
 - Session model changes do not rebuild the HTTP client.
 - The service avoids frontend assumptions; event sinks stay caller-provided.
+- Event sinks are `Send`, so server handlers can spawn turn work onto Tokio's
+  multi-threaded runtime.
 
 ## Concurrency
 

@@ -35,6 +35,44 @@ cargo run
 
 Then type messages after the `You:` prompt. The interactive session keeps recent conversation history in memory until it exits, bounded by `RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Submit a blank line to exit.
 
+## Server Mode
+
+Run the native HTTP/3 server from the repository root:
+
+```bash
+cd /Users/ajc/rust-agent
+cargo run -- serve
+```
+
+By default this starts:
+
+- HTTP/1.1 and HTTP/2 compatibility on `127.0.0.1:4096`
+- Native HTTP/3 over QUIC/TLS on `127.0.0.1:4433`
+
+The HTTP compatibility responses advertise the HTTP/3 endpoint with `Alt-Svc`.
+When TLS files are not configured, the HTTP/3 listener generates a self-signed
+certificate for local development.
+
+Useful smoke checks:
+
+```bash
+curl -s http://127.0.0.1:4096/healthz
+curl --http3 -k https://127.0.0.1:4433/healthz
+curl -N -H 'content-type: application/json' \
+  -d '{"message":"Say hello in one sentence"}' \
+  http://127.0.0.1:4096/sessions/1/turns:stream
+```
+
+Server configuration:
+
+- `RUST_AGENT_SERVER_HTTP_ADDR`
+- `RUST_AGENT_SERVER_H3_ADDR`
+- `RUST_AGENT_SERVER_TLS_CERT`
+- `RUST_AGENT_SERVER_TLS_KEY`
+- `RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY`
+- `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
+- `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
+
 ## Authentication
 
 The application owns its ChatGPT login state at `~/.rust-agent/auth.json` by default.

@@ -1,5 +1,7 @@
 //! Runtime configuration for the agent harness.
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,6 +20,11 @@ const DEFAULT_HISTORY_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
+const DEFAULT_SERVER_HTTP_ADDR: &str = "127.0.0.1:4096";
+const DEFAULT_SERVER_H3_ADDR: &str = "127.0.0.1:4433";
+const DEFAULT_SERVER_EVENT_QUEUE_CAPACITY: usize = 1024;
+const DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS: u32 = 256;
+const DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Configuration for one running rust-agent process.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,6 +33,7 @@ pub(crate) struct AppConfig {
     pub(crate) context: ContextWindowConfig,
     pub(crate) models: ModelConfig,
     pub(crate) output: OutputConfig,
+    pub(crate) server: ServerConfig,
     pub(crate) telemetry: TelemetryConfig,
 }
 
@@ -40,6 +48,7 @@ impl AppConfig {
             context: ContextWindowConfig::from_env()?,
             models: ModelConfig::from_env()?,
             output: OutputConfig::from_env()?,
+            server: ServerConfig::from_env()?,
             telemetry: TelemetryConfig::from_env()?,
         })
     }
@@ -387,6 +396,117 @@ impl Default for OutputConfig {
     }
 }
 
+/// Network configuration for the local server mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ServerConfig {
+    http_addr: SocketAddr,
+    h3_addr: SocketAddr,
+    tls_cert_path: Option<PathBuf>,
+    tls_key_path: Option<PathBuf>,
+    event_queue_capacity: usize,
+    h3_max_concurrent_streams: u32,
+    h3_idle_timeout: Duration,
+}
+
+impl ServerConfig {
+    /// Loads local server configuration from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if an address or numeric environment variable is invalid.
+    pub(crate) fn from_env() -> Result<Self> {
+        Ok(Self {
+            http_addr: env_parse_socket_addr(
+                "RUST_AGENT_SERVER_HTTP_ADDR",
+                DEFAULT_SERVER_HTTP_ADDR,
+            )?,
+            h3_addr: env_parse_socket_addr("RUST_AGENT_SERVER_H3_ADDR", DEFAULT_SERVER_H3_ADDR)?,
+            tls_cert_path: env_optional_path("RUST_AGENT_SERVER_TLS_CERT"),
+            tls_key_path: env_optional_path("RUST_AGENT_SERVER_TLS_KEY"),
+            event_queue_capacity: env_parse_usize(
+                "RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY",
+                DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            )?
+            .max(1),
+            h3_max_concurrent_streams: env_parse_u32(
+                "RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS",
+                DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
+            )?
+            .max(1),
+            h3_idle_timeout: Duration::from_secs(env_parse_u64(
+                "RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS",
+                DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS,
+            )?),
+        })
+    }
+
+    /// Creates local server configuration with explicit bind addresses.
+    #[cfg(test)]
+    pub(crate) fn new(http_addr: SocketAddr, h3_addr: SocketAddr) -> Self {
+        Self {
+            http_addr,
+            h3_addr,
+            tls_cert_path: None,
+            tls_key_path: None,
+            event_queue_capacity: DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
+            h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
+        }
+    }
+
+    /// Returns the plain HTTP compatibility listener address.
+    pub(crate) const fn http_addr(&self) -> SocketAddr {
+        self.http_addr
+    }
+
+    /// Returns the native HTTP/3 listener address.
+    pub(crate) const fn h3_addr(&self) -> SocketAddr {
+        self.h3_addr
+    }
+
+    /// Returns the configured TLS certificate path.
+    pub(crate) fn tls_cert_path(&self) -> Option<&std::path::Path> {
+        self.tls_cert_path.as_deref()
+    }
+
+    /// Returns the configured TLS private key path.
+    pub(crate) fn tls_key_path(&self) -> Option<&std::path::Path> {
+        self.tls_key_path.as_deref()
+    }
+
+    /// Returns the bounded event queue capacity per streaming client.
+    pub(crate) const fn event_queue_capacity(&self) -> usize {
+        self.event_queue_capacity
+    }
+
+    /// Returns the H3 concurrent bidirectional stream limit.
+    pub(crate) const fn h3_max_concurrent_streams(&self) -> u32 {
+        self.h3_max_concurrent_streams
+    }
+
+    /// Returns the QUIC idle timeout for H3 connections.
+    pub(crate) const fn h3_idle_timeout(&self) -> Duration {
+        self.h3_idle_timeout
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            http_addr: DEFAULT_SERVER_HTTP_ADDR
+                .parse()
+                .expect("default HTTP server address must parse"),
+            h3_addr: DEFAULT_SERVER_H3_ADDR
+                .parse()
+                .expect("default H3 server address must parse"),
+            tls_cert_path: None,
+            tls_key_path: None,
+            event_queue_capacity: DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
+            h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
+        }
+    }
+}
+
 /// Controls optional terminal telemetry output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TelemetryConfig {
@@ -418,6 +538,22 @@ fn env_string(name: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn env_optional_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn env_parse_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {
+    let raw = env_string(name, default);
+    raw.parse()
+        .map_err(|error| anyhow::anyhow!("failed to parse {name}={raw:?}: {error}"))
+}
+
+fn env_parse_u32(name: &str, default: u32) -> Result<u32> {
+    parse_env(name, default)
 }
 
 fn env_model_list(name: &str) -> Option<Vec<String>> {

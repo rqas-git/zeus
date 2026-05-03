@@ -1,8 +1,8 @@
 # Agent Loop Architecture
 
-The agent loop is the per-session conversation runner used by the service and
-terminal harness. It keeps terminal I/O, model transport, and session state
-separate so the same core can sit behind future HTTP or streaming endpoints.
+The agent loop is the per-session conversation runner used by the service,
+terminal harness, and HTTP server. It keeps terminal I/O, network framing, model
+transport, and session state separate.
 
 ## Flow
 
@@ -58,8 +58,8 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
   deserialized once into typed argument structs.
 - Read-only tool calls are executed concurrently and their outputs are replayed
   to the model in one follow-up request.
-- Streaming uses async HTTP and SSE parsing, so future endpoints do not need to
-  block request workers on model I/O.
+- Streaming uses async HTTP and SSE parsing, so request workers do not block on
+  model I/O.
 - The service-level session locks keep ordered turns local to one session
   instead of serializing all sessions through one mutable service borrow.
 - Prompt-cache keys are stable per service/session/model namespace.
@@ -67,9 +67,9 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
 ## Events
 
 `AgentEvent` reports status changes, streamed assistant text, cache-health
-telemetry, tool-call start/completion, completed messages, and errors. This
-gives a future HTTP, WebSocket, or SSE frontend a clear boundary without
-coupling it to terminal output.
+telemetry, tool-call start/completion, completed messages, and errors. The
+terminal harness renders a subset to stdout, while the server converts events
+into named SSE frames over HTTP compatibility and HTTP/3 transports.
 
 ## Error Handling
 
@@ -94,3 +94,4 @@ compaction are intentionally out of scope until product behavior requires them.
 - [Configuration](CONFIGURATION.md)
 - [Context Window](CONTEXT-WINDOW.md)
 - [Terminal Harness](TERMINAL-HARNESS.md)
+- [Server](SERVER.md)

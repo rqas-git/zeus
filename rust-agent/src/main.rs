@@ -4,6 +4,7 @@ mod agent_loop;
 mod auth;
 mod client;
 mod config;
+mod server;
 mod service;
 #[cfg(test)]
 mod test_http;
@@ -29,11 +30,12 @@ use service::AgentService;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     match parse_cli_command(std::env::args().skip(1).collect())? {
         CliCommand::Interactive => run_agent(None).await,
         CliCommand::Prompt(message) => run_agent(Some(message)).await,
+        CliCommand::Serve => run_server().await,
         CliCommand::LoginDeviceCode => run_device_code_login().await,
         CliCommand::LoginStatus => run_login_status().await,
         CliCommand::Logout => run_logout().await,
@@ -46,6 +48,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         context,
         models,
         output,
+        server: _,
         telemetry,
     } = AppConfig::from_env()?;
     let auth = AuthManager::new_default()?;
@@ -59,6 +62,21 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         }
         None => run_interactive_loop(&service, session_id, output, telemetry).await,
     }
+}
+
+async fn run_server() -> Result<()> {
+    let AppConfig {
+        client,
+        context,
+        models,
+        output: _,
+        server,
+        telemetry,
+    } = AppConfig::from_env()?;
+    let auth = AuthManager::new_default()?;
+    let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
+    let service = AgentService::new(client, context, models);
+    server::serve(service, server).await
 }
 
 async fn run_device_code_login() -> Result<()> {
@@ -106,6 +124,7 @@ async fn run_logout() -> Result<()> {
 enum CliCommand {
     Interactive,
     Prompt(String),
+    Serve,
     LoginDeviceCode,
     LoginStatus,
     Logout,
@@ -118,6 +137,10 @@ fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
 
     match first.as_str() {
         "login" => parse_login_command(&args[1..]),
+        "serve" => {
+            anyhow::ensure!(args.len() == 1, "usage: rust-agent serve");
+            Ok(CliCommand::Serve)
+        }
         "logout" => {
             anyhow::ensure!(args.len() == 1, "usage: rust-agent logout");
             Ok(CliCommand::Logout)
@@ -182,7 +205,7 @@ async fn print_agent_response(
     telemetry: config::TelemetryConfig,
     message: String,
 ) -> Result<()> {
-    let mut stdout = io::stdout().lock();
+    let mut stdout = io::stdout();
     write!(stdout, "Assistant: ").context("failed to write assistant prompt")?;
     stdout.flush().context("failed to flush assistant prompt")?;
 

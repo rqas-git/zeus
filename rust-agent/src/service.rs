@@ -59,6 +59,11 @@ where
         self.model_config.allowed_models()
     }
 
+    /// Returns the configured default model for new sessions.
+    pub(crate) fn default_model(&self) -> &str {
+        self.model_config.default_model()
+    }
+
     /// Changes the selected model for future turns in a session.
     ///
     /// # Errors
@@ -95,7 +100,7 @@ where
         &self,
         session_id: SessionId,
         message: impl Into<String>,
-        emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
+        emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
         let session = self.session_or_insert_default(session_id)?;
         let mut agent = session.lock().await;
@@ -171,7 +176,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              selected_model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 assert_eq!(selected_model, "test-default");
                 match turn.load(Ordering::SeqCst) {
                     0 => {
@@ -219,7 +224,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              selected_model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 match turn.load(Ordering::SeqCst) {
                     0 => {
                         assert_eq!(selected_model, "test-default");
@@ -260,7 +265,9 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _selected_model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| Ok("unused".to_string()),
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                Ok("unused".to_string())
+            },
         );
         let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config());
 
@@ -373,12 +380,13 @@ mod tests {
     impl<F> ModelStreamer for FnStreamer<F>
     where
         F: for<'a> FnMut(
-            &'a [ConversationMessage<'a>],
-            &'a [ToolSpec],
-            bool,
-            &'a str,
-            &'a mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String>,
+                &'a [ConversationMessage<'a>],
+                &'a [ToolSpec],
+                bool,
+                &'a str,
+                &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+            ) -> Result<String>
+            + Send,
     {
         async fn stream_conversation<'a>(
             &'a self,
@@ -387,7 +395,7 @@ mod tests {
             parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
-            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
             let mut stream = self.stream.lock().expect("test streamer lock poisoned");
             stream(messages, tools, parallel_tool_calls, model, on_delta).map(ModelResponse::new)
@@ -408,7 +416,7 @@ mod tests {
             _parallel_tool_calls: bool,
             _session_id: SessionId,
             _model: &'a str,
-            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             update_max(&self.max_active, active);
@@ -435,7 +443,7 @@ mod tests {
             _parallel_tool_calls: bool,
             _session_id: SessionId,
             _model: &'a str,
-            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
             let call = self.started_calls.fetch_add(1, Ordering::SeqCst) + 1;
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;

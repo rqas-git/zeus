@@ -46,12 +46,33 @@ pub(crate) enum MessageRole {
     Assistant,
 }
 
+impl MessageRole {
+    /// Returns the wire label for this role.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+}
+
 /// Current execution state for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionStatus {
     Idle,
     Running,
     Failed,
+}
+
+impl SessionStatus {
+    /// Returns the wire label for this status.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// Message stored in the current session.
@@ -315,8 +336,8 @@ pub(crate) trait ModelStreamer {
         parallel_tool_calls: bool,
         session_id: SessionId,
         model: &'a str,
-        on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-    ) -> impl Future<Output = Result<ModelResponse>> + 'a;
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> impl Future<Output = Result<ModelResponse>> + Send + 'a;
 }
 
 /// Per-session runtime settings.
@@ -582,7 +603,7 @@ impl AgentLoop {
         &mut self,
         text: impl Into<String>,
         model: &impl ModelStreamer,
-        mut emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
+        mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
         anyhow::ensure!(
             self.store.status() != SessionStatus::Running,
@@ -634,7 +655,10 @@ impl AgentLoop {
         }
     }
 
-    fn begin_running(&mut self, emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>) -> Result<()> {
+    fn begin_running(
+        &mut self,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
+    ) -> Result<()> {
         self.store.set_status(SessionStatus::Running);
         if let Err(error) = emit(AgentEvent::StatusChanged {
             session_id: self.session_id(),
@@ -649,7 +673,7 @@ impl AgentLoop {
     fn set_status(
         &mut self,
         status: SessionStatus,
-        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         self.store.set_status(status);
         emit(AgentEvent::StatusChanged {
@@ -661,7 +685,7 @@ impl AgentLoop {
     async fn run_until_done(
         &mut self,
         model: &impl ModelStreamer,
-        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         for _ in 0..MAX_TOOL_ROUNDS {
             let tool_calls = self.run_once(model, emit).await?;
@@ -682,7 +706,7 @@ impl AgentLoop {
     async fn run_once(
         &mut self,
         model: &impl ModelStreamer,
-        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
@@ -735,7 +759,7 @@ impl AgentLoop {
     async fn execute_tool_calls(
         &self,
         tool_calls: Vec<ModelToolCall>,
-        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ToolExecution>> {
         let session_id = self.session_id();
         for tool_call in &tool_calls {
@@ -778,8 +802,8 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
 
     use super::*;
 
@@ -792,7 +816,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 assert_eq!(history.len(), 1);
                 on_delta("hi")?;
                 Ok("hi".to_string())
@@ -828,23 +852,23 @@ mod tests {
     #[tokio::test]
     async fn sends_full_history_on_later_turns() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let turn = Cell::new(0);
+        let turn = AtomicUsize::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                match turn.get() {
+             on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                match turn.load(Ordering::SeqCst) {
                     0 => {
                         assert_eq!(history.len(), 1);
-                        turn.set(1);
+                        turn.store(1, Ordering::SeqCst);
                         Ok("remembered".to_string())
                     }
                     1 => {
                         assert_eq!(history.len(), 3);
                         on_delta("rust-agent")?;
-                        turn.set(2);
+                        turn.store(2, Ordering::SeqCst);
                         Ok("rust-agent".to_string())
                     }
                     _ => unreachable!("unexpected turn"),
@@ -873,27 +897,27 @@ mod tests {
             ContextWindowConfig::new(3, 24),
             SessionConfig::new("test-model"),
         );
-        let turn = Cell::new(0);
+        let turn = AtomicUsize::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                match turn.get() {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                match turn.load(Ordering::SeqCst) {
                     0 => {
-                        turn.set(1);
+                        turn.store(1, Ordering::SeqCst);
                         Ok("first answer".to_string())
                     }
                     1 => {
-                        turn.set(2);
+                        turn.store(2, Ordering::SeqCst);
                         Ok("second answer".to_string())
                     }
                     2 => {
                         assert_eq!(history.len(), 2);
                         assert_eq!(history[0], ConversationMessage::assistant("second answer"));
                         assert_eq!(history[1], ConversationMessage::user("third user"));
-                        turn.set(3);
+                        turn.store(3, Ordering::SeqCst);
                         Ok("third answer".to_string())
                     }
                     _ => unreachable!("unexpected turn"),
@@ -926,14 +950,14 @@ mod tests {
             ContextWindowConfig::with_history_limits(10, 1024, 3, 1024),
             SessionConfig::new("test-model"),
         );
-        let turn = Cell::new(0);
+        let turn = AtomicUsize::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                let answer = match turn.get() {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                let answer = match turn.fetch_add(1, Ordering::SeqCst) {
                     0 => "first answer",
                     1 => "second answer",
                     2 => {
@@ -949,7 +973,6 @@ mod tests {
                     }
                     _ => unreachable!("unexpected turn"),
                 };
-                turn.set(turn.get() + 1);
                 Ok(answer.to_string())
             },
         );
@@ -980,21 +1003,21 @@ mod tests {
             ContextWindowConfig::default(),
             SessionConfig::new("first-model"),
         );
-        let turn = Cell::new(0);
+        let turn = AtomicUsize::new(0);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                match turn.get() {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                match turn.load(Ordering::SeqCst) {
                     0 => {
                         assert_eq!(model, "first-model");
-                        turn.set(1);
+                        turn.store(1, Ordering::SeqCst);
                     }
                     1 => {
                         assert_eq!(model, "second-model");
-                        turn.set(2);
+                        turn.store(2, Ordering::SeqCst);
                     }
                     _ => unreachable!("unexpected turn"),
                 }
@@ -1014,13 +1037,15 @@ mod tests {
 
         assert_eq!(agent.messages()[1].text(), "first-model");
         assert_eq!(agent.messages()[3].text(), "second-model");
-        assert_eq!(turn.get(), 2);
+        assert_eq!(turn.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
     async fn emits_cache_health_status_for_model_responses() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let streamer = CacheStreamer { turn: Cell::new(0) };
+        let streamer = CacheStreamer {
+            turn: AtomicUsize::new(0),
+        };
         let mut events = Vec::new();
 
         agent
@@ -1058,7 +1083,9 @@ mod tests {
     #[tokio::test]
     async fn executes_tool_calls_and_replays_outputs() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let streamer = ToolLoopStreamer { turn: Cell::new(0) };
+        let streamer = ToolLoopStreamer {
+            turn: AtomicUsize::new(0),
+        };
         let mut events = Vec::new();
 
         agent
@@ -1094,7 +1121,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 anyhow::bail!("backend failed")
             },
         );
@@ -1124,14 +1151,14 @@ mod tests {
     #[tokio::test]
     async fn user_message_publish_failure_rolls_back_submission() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let model_called = Cell::new(false);
+        let model_called = AtomicBool::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                model_called.set(true);
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                model_called.store(true, Ordering::SeqCst);
                 Ok("unused".to_string())
             },
         );
@@ -1154,7 +1181,7 @@ mod tests {
             .to_string();
 
         assert_eq!(error, "sink failed");
-        assert!(!model_called.get());
+        assert!(!model_called.load(Ordering::SeqCst));
         assert_eq!(agent.store.status(), SessionStatus::Idle);
         assert!(agent.messages().is_empty());
 
@@ -1163,7 +1190,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 assert_eq!(history, &[ConversationMessage::user("retry")]);
                 Ok("ok".to_string())
             },
@@ -1181,14 +1208,14 @@ mod tests {
     #[tokio::test]
     async fn running_status_publish_failure_does_not_stick_session_running() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let model_called = Cell::new(false);
+        let model_called = AtomicBool::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
-                model_called.set(true);
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                model_called.store(true, Ordering::SeqCst);
                 Ok("unused".to_string())
             },
         );
@@ -1211,7 +1238,7 @@ mod tests {
             .to_string();
 
         assert_eq!(error, "sink failed");
-        assert!(!model_called.get());
+        assert!(!model_called.load(Ordering::SeqCst));
         assert_eq!(agent.store.status(), SessionStatus::Idle);
         assert!(agent.messages().is_empty());
 
@@ -1220,7 +1247,7 @@ mod tests {
              _tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
                 assert_eq!(history, &[ConversationMessage::user("again")]);
                 Ok("ok".to_string())
             },
@@ -1268,13 +1295,13 @@ mod tests {
     }
 
     struct FnStreamer<F> {
-        stream: RefCell<F>,
+        stream: StdMutex<F>,
     }
 
     impl<F> FnStreamer<F> {
         fn new(stream: F) -> Self {
             Self {
-                stream: RefCell::new(stream),
+                stream: StdMutex::new(stream),
             }
         }
     }
@@ -1282,12 +1309,13 @@ mod tests {
     impl<F> ModelStreamer for FnStreamer<F>
     where
         F: for<'a> FnMut(
-            &'a [ConversationMessage<'a>],
-            &'a [ToolSpec],
-            bool,
-            &'a str,
-            &'a mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String>,
+                &'a [ConversationMessage<'a>],
+                &'a [ToolSpec],
+                bool,
+                &'a str,
+                &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+            ) -> Result<String>
+            + Send,
     {
         async fn stream_conversation<'a>(
             &'a self,
@@ -1296,15 +1324,15 @@ mod tests {
             parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
-            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
-            (self.stream.borrow_mut())(messages, tools, parallel_tool_calls, model, on_delta)
-                .map(ModelResponse::new)
+            let mut stream = self.stream.lock().expect("test streamer lock poisoned");
+            stream(messages, tools, parallel_tool_calls, model, on_delta).map(ModelResponse::new)
         }
     }
 
     struct CacheStreamer {
-        turn: Cell<usize>,
+        turn: AtomicUsize,
     }
 
     impl ModelStreamer for CacheStreamer {
@@ -1315,10 +1343,9 @@ mod tests {
             _parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
-            _on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
-            let turn = self.turn.get();
-            self.turn.set(turn + 1);
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
             let text = if turn == 0 {
                 "first answer"
             } else {
@@ -1343,7 +1370,7 @@ mod tests {
     }
 
     struct ToolLoopStreamer {
-        turn: Cell<usize>,
+        turn: AtomicUsize,
     }
 
     impl ModelStreamer for ToolLoopStreamer {
@@ -1354,10 +1381,9 @@ mod tests {
             parallel_tool_calls: bool,
             _session_id: SessionId,
             _model: &'a str,
-            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
-            let turn = self.turn.get();
-            self.turn.set(turn + 1);
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
             match turn {
                 0 => {
                     assert!(!tools.is_empty());
