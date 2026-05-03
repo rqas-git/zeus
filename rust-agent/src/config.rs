@@ -25,6 +25,8 @@ const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
 const DEFAULT_SERVER_HTTP_ADDR: &str = "127.0.0.1:4096";
 const DEFAULT_SERVER_H3_ADDR: &str = "127.0.0.1:4433";
 const DEFAULT_SERVER_EVENT_QUEUE_CAPACITY: usize = 1024;
+const DEFAULT_SERVER_MAX_SESSIONS: usize = 128;
+const DEFAULT_SERVER_MAX_EVENT_CHANNELS: usize = 128;
 const DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS: u32 = 256;
 const DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_TOOL_MODE: &str = "read-only";
@@ -408,7 +410,10 @@ pub(crate) struct ServerConfig {
     h3_addr: SocketAddr,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    auth_token: Option<String>,
     event_queue_capacity: usize,
+    max_sessions: usize,
+    max_event_channels: usize,
     h3_max_concurrent_streams: u32,
     h3_idle_timeout: Duration,
 }
@@ -427,9 +432,20 @@ impl ServerConfig {
             h3_addr: env_parse_socket_addr("RUST_AGENT_SERVER_H3_ADDR", DEFAULT_SERVER_H3_ADDR)?,
             tls_cert_path: env_optional_path("RUST_AGENT_SERVER_TLS_CERT"),
             tls_key_path: env_optional_path("RUST_AGENT_SERVER_TLS_KEY"),
+            auth_token: env_optional_string("RUST_AGENT_SERVER_TOKEN"),
             event_queue_capacity: env_parse_usize(
                 "RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY",
                 DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            )?
+            .max(1),
+            max_sessions: env_parse_usize(
+                "RUST_AGENT_SERVER_MAX_SESSIONS",
+                DEFAULT_SERVER_MAX_SESSIONS,
+            )?
+            .max(1),
+            max_event_channels: env_parse_usize(
+                "RUST_AGENT_SERVER_MAX_EVENT_CHANNELS",
+                DEFAULT_SERVER_MAX_EVENT_CHANNELS,
             )?
             .max(1),
             h3_max_concurrent_streams: env_parse_u32(
@@ -452,7 +468,10 @@ impl ServerConfig {
             h3_addr,
             tls_cert_path: None,
             tls_key_path: None,
+            auth_token: Some("test-token".to_string()),
             event_queue_capacity: DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            max_sessions: DEFAULT_SERVER_MAX_SESSIONS,
+            max_event_channels: DEFAULT_SERVER_MAX_EVENT_CHANNELS,
             h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
             h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
         }
@@ -478,9 +497,24 @@ impl ServerConfig {
         self.tls_key_path.as_deref()
     }
 
+    /// Returns the configured server bearer token, if one was supplied.
+    pub(crate) fn auth_token(&self) -> Option<&str> {
+        self.auth_token.as_deref()
+    }
+
     /// Returns the bounded event queue capacity per streaming client.
     pub(crate) const fn event_queue_capacity(&self) -> usize {
         self.event_queue_capacity
+    }
+
+    /// Returns the maximum number of sessions retained by server mode.
+    pub(crate) const fn max_sessions(&self) -> usize {
+        self.max_sessions
+    }
+
+    /// Returns the maximum number of session event channels retained by server mode.
+    pub(crate) const fn max_event_channels(&self) -> usize {
+        self.max_event_channels
     }
 
     /// Returns the H3 concurrent bidirectional stream limit.
@@ -505,7 +539,10 @@ impl Default for ServerConfig {
                 .expect("default H3 server address must parse"),
             tls_cert_path: None,
             tls_key_path: None,
+            auth_token: None,
             event_queue_capacity: DEFAULT_SERVER_EVENT_QUEUE_CAPACITY,
+            max_sessions: DEFAULT_SERVER_MAX_SESSIONS,
+            max_event_channels: DEFAULT_SERVER_MAX_EVENT_CHANNELS,
             h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
             h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
         }
@@ -580,6 +617,13 @@ fn env_optional_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn env_optional_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn env_parse_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {

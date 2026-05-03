@@ -90,7 +90,8 @@ async fn run_server() -> Result<()> {
     let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
     let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
-    let service = AgentService::with_tools(client, context, models, tools);
+    let service = AgentService::with_tools(client, context, models, tools)
+        .with_session_limit(server.max_sessions());
     server::serve(service, server).await
 }
 

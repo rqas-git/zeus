@@ -1,6 +1,7 @@
 //! Native HTTP/3 and HTTP compatibility server.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ use axum::body::Body;
 use axum::extract::Path as AxumPath;
 use axum::extract::State;
 use axum::http::header;
+use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::Request;
 use axum::http::Response;
@@ -27,6 +29,7 @@ use axum::response::Json;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
+use base64::Engine;
 use bytes::Bytes;
 use rcgen::CertifiedKey;
 use serde::Deserialize;
@@ -48,6 +51,7 @@ use crate::service::AgentService;
 const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const GENERATED_TOKEN_BYTES: usize = 32;
 
 /// Runs the local server until interrupted.
 ///
@@ -62,7 +66,20 @@ where
     let h3_addr = h3_endpoint
         .local_addr()
         .context("failed to read H3 listener address")?;
-    let state = ServerState::new(service, config.event_queue_capacity(), h3_addr);
+    let auth = ServerAuth::from_config(config.auth_token())?;
+    if auth.is_generated() {
+        eprintln!("rust-agent server bearer token: {}", auth.token());
+    } else {
+        eprintln!("rust-agent server bearer token loaded from RUST_AGENT_SERVER_TOKEN");
+    }
+    let state = ServerState::with_limits(
+        service,
+        config.event_queue_capacity(),
+        h3_addr,
+        auth,
+        config.max_sessions(),
+        config.max_event_channels(),
+    );
     let app = router(state);
     let http_addr = config.http_addr();
     let http_app = app.clone();
@@ -88,6 +105,7 @@ where
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
+        .route("/sessions", post(create_session::<M>))
         .route(
             "/sessions/{session_id}/model",
             get(session_model::<M>).put(set_session_model::<M>),
@@ -98,6 +116,10 @@ where
         )
         .route("/sessions/{session_id}/events", get(session_events::<M>))
         .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth::<M>,
+        ))
         .layer(middleware::from_fn_with_state(state, add_alt_svc::<M>))
 }
 
@@ -244,6 +266,8 @@ async fn handle_h3_connection(incoming: quinn::Incoming, app: Router) -> Result<
 struct ServerState<M> {
     service: Arc<AgentService<M>>,
     events: EventBus,
+    sessions: SessionRegistry,
+    auth: ServerAuth,
     event_queue_capacity: usize,
     alt_svc: HeaderValue,
 }
@@ -253,6 +277,8 @@ impl<M> Clone for ServerState<M> {
         Self {
             service: Arc::clone(&self.service),
             events: self.events.clone(),
+            sessions: self.sessions.clone(),
+            auth: self.auth.clone(),
             event_queue_capacity: self.event_queue_capacity,
             alt_svc: self.alt_svc.clone(),
         }
@@ -260,18 +286,190 @@ impl<M> Clone for ServerState<M> {
 }
 
 impl<M> ServerState<M> {
+    #[cfg(test)]
     fn new(
         service: Arc<AgentService<M>>,
         event_queue_capacity: usize,
         h3_addr: SocketAddr,
     ) -> Self {
+        Self::with_limits(
+            service,
+            event_queue_capacity,
+            h3_addr,
+            ServerAuth::for_test(),
+            usize::MAX,
+            usize::MAX,
+        )
+    }
+
+    fn with_limits(
+        service: Arc<AgentService<M>>,
+        event_queue_capacity: usize,
+        h3_addr: SocketAddr,
+        auth: ServerAuth,
+        max_sessions: usize,
+        max_event_channels: usize,
+    ) -> Self {
         let alt_svc = HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", h3_addr.port()))
             .expect("generated Alt-Svc header must be valid");
         Self {
             service,
-            events: EventBus::new(event_queue_capacity),
+            events: EventBus::new(event_queue_capacity, max_event_channels),
+            sessions: SessionRegistry::new(max_sessions),
+            auth,
             event_queue_capacity,
             alt_svc,
+        }
+    }
+
+    fn require_session(&self, session_id: u64) -> Result<SessionId> {
+        let session_id = SessionId::new(session_id);
+        anyhow::ensure!(self.sessions.contains(session_id)?, "session not found");
+        Ok(session_id)
+    }
+
+    #[cfg(test)]
+    fn register_session_for_test(&self, session_id: SessionId) {
+        self.sessions
+            .register_for_test(session_id)
+            .expect("test session registration should succeed");
+    }
+}
+
+#[derive(Clone)]
+struct ServerAuth {
+    token: Arc<str>,
+    generated: bool,
+}
+
+impl ServerAuth {
+    fn from_config(configured: Option<&str>) -> Result<Self> {
+        match configured {
+            Some(token) => {
+                let token = token.trim();
+                anyhow::ensure!(!token.is_empty(), "server bearer token cannot be empty");
+                Ok(Self {
+                    token: Arc::from(token),
+                    generated: false,
+                })
+            }
+            None => Ok(Self {
+                token: Arc::from(generate_bearer_token()?),
+                generated: true,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            token: Arc::from("test-token"),
+            generated: false,
+        }
+    }
+
+    fn token(&self) -> &str {
+        &self.token
+    }
+
+    const fn is_generated(&self) -> bool {
+        self.generated
+    }
+
+    fn authorizes(&self, headers: &HeaderMap) -> bool {
+        let Some(value) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return false;
+        };
+        let Some((scheme, token)) = value.split_once(' ') else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("Bearer")
+            && constant_time_eq(token.as_bytes(), self.token.as_bytes())
+    }
+}
+
+fn generate_bearer_token() -> Result<String> {
+    let mut bytes = [0u8; GENERATED_TOKEN_BYTES];
+    getrandom::fill(&mut bytes).context("failed to generate server bearer token")?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left = left.get(index).copied().unwrap_or(0);
+        let right = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[derive(Clone)]
+struct SessionRegistry {
+    sessions: Arc<Mutex<HashSet<SessionId>>>,
+    max_sessions: usize,
+}
+
+impl SessionRegistry {
+    fn new(max_sessions: usize) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+            max_sessions: max_sessions.max(1),
+        }
+    }
+
+    fn reserve_random(&self) -> Result<SessionId> {
+        for _ in 0..128 {
+            let session_id = random_session_id()?;
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+            anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
+            if sessions.insert(session_id) {
+                return Ok(session_id);
+            }
+        }
+        anyhow::bail!("failed to allocate unique session id")
+    }
+
+    fn contains(&self, session_id: SessionId) -> Result<bool> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?
+            .contains(&session_id))
+    }
+
+    fn release(&self, session_id: SessionId) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(&session_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn register_for_test(&self, session_id: SessionId) -> Result<()> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+        anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
+        sessions.insert(session_id);
+        Ok(())
+    }
+}
+
+fn random_session_id() -> Result<SessionId> {
+    loop {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).context("failed to generate session id")?;
+        let value = u64::from_le_bytes(bytes);
+        if value != 0 {
+            return Ok(SessionId::new(value));
         }
     }
 }
@@ -280,13 +478,15 @@ impl<M> ServerState<M> {
 struct EventBus {
     sessions: Arc<Mutex<HashMap<SessionId, broadcast::Sender<ServerEvent>>>>,
     capacity: usize,
+    max_channels: usize,
 }
 
 impl EventBus {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, max_channels: usize) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             capacity,
+            max_channels: max_channels.max(1),
         }
     }
 
@@ -295,8 +495,9 @@ impl EventBus {
     }
 
     fn publish(&self, event: ServerEvent) -> Result<()> {
-        let sender = self.channel(event.session_id())?;
-        let _ = sender.send(event);
+        if let Some(sender) = self.existing_channel(event.session_id())? {
+            let _ = sender.send(event);
+        }
         Ok(())
     }
 
@@ -305,11 +506,34 @@ impl EventBus {
             .sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?;
-        Ok(sessions
-            .entry(session_id)
-            .or_insert_with(|| broadcast::channel(self.capacity).0)
-            .clone())
+        cleanup_empty_event_channels(&mut sessions);
+        if let Some(sender) = sessions.get(&session_id) {
+            return Ok(sender.clone());
+        }
+        anyhow::ensure!(
+            sessions.len() < self.max_channels,
+            "event channel limit exceeded"
+        );
+        let (sender, _receiver) = broadcast::channel(self.capacity);
+        sessions.insert(session_id, sender.clone());
+        Ok(sender)
     }
+
+    fn existing_channel(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<broadcast::Sender<ServerEvent>>> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?;
+        cleanup_empty_event_channels(&mut sessions);
+        Ok(sessions.get(&session_id).cloned())
+    }
+}
+
+fn cleanup_empty_event_channels(sessions: &mut HashMap<SessionId, broadcast::Sender<ServerEvent>>) {
+    sessions.retain(|_, sender| sender.receiver_count() > 0);
 }
 
 async fn add_alt_svc<M>(
@@ -326,6 +550,33 @@ where
         .entry(header::ALT_SVC)
         .or_insert_with(|| state.alt_svc.clone());
     response
+}
+
+async fn require_auth<M>(
+    State(state): State<ServerState<M>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body>
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    if is_public_path(request.uri().path()) || state.auth.authorizes(request.headers()) {
+        return next.run(request).await;
+    }
+    unauthorized_response()
+}
+
+fn is_public_path(path: &str) -> bool {
+    path == "/" || path == "/healthz"
+}
+
+fn unauthorized_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::WWW_AUTHENTICATE, "Bearer")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"error":"missing or invalid bearer token"}"#))
+        .expect("unauthorized response headers must be valid")
 }
 
 async fn root() -> impl IntoResponse {
@@ -349,6 +600,25 @@ where
     })
 }
 
+async fn create_session<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match state.sessions.reserve_random() {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
+    };
+    if let Err(error) = state.service.create_session(session_id) {
+        state.sessions.release(session_id);
+        return error_response(StatusCode::TOO_MANY_REQUESTS, error);
+    }
+    Json(CreateSessionResponse {
+        session_id: session_id.get(),
+        model: state.service.default_model().to_string(),
+    })
+    .into_response()
+}
+
 async fn session_model<M>(
     State(state): State<ServerState<M>>,
     AxumPath(session_id): AxumPath<u64>,
@@ -356,11 +626,11 @@ async fn session_model<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    match state
-        .service
-        .session_model(SessionId::new(session_id))
-        .await
-    {
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    match state.service.session_model(session_id).await {
         Ok(model) => Json(SessionModelResponse { model }).into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
@@ -374,10 +644,11 @@ async fn set_session_model<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    match state
-        .service
-        .set_session_model(SessionId::new(session_id), &request.model)
-    {
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    match state.service.set_session_model(session_id, &request.model) {
         Ok(model) => Json(SessionModelResponse { model }).into_response(),
         Err(error) => error_response(StatusCode::BAD_REQUEST, error),
     }
@@ -398,7 +669,10 @@ where
         );
     }
 
-    let session_id = SessionId::new(session_id);
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
     let (tx, rx) = mpsc::channel(state.event_queue_capacity);
     let service = Arc::clone(&state.service);
     let events = state.events.clone();
@@ -447,7 +721,10 @@ async fn session_events<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    let session_id = SessionId::new(session_id);
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
     match state.events.subscribe(session_id) {
         Ok(receiver) => sse_from_broadcast(session_id, receiver),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
@@ -742,6 +1019,12 @@ struct ModelsResponse {
 }
 
 #[derive(Serialize)]
+struct CreateSessionResponse {
+    session_id: u64,
+    model: String,
+}
+
+#[derive(Serialize)]
 struct SessionModelResponse {
     model: String,
 }
@@ -782,6 +1065,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_AUTHORIZATION: &str = "Bearer test-token";
+
     #[tokio::test]
     async fn serves_health_and_models_over_router() {
         let service = Arc::new(AgentService::new(
@@ -812,6 +1097,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/models")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -825,6 +1111,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_protected_routes_without_bearer_token() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn creates_random_sessions_before_turn_routes_are_available() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let app = router(state);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(created.status(), StatusCode::OK);
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = created["session_id"].as_u64().unwrap();
+        assert_ne!(session_id, 0);
+        assert_eq!(created["model"], "test-default");
+
+        let model = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{session_id}/model"))
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(model.into_body(), usize::MAX).await.unwrap();
+
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"model":"test-default"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_numeric_sessions() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/7/model")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"error":"session not found"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_too_many_requests_when_session_limit_is_reached() {
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("ok", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default"]).unwrap(),
+            )
+            .with_session_limit(1),
+        );
+        let state = ServerState::with_limits(
+            service,
+            16,
+            "127.0.0.1:4433".parse().unwrap(),
+            ServerAuth::for_test(),
+            1,
+            usize::MAX,
+        );
+        let app = router(state);
+
+        for expected in [StatusCode::OK, StatusCode::TOO_MANY_REQUESTS] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/sessions")
+                        .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_error_when_event_channel_limit_is_reached() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::with_limits(
+            service,
+            16,
+            "127.0.0.1:4433".parse().unwrap(),
+            ServerAuth::for_test(),
+            usize::MAX,
+            1,
+        );
+        state.register_session_for_test(SessionId::new(1));
+        state.register_session_for_test(SessionId::new(2));
+        let app = router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/1/events")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/2/events")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(second.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        drop(first);
+    }
+
+    #[tokio::test]
     async fn streams_turn_events_as_sse() {
         let service = Arc::new(AgentService::new(
             StaticStreamer::new("hello", ["hel", "lo"]),
@@ -832,12 +1302,14 @@ mod tests {
             ModelConfig::new("test-default", ["test-default"]).unwrap(),
         ));
         let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
         let app = router(state);
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"message":"hello"}"#))
                     .unwrap(),
@@ -866,12 +1338,14 @@ mod tests {
             ModelConfig::new("test-default", ["test-default"]).unwrap(),
         ));
         let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
         let app = router(state);
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"message":"hello"}"#))
                     .unwrap(),
@@ -900,6 +1374,7 @@ mod tests {
             ModelConfig::new("test-default", ["test-default"]).unwrap(),
         ));
         let state = ServerState::new(service, 5, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
         let app = router(state);
 
         let first_response = app
@@ -908,6 +1383,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"message":"read the manifest"}"#))
                     .unwrap(),
@@ -921,6 +1397,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"message":"continue"}"#))
                     .unwrap(),

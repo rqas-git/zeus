@@ -24,6 +24,7 @@ pub(crate) struct AgentService<M> {
     context_window: ContextWindowConfig,
     model_config: ModelConfig,
     tools: ToolRegistry,
+    max_sessions: usize,
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
 }
 
@@ -54,8 +55,37 @@ where
             context_window,
             model_config,
             tools,
+            max_sessions: usize::MAX,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Sets the maximum number of retained sessions.
+    pub(crate) fn with_session_limit(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions.max(1);
+        self
+    }
+
+    /// Creates an idle session with the default model.
+    ///
+    /// # Errors
+    /// Returns an error when the session map is full or cannot be locked.
+    pub(crate) fn create_session(&self, session_id: SessionId) -> Result<()> {
+        let mut sessions = self.lock_sessions()?;
+        if sessions.contains_key(&session_id) {
+            return Ok(());
+        }
+        self.ensure_can_insert_session(&sessions)?;
+        sessions.insert(
+            session_id,
+            Self::new_session(
+                session_id,
+                self.context_window,
+                SessionConfig::new(self.model_config.default_model()),
+                self.tools.clone(),
+            ),
+        );
+        Ok(())
     }
 
     /// Returns the model selected for a session, or the default for a new session.
@@ -85,17 +115,20 @@ where
         let model = self.model_config.allowed_model(model)?.to_string();
         let session = {
             let mut sessions = self.lock_sessions()?;
-            match sessions.entry(session_id) {
-                std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(Self::new_session(
+            if let Some(session) = sessions.get(&session_id) {
+                Arc::clone(session)
+            } else {
+                self.ensure_can_insert_session(&sessions)?;
+                sessions.insert(
+                    session_id,
+                    Self::new_session(
                         session_id,
                         self.context_window,
                         SessionConfig::new(model.clone()),
                         self.tools.clone(),
-                    ));
-                    return Ok(model);
-                }
+                    ),
+                );
+                return Ok(model);
             }
         };
 
@@ -127,16 +160,18 @@ where
 
     fn session_or_insert_default(&self, session_id: SessionId) -> Result<SharedSession> {
         let mut sessions = self.lock_sessions()?;
-        Ok(Arc::clone(sessions.entry(session_id).or_insert_with(
-            || {
-                Self::new_session(
-                    session_id,
-                    self.context_window,
-                    SessionConfig::new(self.model_config.default_model()),
-                    self.tools.clone(),
-                )
-            },
-        )))
+        if let Some(session) = sessions.get(&session_id) {
+            return Ok(Arc::clone(session));
+        }
+        self.ensure_can_insert_session(&sessions)?;
+        let session = Self::new_session(
+            session_id,
+            self.context_window,
+            SessionConfig::new(self.model_config.default_model()),
+            self.tools.clone(),
+        );
+        sessions.insert(session_id, Arc::clone(&session));
+        Ok(session)
     }
 
     fn new_session(
@@ -160,6 +195,14 @@ where
             .lock()
             .map_err(|_| anyhow::anyhow!("session map lock was poisoned"))
             .context("failed to lock session map")
+    }
+
+    fn ensure_can_insert_session(
+        &self,
+        sessions: &HashMap<SessionId, SharedSession>,
+    ) -> Result<()> {
+        anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
+        Ok(())
     }
 
     /// Returns the number of sessions held in memory.
@@ -299,6 +342,30 @@ mod tests {
             service.session_model(SessionId::new(1)).await.unwrap(),
             "test-default"
         );
+    }
+
+    #[test]
+    fn enforces_configured_session_limit() {
+        let model = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _selected_model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                Ok("unused".to_string())
+            },
+        );
+        let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
+            .with_session_limit(1);
+
+        service.create_session(SessionId::new(1)).unwrap();
+        let error = service
+            .create_session(SessionId::new(2))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("session limit exceeded"));
+        assert_eq!(service.session_count().unwrap(), 1);
     }
 
     #[tokio::test]

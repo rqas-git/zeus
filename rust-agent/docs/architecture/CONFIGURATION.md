@@ -35,9 +35,12 @@ configuration.
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
 - `RUST_AGENT_SERVER_HTTP_ADDR`
 - `RUST_AGENT_SERVER_H3_ADDR`
+- `RUST_AGENT_SERVER_TOKEN`
 - `RUST_AGENT_SERVER_TLS_CERT`
 - `RUST_AGENT_SERVER_TLS_KEY`
 - `RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY`
+- `RUST_AGENT_SERVER_MAX_SESSIONS`
+- `RUST_AGENT_SERVER_MAX_EVENT_CHANNELS`
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_CACHE_HEALTH`
@@ -57,8 +60,8 @@ configuration.
 - Configuration is loaded once, not per turn.
 - Model changes validate against an in-memory allowlist.
 - Prompt, history, and output limits are plain copyable values.
-- Server bind addresses, queue capacity, stream limits, and idle timeout are
-  loaded once before listeners start.
+- Server bind addresses, bearer token, session bounds, queue capacity, stream
+  limits, and idle timeout are loaded once before listeners start.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
@@ -68,8 +71,10 @@ configuration.
 
 ## Current Scope
 
-Configuration is environment-only. Auth tokens are stored separately in
-`auth.json`. HTTP/3 uses a generated self-signed development certificate unless
+Configuration is environment-only. ChatGPT auth tokens are stored separately in
+`auth.json`; `RUST_AGENT_SERVER_TOKEN` is the local server bearer token. HTTP/3
+uses a generated self-signed development certificate unless
 `RUST_AGENT_SERVER_TLS_CERT` and `RUST_AGENT_SERVER_TLS_KEY` are set together.
-Tool permissions are process-wide. File config, dynamic reload, and per-request
-overrides should be added only when endpoint behavior requires them.
+Tool permissions and server route authentication are process-wide. File config,
+dynamic reload, and per-request overrides should be added only when endpoint
+behavior requires them.

@@ -10,24 +10,32 @@ router through both HTTP compatibility and native HTTP/3 transports.
 2. Server startup initializes the FFF scanner on a background blocking worker
    before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
-   identity, event queue capacity, QUIC stream limits, and idle timeout.
+   identity, bearer token, session bounds, event queue capacity, QUIC stream
+   limits, and idle timeout.
 4. One Axum router is built with shared `ServerState`.
 5. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
 6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
 7. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
-8. Turn requests submit work to `AgentService` and stream named SSE frames.
+8. Clients create random server-issued sessions before using session routes.
+9. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
 - `GET /` returns server identity and supported protocols.
 - `GET /healthz` returns a lightweight health response.
+- `POST /sessions` creates a random session and returns its current model.
 - `GET /models` returns the default model and allowed model list.
 - `GET /sessions/{session_id}/model` returns the session model.
 - `PUT /sessions/{session_id}/model` changes the session model when idle.
 - `POST /sessions/{session_id}/turns:stream` submits a user message and returns
   the turn as SSE.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
+
+`GET /` and `GET /healthz` are public. All other routes require
+`Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a stable
+token; otherwise startup prints a generated token to stderr. Numeric session IDs
+must come from `POST /sessions`.
 
 ## Transport
 
@@ -76,13 +84,17 @@ Important event names include:
   configurable.
 - The event bus is per session, so unrelated sessions do not share broadcast
   receivers.
+- Session and event-channel counts are bounded to cap process-local memory
+  growth under repeated requests.
 
 ## Current Scope
 
-The server is process-local and unauthenticated on its listening sockets. Bind to
-loopback by default, and put authentication, authorization, persistence,
-cancellation, and multi-process coordination behind explicit product decisions.
-Use `workspace-write` only for trusted local deployments because any client that
-can reach the server can ask the model to edit workspace files. WebSocket
-endpoints are not implemented because SSE matches the current server-to-client
-event flow with less protocol overhead.
+The server is process-local and uses one bearer token for non-health routes.
+Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
+stable token, and treat the generated token as a local-development convenience.
+Sessions are in-memory, random, and process-local; persistence, cancellation,
+per-user authorization, and multi-process coordination are not implemented. Use
+`workspace-write` only for trusted local deployments because any bearer-token
+holder can ask the model to edit workspace files. WebSocket endpoints are not
+implemented because SSE matches the current server-to-client event flow with
+less protocol overhead.

@@ -41,7 +41,7 @@ Run the native HTTP/3 server from the repository root:
 
 ```bash
 cd /Users/ajc/rust-agent
-cargo run -- serve
+RUST_AGENT_SERVER_TOKEN=dev-token cargo run -- serve
 ```
 
 By default this starts:
@@ -52,24 +52,33 @@ By default this starts:
 The HTTP compatibility responses advertise the HTTP/3 endpoint with `Alt-Svc`.
 When TLS files are not configured, the HTTP/3 listener generates a self-signed
 certificate for local development.
+Set `RUST_AGENT_SERVER_TOKEN` for a stable bearer token. If it is unset, server
+startup prints a generated bearer token.
 
 Useful smoke checks:
 
 ```bash
 curl -s http://127.0.0.1:4096/healthz
 curl --http3 -k https://127.0.0.1:4433/healthz
-curl -N -H 'content-type: application/json' \
+SESSION_ID=$(curl -s -X POST \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  http://127.0.0.1:4096/sessions | sed -E 's/.*"session_id":([0-9]+).*/\1/')
+curl -N -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  -H 'content-type: application/json' \
   -d '{"message":"Say hello in one sentence"}' \
-  http://127.0.0.1:4096/sessions/1/turns:stream
+  "http://127.0.0.1:4096/sessions/$SESSION_ID/turns:stream"
 ```
 
 Server configuration:
 
 - `RUST_AGENT_SERVER_HTTP_ADDR`
 - `RUST_AGENT_SERVER_H3_ADDR`
+- `RUST_AGENT_SERVER_TOKEN`
 - `RUST_AGENT_SERVER_TLS_CERT`
 - `RUST_AGENT_SERVER_TLS_KEY`
 - `RUST_AGENT_SERVER_EVENT_QUEUE_CAPACITY`
+- `RUST_AGENT_SERVER_MAX_SESSIONS`
+- `RUST_AGENT_SERVER_MAX_EVENT_CHANNELS`
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 
