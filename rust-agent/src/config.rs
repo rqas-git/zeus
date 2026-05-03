@@ -698,8 +698,9 @@ fn parse_tool_policy(raw: &str) -> Result<ToolPolicy> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "read-only" | "read_only" | "readonly" => Ok(ToolPolicy::ReadOnly),
         "workspace-write" | "workspace_write" | "write" => Ok(ToolPolicy::WorkspaceWrite),
+        "workspace-exec" | "workspace_exec" | "exec" => Ok(ToolPolicy::WorkspaceExec),
         _ => anyhow::bail!(
-            "failed to parse RUST_AGENT_TOOL_MODE={raw:?}: expected read-only or workspace-write"
+            "failed to parse RUST_AGENT_TOOL_MODE={raw:?}: expected read-only, workspace-write, or workspace-exec"
         ),
     }
 }
@@ -729,6 +730,10 @@ mod tests {
         assert_eq!(
             parse_tool_policy("workspace-write").unwrap(),
             ToolPolicy::WorkspaceWrite
+        );
+        assert_eq!(
+            parse_tool_policy("workspace-exec").unwrap(),
+            ToolPolicy::WorkspaceExec
         );
         assert!(parse_tool_policy("network").is_err());
     }

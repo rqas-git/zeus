@@ -94,6 +94,19 @@ RUST_AGENT_TOOL_MODE=workspace-write cargo run -- "Update the requested file"
 `workspace-write` exposes `apply_patch` for workspace-confined UTF-8 file edits.
 Use it only for trusted local sessions, especially in server mode.
 
+Enable trusted command execution with:
+
+```bash
+cd /Users/ajc/rust-agent
+RUST_AGENT_TOOL_MODE=workspace-exec cargo run -- "Run the relevant checks"
+```
+
+`workspace-exec` exposes `workspace-write` tools plus `exec_command` and
+dedicated `git_status`, `git_diff`, `git_log`, and `git_commit` wrappers.
+`exec_command` runs shell commands from the workspace but rejects direct `git`
+invocations; use the git wrappers for repository operations. Use
+`workspace-exec` only for trusted local sessions.
+
 ## Authentication
 
 The application owns its ChatGPT login state at `~/.rust-agent/auth.json` by default.

@@ -36,8 +36,9 @@ transport, and session state separate.
   search. In `workspace-write` mode it also exposes `apply_patch` for
   workspace-confined UTF-8 file edits. FFF index initialization is lazy by
   default, but callers can start the shared scanner on a background blocking
-  worker before any tool request. It executes tool batches in parallel when
-  every requested tool is marked parallel-safe.
+  worker before any tool request. In `workspace-exec` mode it also exposes a
+  bounded shell command tool plus dedicated git wrappers. It executes tool
+  batches in parallel when every requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
 - `AgentService` holds only a per-session async lock while a turn streams, so
@@ -74,6 +75,9 @@ transport, and session state separate.
 - `apply_patch` is sequential, parses bounded patch input, validates all touched
   paths before writing, caps target file size, and replaces individual files via
   temporary-file rename.
+- `exec_command` and the git wrappers are sequential, timeout-bounded, and
+  return capped stdout and stderr. `exec_command` rejects direct git executable
+  tokens so repository operations flow through the dedicated wrappers.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session
@@ -100,10 +104,10 @@ while a turn is running.
 
 Conversation history is recent and in memory only. The default built-in tool set
 is read-only (`read_file`, `list_dir`, `search_files`, and `search_text`).
-`RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`; shell tools still
-need an explicit execution policy. Persistence, cancellation, and semantic
-context compaction are intentionally out of scope until product behavior
-requires them.
+`RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
+`RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution plus
+git wrappers. Persistence, cancellation, and semantic context compaction are
+intentionally out of scope until product behavior requires them.
 
 ## Related Docs
 

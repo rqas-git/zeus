@@ -66,6 +66,10 @@ configuration.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
   to expose the `apply_patch` file editing tool.
+- Set `RUST_AGENT_TOOL_MODE=workspace-exec` to expose `workspace-write` tools,
+  a bounded `exec_command` shell tool, and dedicated git wrappers. The shell
+  tool rejects direct `git` executable tokens; use `git_status`, `git_diff`,
+  `git_log`, and `git_commit` for repository operations.
 - `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,
   rust-agent uses `~/.rust-agent/auth.json`.
 

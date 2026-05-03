@@ -27,7 +27,8 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 - `DeltaWriter` batches assistant text deltas.
 - Cache-health telemetry is opt-in and stays off stdout.
 - Tool mode is loaded once at startup; `workspace-write` exposes `apply_patch`
-  to both one-shot and interactive terminal sessions.
+  to both one-shot and interactive terminal sessions. `workspace-exec` also
+  exposes bounded shell command execution and dedicated git wrappers.
 - `AgentService` owns session state and model execution.
 - `ChatGptClient` owns remote model I/O.
 
@@ -40,6 +41,8 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
   scanning if it is still running.
 - One-shot prompt mode does not prewarm FFF, so prompts that do not need search
   avoid the index initialization cost.
+- Shell command execution is opt-in through `workspace-exec`; direct git
+  invocations are rejected by `exec_command` and must use the git wrappers.
 - Model changes reuse the same service and transport client.
 - The binary uses Tokio's multi-threaded runtime so server mode can run
   concurrent listeners and request tasks.

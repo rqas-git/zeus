@@ -72,7 +72,8 @@ Important event names include:
 
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
 - Tool policy is loaded once at startup. The default `read-only` mode exposes no
-  write tools; `workspace-write` exposes `apply_patch`.
+  write tools; `workspace-write` exposes `apply_patch`; `workspace-exec` exposes
+  trusted local shell command execution and dedicated git wrappers.
 - Server startup initializes the shared FFF search index in the background. If a
   request reaches an FFF-backed tool before scanning completes, that tool is the
   path that waits on a blocking worker and then runs against the ready index.
@@ -94,7 +95,7 @@ Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
 stable token, and treat the generated token as a local-development convenience.
 Sessions are in-memory, random, and process-local; persistence, cancellation,
 per-user authorization, and multi-process coordination are not implemented. Use
-`workspace-write` only for trusted local deployments because any bearer-token
-holder can ask the model to edit workspace files. WebSocket endpoints are not
-implemented because SSE matches the current server-to-client event flow with
-less protocol overhead.
+`workspace-write` and `workspace-exec` only for trusted local deployments because
+any bearer-token holder can ask the model to edit workspace files or run local
+commands. WebSocket endpoints are not implemented because SSE matches the
+current server-to-client event flow with less protocol overhead.
