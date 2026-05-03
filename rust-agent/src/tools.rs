@@ -1,6 +1,8 @@
 //! Built-in tool registry and execution.
 
+use std::collections::BinaryHeap;
 use std::io::ErrorKind;
+use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -32,12 +34,14 @@ use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::agent_loop::ModelToolCall;
 
 const READ_FILE_TOOL: &str = "read_file";
+const READ_FILE_RANGE_TOOL: &str = "read_file_range";
 const LIST_DIR_TOOL: &str = "list_dir";
 const SEARCH_FILES_TOOL: &str = "search_files";
 const SEARCH_TEXT_TOOL: &str = "search_text";
@@ -49,6 +53,7 @@ const GIT_LOG_TOOL: &str = "git_log";
 const GIT_COMMIT_TOOL: &str = "git_commit";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
+const RANGE_TRUNCATION_MARKER: &str = "\n[truncated: range exceeds requested max_bytes]";
 const MAX_DIR_ENTRIES: usize = 200;
 const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -67,6 +72,7 @@ const MAX_GIT_LOG_COUNT: usize = 50;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
+const MAX_SEARCH_TEXT_OUTPUT_BYTES: usize = 64 * 1024;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -78,6 +84,12 @@ const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
         parameters: ToolParameters::Path {
             description: "Workspace-relative path to the file to read.",
         },
+        supports_parallel: true,
+    },
+    ToolSpec {
+        name: READ_FILE_RANGE_TOOL,
+        description: "Read a byte range from a UTF-8 text file in the current workspace.",
+        parameters: ToolParameters::ReadFileRange,
         supports_parallel: true,
     },
     ToolSpec {
@@ -110,6 +122,12 @@ const WORKSPACE_WRITE_TOOL_SPECS: &[ToolSpec] = &[
         parameters: ToolParameters::Path {
             description: "Workspace-relative path to the file to read.",
         },
+        supports_parallel: true,
+    },
+    ToolSpec {
+        name: READ_FILE_RANGE_TOOL,
+        description: "Read a byte range from a UTF-8 text file in the current workspace.",
+        parameters: ToolParameters::ReadFileRange,
         supports_parallel: true,
     },
     ToolSpec {
@@ -148,6 +166,12 @@ const WORKSPACE_EXEC_TOOL_SPECS: &[ToolSpec] = &[
         parameters: ToolParameters::Path {
             description: "Workspace-relative path to the file to read.",
         },
+        supports_parallel: true,
+    },
+    ToolSpec {
+        name: READ_FILE_RANGE_TOOL,
+        description: "Read a byte range from a UTF-8 text file in the current workspace.",
+        parameters: ToolParameters::ReadFileRange,
         supports_parallel: true,
     },
     ToolSpec {
@@ -277,6 +301,7 @@ impl Serialize for ToolSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolParameters {
     Path { description: &'static str },
+    ReadFileRange,
     SearchFiles,
     SearchText,
     ApplyPatch,
@@ -291,6 +316,9 @@ impl ToolParameters {
     const fn cache_key(self) -> &'static str {
         match self {
             Self::Path { .. } => "path:string:required:no_additional_properties",
+            Self::ReadFileRange => {
+                "read_file_range:path:string:required:offset:integer:max_bytes:integer"
+            }
             Self::SearchFiles => "search_files:query:string:required:limit:integer:offset:integer",
             Self::SearchText => {
                 "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:context:integer"
@@ -317,6 +345,14 @@ impl Serialize for ToolParameters {
                 let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &PathProperties { description })?;
+                map.serialize_entry("required", &["path"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::ReadFileRange => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &ReadFileRangeProperties)?;
                 map.serialize_entry("required", &["path"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
@@ -606,6 +642,40 @@ impl Serialize for ApplyPatchProperties {
     }
 }
 
+struct ReadFileRangeProperties;
+
+impl Serialize for ReadFileRangeProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry(
+            "path",
+            &StringProperty {
+                description: "Workspace-relative path to the file to read.",
+            },
+        )?;
+        map.serialize_entry(
+            "offset",
+            &IntegerProperty {
+                description: "Byte offset where reading starts. Defaults to 0.",
+                minimum: 0,
+                maximum: usize::MAX,
+            },
+        )?;
+        map.serialize_entry(
+            "max_bytes",
+            &IntegerProperty {
+                description: "Maximum bytes to return from the requested offset.",
+                minimum: 1,
+                maximum: MAX_FILE_BYTES,
+            },
+        )?;
+        map.end()
+    }
+}
+
 struct EmptyProperties;
 
 impl Serialize for EmptyProperties {
@@ -854,6 +924,7 @@ impl ToolRegistry {
 
         let result = match call.name.as_str() {
             READ_FILE_TOOL => read_file(&self.root, &call.arguments).await,
+            READ_FILE_RANGE_TOOL => read_file_range(&self.root, &call.arguments).await,
             LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
             SEARCH_FILES_TOOL => {
                 let search = self.search.clone();
@@ -910,6 +981,16 @@ fn tool_execution(call: &ModelToolCall, output: String, success: bool) -> ToolEx
 #[serde(deny_unknown_fields)]
 struct PathArguments {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadFileRangeArguments {
+    path: String,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,13 +1229,57 @@ async fn read_file(root: &Path, arguments: &str) -> Result<String> {
     Ok(text)
 }
 
+async fn read_file_range(root: &Path, arguments: &str) -> Result<String> {
+    let args = parse_read_file_range_arguments(arguments)?;
+    let path = resolve_workspace_path(root, &args.path)?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a file",
+        display_path(root, &path)
+    );
+
+    let offset = args.offset.unwrap_or(0);
+    let max_bytes = bounded_limit(args.max_bytes, MAX_FILE_BYTES, MAX_FILE_BYTES);
+    if offset >= metadata.len() {
+        return Ok(String::new());
+    }
+
+    let file = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
+    let mut file = file;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .with_context(|| format!("failed to seek {}", display_path(root, &path)))?;
+    let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+    let mut limited = file.take((max_bytes + 1) as u64);
+    limited
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
+    let truncated = bytes.len() > max_bytes;
+    if truncated {
+        bytes.truncate(max_bytes);
+    }
+
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        text.push_str(RANGE_TRUNCATION_MARKER);
+    }
+    Ok(text)
+}
+
 async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
     let args = parse_path_arguments(arguments)?;
     let path = resolve_workspace_path(root, &args.path)?;
     let mut entries = tokio::fs::read_dir(&path)
         .await
         .with_context(|| format!("failed to list {}", display_path(root, &path)))?;
-    let mut names = Vec::new();
+    let mut names = BinaryHeap::new();
+    let mut total_entries = 0usize;
 
     while let Some(entry) = entries
         .next_entry()
@@ -1168,12 +1293,18 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
         if file_type.is_dir() {
             name.push('/');
         }
-        names.push(name);
+        total_entries = total_entries.saturating_add(1);
+        if names.len() < MAX_DIR_ENTRIES {
+            names.push(name);
+        } else if names.peek().is_some_and(|largest| &name < largest) {
+            names.pop();
+            names.push(name);
+        }
     }
 
+    let truncated = total_entries > MAX_DIR_ENTRIES;
+    let mut names = names.into_vec();
     names.sort_unstable();
-    let truncated = names.len() > MAX_DIR_ENTRIES;
-    names.truncate(MAX_DIR_ENTRIES);
     if truncated {
         names.push("[truncated: directory has more than 200 entries]".to_string());
     }
@@ -1402,6 +1533,10 @@ fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
     serde_json::from_str(arguments).context("invalid path arguments")
 }
 
+fn parse_read_file_range_arguments(arguments: &str) -> Result<ReadFileRangeArguments> {
+    serde_json::from_str(arguments).context("invalid read_file_range arguments")
+}
+
 fn parse_search_files_arguments(arguments: &str) -> Result<SearchFilesArguments> {
     serde_json::from_str(arguments).context("invalid search_files arguments")
 }
@@ -1456,6 +1591,56 @@ fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
         Some("regex") => Ok(GrepMode::Regex),
         Some("fuzzy") => Ok(GrepMode::Fuzzy),
         Some(mode) => anyhow::bail!("unsupported search_text mode {mode:?}"),
+    }
+}
+
+struct CappedText {
+    output: String,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl CappedText {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            output: String::with_capacity(max_bytes.min(8192)),
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    fn push_str(&mut self, value: &str) -> bool {
+        if self.output.len() >= self.max_bytes {
+            self.truncated = true;
+            return false;
+        }
+        let remaining = self.max_bytes - self.output.len();
+        if value.len() <= remaining {
+            self.output.push_str(value);
+            return true;
+        }
+
+        let mut end = remaining;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.output.push_str(&value[..end]);
+        self.truncated = true;
+        false
+    }
+
+    fn push_line(&mut self, value: &str) -> bool {
+        self.push_str(value) && self.push_str("\n")
+    }
+
+    fn finish(mut self, label: &str) -> String {
+        if self.truncated {
+            self.output.push_str(&format!(
+                "\n[truncated: {label} exceeds {} bytes]",
+                self.max_bytes
+            ));
+        }
+        self.output
     }
 }
 
@@ -1816,32 +2001,34 @@ fn format_text_search_results(
         );
     }
 
-    let mut output = String::new();
+    let mut output = CappedText::new(MAX_SEARCH_TEXT_OUTPUT_BYTES);
     if let Some(error) = &results.regex_fallback_error {
         output.push_str("Regex fallback: ");
         output.push_str(error);
-        output.push('\n');
+        output.push_str("\n");
     }
     for search_match in &results.matches {
         let Some(file) = results.files.get(search_match.file_index) else {
             continue;
         };
-        output.push_str(&format!(
-            "{}:{}:{}: {}\n",
+        if !output.push_line(&format!(
+            "{}:{}:{}: {}",
             file.relative_path(picker),
             search_match.line_number,
             search_match.col.saturating_add(1),
             search_match.line_content
-        ));
+        )) {
+            break;
+        }
         for line in &search_match.context_before {
-            output.push_str("  before: ");
-            output.push_str(line);
-            output.push('\n');
+            if !output.push_str("  before: ") || !output.push_line(line) {
+                break;
+            }
         }
         for line in &search_match.context_after {
-            output.push_str("  after: ");
-            output.push_str(line);
-            output.push('\n');
+            if !output.push_str("  after: ") || !output.push_line(line) {
+                break;
+            }
         }
     }
     output.push_str(&format!(
@@ -1852,7 +2039,7 @@ fn format_text_search_results(
         results.filtered_file_count,
         results.next_file_offset,
     ));
-    output
+    output.finish("search_text output")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2309,6 +2496,34 @@ mod tests {
                 },
                 {
                     "type": "function",
+                    "name": "read_file_range",
+                    "description": "Read a byte range from a UTF-8 text file in the current workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Workspace-relative path to the file to read.",
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Byte offset where reading starts. Defaults to 0.",
+                                "minimum": 0,
+                                "maximum": usize::MAX,
+                            },
+                            "max_bytes": {
+                                "type": "integer",
+                                "description": "Maximum bytes to return from the requested offset.",
+                                "minimum": 1,
+                                "maximum": MAX_FILE_BYTES,
+                            },
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false,
+                    },
+                },
+                {
+                    "type": "function",
                     "name": "list_dir",
                     "description": "List files and directories under a workspace directory.",
                     "parameters": {
@@ -2492,6 +2707,14 @@ mod tests {
                 arguments: r#"{"path":"src/main.rs"}"#.to_string(),
             })
             .await;
+        let range = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_range".to_string(),
+                name: READ_FILE_RANGE_TOOL.to_string(),
+                arguments: r#"{"path":"src/main.rs","offset":3,"max_bytes":10}"#.to_string(),
+            })
+            .await;
         let list = registry
             .execute(ModelToolCall {
                 item_id: None,
@@ -2503,6 +2726,8 @@ mod tests {
 
         assert!(read.success);
         assert_eq!(read.output, "fn main() {}\n");
+        assert!(range.success);
+        assert_eq!(range.output, "main() {}\n");
         assert!(list.success);
         assert_eq!(list.output, "src/");
 
@@ -2983,6 +3208,60 @@ mod tests {
         let summary = DurationSummary::from_samples(&mut samples);
         println!(
             "read_file_capped_large_file file_bytes={FILE_BYTES} output_bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "release-mode read_file_range benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_read_file_range_large_file() {
+        const FILE_BYTES: u64 = 128 * 1024 * 1024;
+        const RANGE_BYTES: usize = 4096;
+        const SAMPLES: usize = 15;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-bench-range-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let file = fs::File::create(temp.join("large.log")).unwrap();
+        file.set_len(FILE_BYTES).unwrap();
+        let registry = ToolRegistry::for_root(&temp);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let read = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_range".to_string(),
+                    name: READ_FILE_RANGE_TOOL.to_string(),
+                    arguments: json!({
+                        "path": "large.log",
+                        "offset": FILE_BYTES - RANGE_BYTES as u64,
+                        "max_bytes": RANGE_BYTES,
+                    })
+                    .to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(read.success);
+            output_bytes = read.output.len();
+            assert_eq!(output_bytes, RANGE_BYTES);
+            std::hint::black_box(&read.output);
+            samples.push(elapsed);
+        }
+
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "read_file_range_large_file file_bytes={FILE_BYTES} range_bytes={RANGE_BYTES} output_bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
             summary.min_ms(),
             summary.median_ms(),
             summary.max_ms(),

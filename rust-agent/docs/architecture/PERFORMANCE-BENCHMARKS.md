@@ -26,6 +26,8 @@ counter. They assert correctness but do not enforce timing thresholds.
 - `tools::tests::benchmark_read_file_capped_large_file`
   Measures `read_file` latency against a large file while enforcing the capped
   read path.
+- `tools::tests::benchmark_read_file_range_large_file`
+  Measures targeted range reads against a large file.
 - `tools::tests::benchmark_list_dir_large_directory`
   Measures directory listing latency for a large directory while returning a
   capped result set.

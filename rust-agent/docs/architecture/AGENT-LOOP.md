@@ -31,9 +31,9 @@ transport, and session state separate.
   and function-call outputs, then creates borrowed prompt windows instead of
   cloning transcript text.
 - `ToolRegistry` owns the built-in tools, permission policy, and model-visible
-  tool specs. It keeps exact filesystem tools (`read_file`, `list_dir`)
-  alongside a shared FFF-backed index for fuzzy file/path search and content
-  search. In `workspace-write` mode it also exposes `apply_patch` for
+  tool specs. It keeps exact filesystem tools (`read_file`, `read_file_range`,
+  `list_dir`) alongside a shared FFF-backed index for fuzzy file/path search and
+  content search. In `workspace-write` mode it also exposes `apply_patch` for
   workspace-confined UTF-8 file edits. FFF index initialization is lazy by
   default, but callers can start the shared scanner on a background blocking
   worker before any tool request. In `workspace-exec` mode it also exposes a
@@ -104,7 +104,8 @@ while a turn is running.
 ## Current Scope
 
 Conversation history is recent and in memory only. The default built-in tool set
-is read-only (`read_file`, `list_dir`, `search_files`, and `search_text`).
+is read-only (`read_file`, `read_file_range`, `list_dir`, `search_files`, and
+`search_text`).
 `RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
 `RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution plus
 git wrappers. Persistence, cancellation, and semantic context compaction are

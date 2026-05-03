@@ -5,8 +5,8 @@ read-only. Write access is opt-in with `RUST_AGENT_TOOL_MODE=workspace-write`.
 
 ## Modes
 
-- `read-only` exposes `read_file`, `list_dir`, `search_files`, and
-  `search_text`.
+- `read-only` exposes `read_file`, `read_file_range`, `list_dir`,
+  `search_files`, and `search_text`.
 - `workspace-write` exposes the read-only tools plus `apply_patch`.
 - `workspace-exec` exposes the workspace-write tools plus `exec_command` and
   dedicated git wrappers: `git_status`, `git_diff`, `git_log`, and
@@ -50,6 +50,9 @@ operations are path-based.
   token. Repository operations must use the dedicated git wrappers.
 - `git_commit` requires explicit workspace-relative paths and commits only those
   pathspecs. Git path lists and commit messages are bounded before execution.
+- `list_dir` keeps only the lexicographically first capped result set in memory
+  while scanning large directories.
+- `search_text` output is capped before it is returned to the model.
 
 ## Current Scope
 
