@@ -159,6 +159,7 @@ mod tests {
 
     use crate::agent_loop::ModelResponse;
     use crate::client::ConversationMessage;
+    use crate::tools::ToolSpec;
 
     use super::*;
 
@@ -167,6 +168,8 @@ mod tests {
         let turn = AtomicUsize::new(0);
         let model = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              selected_model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(selected_model, "test-default");
@@ -213,6 +216,8 @@ mod tests {
         let turn = AtomicUsize::new(0);
         let model = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              selected_model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.load(Ordering::SeqCst) {
@@ -252,6 +257,8 @@ mod tests {
     async fn rejects_unsupported_session_model() {
         let model = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _selected_model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| Ok("unused".to_string()),
         );
@@ -367,6 +374,8 @@ mod tests {
     where
         F: for<'a> FnMut(
             &'a [ConversationMessage<'a>],
+            &'a [ToolSpec],
+            bool,
             &'a str,
             &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String>,
@@ -374,12 +383,14 @@ mod tests {
         async fn stream_conversation<'a>(
             &'a self,
             messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<ModelResponse> {
             let mut stream = self.stream.lock().expect("test streamer lock poisoned");
-            stream(messages, model, on_delta).map(ModelResponse::new)
+            stream(messages, tools, parallel_tool_calls, model, on_delta).map(ModelResponse::new)
         }
     }
 
@@ -393,6 +404,8 @@ mod tests {
         async fn stream_conversation<'a>(
             &'a self,
             _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
             _session_id: SessionId,
             _model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
@@ -418,6 +431,8 @@ mod tests {
         async fn stream_conversation<'a>(
             &'a self,
             _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
             _session_id: SessionId,
             _model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,

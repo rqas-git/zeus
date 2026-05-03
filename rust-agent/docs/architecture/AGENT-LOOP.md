@@ -15,17 +15,24 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
    concurrently while same-session turns remain ordered.
 5. The loop appends the user message, marks the session `Running`, prunes stored
    history, builds a bounded borrowed prompt window, streams the selected model
-   response, emits text deltas and cache telemetry, stores the assistant message,
-   prunes stored history again, then returns to `Idle`.
-6. Interactive mode reuses the same service and session, so history lasts for
+   response, emits text deltas and cache telemetry, stores assistant text, stores
+   any completed tool-call items, executes those tools, stores tool outputs, and
+   repeats until the model returns no more tool calls.
+6. Tool calls are bounded by a fixed per-turn round limit so a malformed or
+   looping model response cannot run forever.
+7. Interactive mode reuses the same service and session, so history lasts for
    the current terminal process.
 
 ## Responsibilities
 
 - `AgentLoop` enforces ordered turns, status transitions, and event emission.
 - `InMemorySessionStore` stores retained messages, message ids, current status,
-  and session settings. It creates borrowed prompt windows instead of cloning
-  message text.
+  and session settings. It stores user/assistant messages, function-call items,
+  and function-call outputs, then creates borrowed prompt windows instead of
+  cloning transcript text.
+- `ToolRegistry` owns the built-in read-only tools and model-visible tool specs.
+  It executes tool batches in parallel when every requested tool is marked
+  parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
 - `AgentService` holds only a per-session async lock while a turn streams, so
@@ -45,6 +52,12 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
   budgets.
 - Prompt request bodies serialize from typed borrowed structures rather than
   first building a generic JSON value.
+- Tool specs serialize from static typed definitions rather than allocating
+  `serde_json::Value` schemas for each request.
+- Tool arguments are retained as raw JSON until the tool boundary, where they are
+  deserialized once into typed argument structs.
+- Read-only tool calls are executed concurrently and their outputs are replayed
+  to the model in one follow-up request.
 - Streaming uses async HTTP and SSE parsing, so future endpoints do not need to
   block request workers on model I/O.
 - The service-level session locks keep ordered turns local to one session
@@ -54,8 +67,9 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
 ## Events
 
 `AgentEvent` reports status changes, streamed assistant text, cache-health
-telemetry, completed messages, and errors. This gives a future HTTP, WebSocket,
-or SSE frontend a clear boundary without coupling it to terminal output.
+telemetry, tool-call start/completion, completed messages, and errors. This
+gives a future HTTP, WebSocket, or SSE frontend a clear boundary without
+coupling it to terminal output.
 
 ## Error Handling
 
@@ -68,9 +82,10 @@ while a turn is running.
 
 ## Current Scope
 
-Conversation history is recent and in memory only. Persistence, tools,
-cancellation, and semantic context compaction are intentionally out of scope
-until product behavior requires them.
+Conversation history is recent and in memory only. The built-in tool set is
+read-only (`read_file` and `list_dir`) until write or shell tools have an
+explicit permission model. Persistence, cancellation, and semantic context
+compaction are intentionally out of scope until product behavior requires them.
 
 ## Related Docs
 

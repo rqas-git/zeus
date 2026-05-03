@@ -6,7 +6,8 @@ fast for the current early-stage service.
 
 ## Flow
 
-1. `AgentLoop` stores recent completed user and assistant messages in memory.
+1. `AgentLoop` stores recent completed user messages, assistant messages,
+   function calls, and function-call outputs in memory.
 2. Before a model call, `InMemorySessionStore` prunes retained messages to the
    configured history budget.
 3. Before a model call, `InMemorySessionStore` walks messages from newest to
@@ -21,18 +22,21 @@ fast for the current early-stage service.
 
 - `ContextWindowConfig` defines prompt and history message and byte budgets.
 - `InMemorySessionStore` applies prompt-window and retained-history bounds.
-- `ConversationMessage` provides the borrowed model-facing view.
+- `ConversationMessage` provides the borrowed model-facing view, including
+  structured Responses tool-call items.
 - `ChatGptClient` serializes only the retained prompt window.
 
 ## Performance Notes
 
 - Windowing prevents unbounded prompt payload growth.
 - History retention prevents unbounded session memory growth.
-- Borrowed prompt views avoid copying message bodies per turn.
+- Borrowed prompt views avoid copying message bodies, raw tool arguments, and
+  tool outputs per turn.
 - The latest message is always retained, even if it exceeds the byte budget.
 
 ## Current Scope
 
 This is recency-based truncation, not semantic compaction. Summary generation,
 tool-output pruning, and token-accurate budgeting are future work. History
-retention is approximate byte-based retention over message text.
+retention is approximate byte-based retention over message text and structured
+tool payloads.

@@ -3,9 +3,15 @@
 use std::future::Future;
 
 use anyhow::Result;
+use futures_util::future::join_all;
 
 use crate::client::ConversationMessage;
 use crate::config::ContextWindowConfig;
+use crate::tools::ToolExecution;
+use crate::tools::ToolRegistry;
+use crate::tools::ToolSpec;
+
+const MAX_TOOL_ROUNDS: usize = 8;
 
 /// Strong identifier for an agent session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -52,26 +58,86 @@ pub(crate) enum SessionStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMessage {
     id: MessageId,
-    role: MessageRole,
-    text: String,
+    item: AgentItem,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentItem {
+    Message {
+        role: MessageRole,
+        text: String,
+    },
+    FunctionCall {
+        item_id: Option<String>,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionOutput {
+        call_id: String,
+        output: String,
+        success: bool,
+    },
 }
 
 impl AgentMessage {
     /// Returns the message role.
     #[cfg(test)]
-    pub(crate) const fn role(&self) -> MessageRole {
-        self.role
+    pub(crate) fn role(&self) -> MessageRole {
+        match &self.item {
+            AgentItem::Message { role, .. } => *role,
+            AgentItem::FunctionCall { .. } | AgentItem::FunctionOutput { .. } => {
+                panic!("tool transcript items do not have user or assistant roles")
+            }
+        }
     }
 
     /// Returns the message text.
     pub(crate) fn text(&self) -> &str {
-        &self.text
+        match &self.item {
+            AgentItem::Message { text, .. } => text,
+            AgentItem::FunctionCall { arguments, .. } => arguments,
+            AgentItem::FunctionOutput { output, .. } => output,
+        }
     }
 
     fn conversation_message(&self) -> ConversationMessage<'_> {
-        match self.role {
-            MessageRole::User => ConversationMessage::user(&self.text),
-            MessageRole::Assistant => ConversationMessage::assistant(&self.text),
+        match &self.item {
+            AgentItem::Message { role, text } => match role {
+                MessageRole::User => ConversationMessage::user(text),
+                MessageRole::Assistant => ConversationMessage::assistant(text),
+            },
+            AgentItem::FunctionCall {
+                item_id,
+                call_id,
+                name,
+                arguments,
+            } => ConversationMessage::function_call(item_id.as_deref(), call_id, name, arguments),
+            AgentItem::FunctionOutput {
+                call_id,
+                output,
+                success,
+            } => ConversationMessage::function_output(call_id, output, *success),
+        }
+    }
+
+    fn input_bytes(&self) -> usize {
+        match &self.item {
+            AgentItem::Message { text, .. } => text.len(),
+            AgentItem::FunctionCall {
+                item_id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                item_id.as_deref().map_or(0, str::len)
+                    + call_id.len()
+                    + name.len()
+                    + arguments.len()
+            }
+            AgentItem::FunctionOutput {
+                call_id, output, ..
+            } => call_id.len() + output.len(),
         }
     }
 }
@@ -96,6 +162,17 @@ pub(crate) enum AgentEvent<'a> {
     CacheHealth {
         session_id: SessionId,
         cache_health: &'a CacheHealth,
+    },
+    ToolCallStarted {
+        session_id: SessionId,
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+    },
+    ToolCallCompleted {
+        session_id: SessionId,
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        success: bool,
     },
     Error {
         session_id: SessionId,
@@ -177,6 +254,7 @@ pub(crate) struct CacheHealth {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelResponse {
     pub(crate) text: String,
+    pub(crate) tool_calls: Vec<ModelToolCall>,
     pub(crate) cache_health: Option<CacheHealth>,
 }
 
@@ -186,17 +264,45 @@ impl ModelResponse {
     pub(crate) fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            tool_calls: Vec::new(),
+            cache_health: None,
+        }
+    }
+
+    /// Creates a model response containing tool calls.
+    #[cfg(test)]
+    pub(crate) fn with_tool_calls(
+        text: impl Into<String>,
+        tool_calls: impl IntoIterator<Item = ModelToolCall>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            tool_calls: tool_calls.into_iter().collect(),
             cache_health: None,
         }
     }
 
     /// Creates a model response with cache telemetry.
-    pub(crate) fn with_cache_health(text: impl Into<String>, cache_health: CacheHealth) -> Self {
+    pub(crate) fn with_cache_health(
+        text: impl Into<String>,
+        tool_calls: impl IntoIterator<Item = ModelToolCall>,
+        cache_health: CacheHealth,
+    ) -> Self {
         Self {
             text: text.into(),
+            tool_calls: tool_calls.into_iter().collect(),
             cache_health: Some(cache_health),
         }
     }
+}
+
+/// Completed model tool call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelToolCall {
+    pub(crate) item_id: Option<String>,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
 }
 
 /// Streams a prompt window into an assistant response.
@@ -205,6 +311,8 @@ pub(crate) trait ModelStreamer {
     fn stream_conversation<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
         session_id: SessionId,
         model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
@@ -288,13 +396,33 @@ impl InMemorySessionStore {
     }
 
     fn append_message(&mut self, role: MessageRole, text: impl Into<String>) -> MessageId {
-        let id = self.next_message_id;
-        self.next_message_id = self.next_message_id.next();
-        self.messages.push(AgentMessage {
-            id,
+        self.append_item(AgentItem::Message {
             role,
             text: text.into(),
-        });
+        })
+    }
+
+    fn append_tool_call(&mut self, tool_call: ModelToolCall) -> MessageId {
+        self.append_item(AgentItem::FunctionCall {
+            item_id: tool_call.item_id,
+            call_id: tool_call.call_id,
+            name: tool_call.name,
+            arguments: tool_call.arguments,
+        })
+    }
+
+    fn append_tool_output(&mut self, execution: ToolExecution) -> MessageId {
+        self.append_item(AgentItem::FunctionOutput {
+            call_id: execution.call_id,
+            output: execution.output,
+            success: execution.success,
+        })
+    }
+
+    fn append_item(&mut self, item: AgentItem) -> MessageId {
+        let id = self.next_message_id;
+        self.next_message_id = self.next_message_id.next();
+        self.messages.push(AgentMessage { id, item });
         id
     }
 
@@ -317,7 +445,7 @@ impl InMemorySessionStore {
                 break;
             }
 
-            let message_bytes = message.text().len();
+            let message_bytes = message.input_bytes();
             let would_exceed_budget =
                 retained_bytes.saturating_add(message_bytes) > config.max_bytes();
             if would_exceed_budget && !retained.is_empty() {
@@ -342,7 +470,7 @@ impl InMemorySessionStore {
                 break;
             }
 
-            let message_bytes = message.text().len();
+            let message_bytes = message.input_bytes();
             let would_exceed_budget =
                 retained_bytes.saturating_add(message_bytes) > config.history_max_bytes();
             if would_exceed_budget && retained_count > 0 {
@@ -390,6 +518,7 @@ struct CacheObservation {
 pub(crate) struct AgentLoop {
     store: InMemorySessionStore,
     context_window: ContextWindowConfig,
+    tools: ToolRegistry,
 }
 
 impl AgentLoop {
@@ -412,6 +541,7 @@ impl AgentLoop {
         Self {
             store: InMemorySessionStore::new(session_id, config),
             context_window,
+            tools: ToolRegistry::default(),
         }
     }
 
@@ -481,7 +611,7 @@ impl AgentLoop {
             return Err(error);
         }
         self.store.prune_history(self.context_window);
-        let result = self.run_once(model, &mut emit).await;
+        let result = self.run_until_done(model, &mut emit).await;
         match result {
             Ok(()) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
@@ -528,17 +658,45 @@ impl AgentLoop {
         })
     }
 
-    async fn run_once(
+    async fn run_until_done(
         &mut self,
         model: &impl ModelStreamer,
         emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
     ) -> Result<()> {
+        for _ in 0..MAX_TOOL_ROUNDS {
+            let tool_calls = self.run_once(model, emit).await?;
+            if tool_calls.is_empty() {
+                return Ok(());
+            }
+
+            let executions = self.execute_tool_calls(tool_calls, emit).await?;
+            for execution in executions {
+                self.store.append_tool_output(execution);
+            }
+            self.store.prune_history(self.context_window);
+        }
+
+        anyhow::bail!("tool call limit exceeded")
+    }
+
+    async fn run_once(
+        &mut self,
+        model: &impl ModelStreamer,
+        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+    ) -> Result<Vec<ModelToolCall>> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
         let selected_model = self.store.model();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
         let mut model_response = model
-            .stream_conversation(&history, session_id, selected_model, &mut on_delta)
+            .stream_conversation(
+                &history,
+                self.tools.specs(),
+                true,
+                session_id,
+                selected_model,
+                &mut on_delta,
+            )
             .await?;
         if let Some(cache_health) = model_response.cache_health.as_mut() {
             cache_health.cache_status = self.store.cache_status(cache_health);
@@ -549,23 +707,72 @@ impl AgentLoop {
             self.store.record_cache_observation(cache_health);
         }
         let assistant_text = model_response.text;
-        let assistant_id = self
-            .store
-            .append_message(MessageRole::Assistant, assistant_text);
-        let assistant_text = self
-            .store
-            .messages()
-            .last()
-            .map(AgentMessage::text)
-            .unwrap_or_default();
-        emit(AgentEvent::MessageCompleted {
-            session_id,
-            message_id: assistant_id,
-            role: MessageRole::Assistant,
-            text: assistant_text,
-        })?;
+        if !assistant_text.is_empty() {
+            let assistant_id = self
+                .store
+                .append_message(MessageRole::Assistant, assistant_text);
+            let assistant_text = self
+                .store
+                .messages()
+                .last()
+                .map(AgentMessage::text)
+                .unwrap_or_default();
+            emit(AgentEvent::MessageCompleted {
+                session_id,
+                message_id: assistant_id,
+                role: MessageRole::Assistant,
+                text: assistant_text,
+            })?;
+        }
+        let tool_calls = model_response.tool_calls;
+        for tool_call in tool_calls.iter().cloned() {
+            self.store.append_tool_call(tool_call);
+        }
         self.store.prune_history(self.context_window);
-        Ok(())
+        Ok(tool_calls)
+    }
+
+    async fn execute_tool_calls(
+        &self,
+        tool_calls: Vec<ModelToolCall>,
+        emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
+    ) -> Result<Vec<ToolExecution>> {
+        let session_id = self.session_id();
+        for tool_call in &tool_calls {
+            emit(AgentEvent::ToolCallStarted {
+                session_id,
+                tool_call_id: &tool_call.call_id,
+                tool_name: &tool_call.name,
+            })?;
+        }
+
+        let executions = if tool_calls
+            .iter()
+            .all(|call| self.tools.supports_parallel(&call.name))
+        {
+            join_all(
+                tool_calls
+                    .into_iter()
+                    .map(|tool_call| self.tools.execute(tool_call)),
+            )
+            .await
+        } else {
+            let mut executions = Vec::new();
+            for tool_call in tool_calls {
+                executions.push(self.tools.execute(tool_call).await);
+            }
+            executions
+        };
+
+        for execution in &executions {
+            emit(AgentEvent::ToolCallCompleted {
+                session_id,
+                tool_call_id: &execution.call_id,
+                tool_name: &execution.tool_name,
+                success: execution.success,
+            })?;
+        }
+        Ok(executions)
     }
 }
 
@@ -582,6 +789,8 @@ mod tests {
         let mut events = Vec::new();
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history.len(), 1);
@@ -622,6 +831,8 @@ mod tests {
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.get() {
@@ -665,6 +876,8 @@ mod tests {
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.get() {
@@ -716,6 +929,8 @@ mod tests {
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 let answer = match turn.get() {
@@ -768,6 +983,8 @@ mod tests {
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.get() {
@@ -839,11 +1056,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executes_tool_calls_and_replays_outputs() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let streamer = ToolLoopStreamer { turn: Cell::new(0) };
+        let mut events = Vec::new();
+
+        agent
+            .submit_user_message("read the manifest", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert_eq!(agent.messages().last().unwrap().text(), "read ok");
+        assert_eq!(
+            events,
+            [
+                "message:user:read the manifest",
+                "status:Running",
+                "tool-start:read_file:call_read",
+                "tool-end:read_file:call_read:true",
+                "delta:read ok",
+                "message:assistant:read ok",
+                "status:Idle",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn records_failed_status_and_error_event() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 anyhow::bail!("backend failed")
@@ -878,6 +1127,8 @@ mod tests {
         let model_called = Cell::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 model_called.set(true);
@@ -909,6 +1160,8 @@ mod tests {
 
         let ok_streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history, &[ConversationMessage::user("retry")]);
@@ -931,6 +1184,8 @@ mod tests {
         let model_called = Cell::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 model_called.set(true);
@@ -962,6 +1217,8 @@ mod tests {
 
         let ok_streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history, &[ConversationMessage::user("again")]);
@@ -988,6 +1245,17 @@ mod tests {
             AgentEvent::CacheHealth { cache_health, .. } => {
                 format!("cache:{}", cache_health.cache_status.as_str())
             }
+            AgentEvent::ToolCallStarted {
+                tool_call_id,
+                tool_name,
+                ..
+            } => format!("tool-start:{tool_name}:{tool_call_id}"),
+            AgentEvent::ToolCallCompleted {
+                tool_call_id,
+                tool_name,
+                success,
+                ..
+            } => format!("tool-end:{tool_name}:{tool_call_id}:{success}"),
             AgentEvent::Error { message, .. } => format!("error:{message}"),
         }
     }
@@ -1015,6 +1283,8 @@ mod tests {
     where
         F: for<'a> FnMut(
             &'a [ConversationMessage<'a>],
+            &'a [ToolSpec],
+            bool,
             &'a str,
             &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String>,
@@ -1022,11 +1292,14 @@ mod tests {
         async fn stream_conversation<'a>(
             &'a self,
             messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<ModelResponse> {
-            (self.stream.borrow_mut())(messages, model, on_delta).map(ModelResponse::new)
+            (self.stream.borrow_mut())(messages, tools, parallel_tool_calls, model, on_delta)
+                .map(ModelResponse::new)
         }
     }
 
@@ -1038,6 +1311,8 @@ mod tests {
         async fn stream_conversation<'a>(
             &'a self,
             _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
             _session_id: SessionId,
             model: &'a str,
             _on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
@@ -1051,6 +1326,7 @@ mod tests {
             };
             Ok(ModelResponse::with_cache_health(
                 text,
+                [],
                 CacheHealth {
                     model: model.to_string(),
                     prompt_cache_key: format!("cache-key-{model}"),
@@ -1063,6 +1339,63 @@ mod tests {
                     cache_status: CacheStatus::FirstRequest,
                 },
             ))
+        }
+    }
+
+    struct ToolLoopStreamer {
+        turn: Cell<usize>,
+    }
+
+    impl ModelStreamer for ToolLoopStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.get();
+            self.turn.set(turn + 1);
+            match turn {
+                0 => {
+                    assert!(!tools.is_empty());
+                    assert!(parallel_tool_calls);
+                    assert_eq!(messages, &[ConversationMessage::user("read the manifest")]);
+                    Ok(ModelResponse::with_tool_calls(
+                        "",
+                        [ModelToolCall {
+                            item_id: Some("fc_read".to_string()),
+                            call_id: "call_read".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                        }],
+                    ))
+                }
+                1 => {
+                    assert_eq!(messages.len(), 3);
+                    assert!(matches!(
+                        messages[1],
+                        ConversationMessage::FunctionCall { .. }
+                    ));
+                    match messages[2] {
+                        ConversationMessage::FunctionOutput {
+                            call_id,
+                            output,
+                            success,
+                        } => {
+                            assert_eq!(call_id, "call_read");
+                            assert!(output.contains("name = \"rust-agent\""));
+                            assert!(success);
+                        }
+                        _ => panic!("expected function output in prompt"),
+                    }
+                    on_delta("read ok")?;
+                    Ok(ModelResponse::new("read ok"))
+                }
+                _ => unreachable!("unexpected turn"),
+            }
         }
     }
 }

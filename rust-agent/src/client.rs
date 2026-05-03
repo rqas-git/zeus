@@ -7,6 +7,7 @@ use memchr::memchr;
 use reqwest::header;
 use reqwest::Client;
 use serde::ser::SerializeSeq;
+use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -18,22 +19,37 @@ use crate::agent_loop::CacheHealth;
 use crate::agent_loop::CacheStatus;
 use crate::agent_loop::ModelResponse;
 use crate::agent_loop::ModelStreamer;
+use crate::agent_loop::ModelToolCall;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
 use crate::auth::CodexAuth;
 use crate::config::ClientConfig;
+use crate::tools::ToolSpec;
 
 /// One message in the current in-memory conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ConversationMessage<'a> {
-    role: ConversationRole,
-    text: &'a str,
+pub(crate) enum ConversationMessage<'a> {
+    Message {
+        role: ConversationRole,
+        text: &'a str,
+    },
+    FunctionCall {
+        item_id: Option<&'a str>,
+        call_id: &'a str,
+        name: &'a str,
+        arguments: &'a str,
+    },
+    FunctionOutput {
+        call_id: &'a str,
+        output: &'a str,
+        success: bool,
+    },
 }
 
 impl<'a> ConversationMessage<'a> {
     /// Creates a user message.
     pub(crate) fn user(text: &'a str) -> Self {
-        Self {
+        Self::Message {
             role: ConversationRole::User,
             text,
         }
@@ -41,15 +57,54 @@ impl<'a> ConversationMessage<'a> {
 
     /// Creates an assistant message.
     pub(crate) fn assistant(text: &'a str) -> Self {
-        Self {
+        Self::Message {
             role: ConversationRole::Assistant,
             text,
+        }
+    }
+
+    /// Creates an assistant function-call item.
+    pub(crate) fn function_call(
+        item_id: Option<&'a str>,
+        call_id: &'a str,
+        name: &'a str,
+        arguments: &'a str,
+    ) -> Self {
+        Self::FunctionCall {
+            item_id,
+            call_id,
+            name,
+            arguments,
+        }
+    }
+
+    /// Creates a function-call output item.
+    pub(crate) fn function_output(call_id: &'a str, output: &'a str, success: bool) -> Self {
+        Self::FunctionOutput {
+            call_id,
+            output,
+            success,
+        }
+    }
+
+    fn input_bytes(self) -> usize {
+        match self {
+            Self::Message { text, .. } => text.len(),
+            Self::FunctionCall {
+                item_id,
+                call_id,
+                name,
+                arguments,
+            } => item_id.map_or(0, str::len) + call_id.len() + name.len() + arguments.len(),
+            Self::FunctionOutput {
+                call_id, output, ..
+            } => call_id.len() + output.len(),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConversationRole {
+pub(crate) enum ConversationRole {
     User,
     Assistant,
 }
@@ -91,6 +146,8 @@ impl ModelStreamer for ChatGptClient {
     async fn stream_conversation<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
         session_id: SessionId,
         model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
@@ -98,16 +155,16 @@ impl ModelStreamer for ChatGptClient {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
-        let stable_prefix = stable_prefix_stats(self.config.instructions());
+        let stable_prefix = stable_prefix_stats(self.config.instructions(), tools);
         let input_bytes = conversation_input_bytes(messages);
         let response = {
             let body = ResponsesRequest {
                 model,
                 instructions: self.config.instructions(),
                 input: responses_input(messages),
-                tools: EmptyArray,
+                tools,
                 tool_choice: "auto",
-                parallel_tool_calls: false,
+                parallel_tool_calls,
                 store: false,
                 stream: true,
                 prompt_cache_key: &prompt_cache_key,
@@ -153,6 +210,7 @@ impl ModelStreamer for ChatGptClient {
         };
         Ok(ModelResponse::with_cache_health(
             completion.text,
+            completion.tool_calls,
             cache_health,
         ))
     }
@@ -182,19 +240,33 @@ struct StablePrefixStats {
     bytes: usize,
 }
 
-fn stable_prefix_stats(instructions: &str) -> StablePrefixStats {
+fn stable_prefix_stats(instructions: &str, tools: &[ToolSpec]) -> StablePrefixStats {
     let mut hash = Fnv1a64::new();
     hash.update("instructions\0");
     hash.update(instructions);
-    hash.update("\0tools\0[]");
+    hash.update("\0tools\0");
+    for tool in tools {
+        hash.update(tool.name());
+        hash.update("\0");
+        hash.update(tool.description());
+        hash.update("\0");
+        hash.update(tool.parameters_cache_key());
+        hash.update("\0");
+    }
     StablePrefixStats {
         hash: hash.finish(),
-        bytes: instructions.len(),
+        bytes: instructions.len()
+            + tools
+                .iter()
+                .map(|tool| {
+                    tool.name().len() + tool.description().len() + tool.parameters_cache_key().len()
+                })
+                .sum::<usize>(),
     }
 }
 
 fn conversation_input_bytes(messages: &[ConversationMessage<'_>]) -> usize {
-    messages.iter().map(|message| message.text.len()).sum()
+    messages.iter().map(|message| message.input_bytes()).sum()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,7 +297,7 @@ struct ResponsesRequest<'a> {
     model: &'a str,
     instructions: &'a str,
     input: ResponsesInput<'a>,
-    tools: EmptyArray,
+    tools: &'a [ToolSpec],
     tool_choice: &'static str,
     parallel_tool_calls: bool,
     store: bool,
@@ -249,42 +321,9 @@ impl Serialize for ResponsesInput<'_> {
     {
         let mut seq = serializer.serialize_seq(Some(self.messages.len()))?;
         for message in self.messages {
-            seq.serialize_element(&ResponsesMessage::from(message))?;
+            seq.serialize_element(&ResponsesMessage(message))?;
         }
         seq.end()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct EmptyArray;
-
-impl Serialize for EmptyArray {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_seq(Some(0))?.end()
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ResponsesMessage<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    role: &'static str,
-    content: [ResponsesContent<'a>; 1],
-}
-
-impl<'a> From<&'a ConversationMessage<'a>> for ResponsesMessage<'a> {
-    fn from(message: &'a ConversationMessage<'a>) -> Self {
-        Self {
-            kind: "message",
-            role: message.role.as_str(),
-            content: [ResponsesContent {
-                kind: message.role.content_type(),
-                text: message.text,
-            }],
-        }
     }
 }
 
@@ -300,6 +339,60 @@ impl ConversationRole {
         match self {
             Self::User => "input_text",
             Self::Assistant => "output_text",
+        }
+    }
+}
+
+struct ResponsesMessage<'a>(&'a ConversationMessage<'a>);
+
+impl Serialize for ResponsesMessage<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            ConversationMessage::Message { role, text } => {
+                let mut state = serializer.serialize_struct("ResponsesMessage", 3)?;
+                state.serialize_field("type", "message")?;
+                state.serialize_field("role", role.as_str())?;
+                state.serialize_field(
+                    "content",
+                    &[ResponsesContent {
+                        kind: role.content_type(),
+                        text,
+                    }],
+                )?;
+                state.end()
+            }
+            ConversationMessage::FunctionCall {
+                item_id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                let field_count = if item_id.is_some() { 5 } else { 4 };
+                let mut state =
+                    serializer.serialize_struct("ResponsesFunctionCall", field_count)?;
+                state.serialize_field("type", "function_call")?;
+                if let Some(item_id) = item_id {
+                    state.serialize_field("id", item_id)?;
+                }
+                state.serialize_field("call_id", call_id)?;
+                state.serialize_field("name", name)?;
+                state.serialize_field("arguments", arguments)?;
+                state.end()
+            }
+            ConversationMessage::FunctionOutput {
+                call_id,
+                output,
+                success: _,
+            } => {
+                let mut state = serializer.serialize_struct("ResponsesFunctionOutput", 3)?;
+                state.serialize_field("type", "function_call_output")?;
+                state.serialize_field("call_id", call_id)?;
+                state.serialize_field("output", output)?;
+                state.end()
+            }
         }
     }
 }
@@ -426,6 +519,7 @@ impl SseDataParser {
 struct AssistantText {
     text: String,
     fallback_text: String,
+    tool_calls: Vec<ModelToolCall>,
     response_id: Option<String>,
     usage: Option<TokenUsage>,
     completed: bool,
@@ -461,8 +555,17 @@ impl AssistantText {
                 }
             }
             "response.output_item.done" if self.text.is_empty() => {
-                self.fallback_text
-                    .push_str(&assistant_text_from_item(event.item));
+                if let Some(tool_call) = tool_call_from_item(event.item) {
+                    self.tool_calls.push(tool_call);
+                } else {
+                    self.fallback_text
+                        .push_str(&assistant_text_from_item(event.item));
+                }
+            }
+            "response.output_item.done" => {
+                if let Some(tool_call) = tool_call_from_item(event.item) {
+                    self.tool_calls.push(tool_call);
+                }
             }
             "response.failed" => {
                 let message = response_error_message(event.response)
@@ -492,9 +595,13 @@ impl AssistantText {
                 on_delta(&self.text)?;
             }
         }
-        anyhow::ensure!(!self.text.trim().is_empty(), "assistant response was empty");
+        anyhow::ensure!(
+            !self.text.trim().is_empty() || !self.tool_calls.is_empty(),
+            "assistant response was empty"
+        );
         Ok(StreamCompletion {
             text: self.text,
+            tool_calls: self.tool_calls,
             response_id: self.response_id,
             usage: self.usage,
         })
@@ -504,6 +611,7 @@ impl AssistantText {
 #[derive(Debug, PartialEq, Eq)]
 struct StreamCompletion {
     text: String,
+    tool_calls: Vec<ModelToolCall>,
     response_id: Option<String>,
     usage: Option<TokenUsage>,
 }
@@ -591,8 +699,18 @@ fn assistant_text_from_item(item: Option<&RawValue>) -> String {
 
 #[derive(Debug, Deserialize)]
 struct OutputItem<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
     #[serde(borrow)]
     role: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    call_id: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    name: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    arguments: Option<Cow<'a, str>>,
     #[serde(default, borrow)]
     content: Vec<OutputContent<'a>>,
 }
@@ -639,6 +757,20 @@ fn truncate_for_error(value: &str) -> String {
     }
 }
 
+fn tool_call_from_item(item: Option<&RawValue>) -> Option<ModelToolCall> {
+    let item = item?;
+    let item = serde_json::from_str::<OutputItem>(item.get()).ok()?;
+    if item.kind.as_deref() != Some("function_call") {
+        return None;
+    }
+    Some(ModelToolCall {
+        item_id: item.id.map(Cow::into_owned),
+        call_id: item.call_id.map(Cow::into_owned)?,
+        name: item.name.map(Cow::into_owned)?,
+        arguments: item.arguments.map(Cow::into_owned).unwrap_or_default(),
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamEvent<'a> {
     #[serde(rename = "type", borrow)]
@@ -678,6 +810,44 @@ mod tests {
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "hi"}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn serializes_function_call_history() {
+        let messages = [
+            ConversationMessage::user("read it"),
+            ConversationMessage::function_call(
+                Some("fc_1"),
+                "call_1",
+                "read_file",
+                r#"{"path":"Cargo.toml"}"#,
+            ),
+            ConversationMessage::function_output("call_1", "manifest", true),
+        ];
+        let input = responses_input(&messages);
+
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "read it"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"Cargo.toml\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "manifest",
                 },
             ])
         );
@@ -750,6 +920,31 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}
     }
 
     #[test]
+    fn extracts_tool_calls_from_done_items() {
+        let stream = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"Cargo.toml\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1"}}
+
+"#;
+
+        let completion =
+            read_assistant_completion(std::io::Cursor::new(stream.as_bytes()), |_| Ok(())).unwrap();
+
+        assert_eq!(completion.text, "");
+        assert_eq!(
+            completion.tool_calls,
+            [ModelToolCall {
+                item_id: Some("fc_1".to_string()),
+                call_id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn extracts_text_from_crlf_sse_blocks() {
         let stream = concat!(
             "event: response.output_text.delta\r\n",
@@ -797,8 +992,8 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
     #[test]
     fn stable_prefix_hash_changes_with_instructions() {
-        let first = stable_prefix_stats("You are concise.");
-        let second = stable_prefix_stats("You are verbose.");
+        let first = stable_prefix_stats("You are concise.", &[]);
+        let second = stable_prefix_stats("You are verbose.", &[]);
 
         assert_eq!(first.bytes, "You are concise.".len());
         assert_ne!(first.hash, second.hash);

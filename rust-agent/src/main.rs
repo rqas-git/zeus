@@ -5,6 +5,7 @@ mod auth;
 mod client;
 mod config;
 mod service;
+mod tools;
 
 use std::io;
 use std::io::Write;

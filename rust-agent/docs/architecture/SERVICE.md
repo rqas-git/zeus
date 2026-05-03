@@ -11,8 +11,9 @@ can submit work without rebuilding transport state for every request.
 3. `AgentService` validates model updates against `ModelConfig`.
 4. `AgentService` finds or creates the matching session handle.
 5. The service locks only that session while a turn is running.
-6. The session loop streams the selected model response and emits `AgentEvent`s,
-   including the completed assistant message.
+6. The session loop streams the selected model response, executes any requested
+   built-in tools, and emits `AgentEvent`s, including tool lifecycle events and
+   the completed assistant message.
 7. The caller decides how to translate events into terminal output, SSE, or
    WebSocket messages.
 
@@ -23,7 +24,8 @@ can submit work without rebuilding transport state for every request.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` serializes work per session without serializing unrelated
   sessions.
-- `AgentLoop` still owns per-session ordering and message history.
+- `AgentLoop` still owns per-session ordering, tool execution, and message
+  history.
 - Callers own event delivery and request/response framing.
 
 ## Performance Notes
@@ -31,8 +33,8 @@ can submit work without rebuilding transport state for every request.
 - The model client is reused across sessions.
 - Session state is reused across turns.
 - The session map lock is held only while finding or creating a session handle.
-- Model streaming holds an async mutex for the selected session only, so
-  different sessions can stream concurrently.
+- Model streaming and tool execution hold an async mutex for the selected
+  session only, so different sessions can stream and execute tools concurrently.
 - Session history is pruned by each session loop according to the configured
   history limits.
 - Session model changes do not rebuild the HTTP client.
