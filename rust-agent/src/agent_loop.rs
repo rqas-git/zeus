@@ -579,6 +579,7 @@ impl AgentLoop {
     }
 
     /// Creates an agent loop with explicit context-window bounds.
+    #[cfg(test)]
     pub(crate) fn with_context_window(
         session_id: SessionId,
         context_window: ContextWindowConfig,
