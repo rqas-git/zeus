@@ -3,9 +3,24 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use fff_search::file_picker::FilePicker;
+use fff_search::grep::GrepMode;
+use fff_search::grep::GrepSearchOptions;
+use fff_search::grep::parse_grep_query;
+use fff_search::FFFMode;
+use fff_search::FilePickerOptions;
+use fff_search::FuzzySearchOptions;
+use fff_search::MixedItemRef;
+use fff_search::PaginationArgs;
+use fff_search::QueryParser;
+use fff_search::SharedFrecency;
+use fff_search::SharedPicker;
+use fff_search::SharedQueryTracker;
 use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -16,9 +31,17 @@ use crate::agent_loop::ModelToolCall;
 
 const READ_FILE_TOOL: &str = "read_file";
 const LIST_DIR_TOOL: &str = "list_dir";
+const SEARCH_FILES_TOOL: &str = "search_files";
+const SEARCH_TEXT_TOOL: &str = "search_text";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const MAX_DIR_ENTRIES: usize = 200;
+const DEFAULT_SEARCH_RESULTS: usize = 20;
+const MAX_SEARCH_RESULTS: usize = 50;
+const MAX_SEARCH_OFFSET: usize = 100_000;
+const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
+const MAX_TEXT_CONTEXT_LINES: usize = 3;
+const FFF_SCAN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
@@ -36,6 +59,18 @@ const TOOL_SPECS: &[ToolSpec] = &[
             description: "Workspace-relative directory path. Use . for the workspace root.",
         },
         supports_parallel: true,
+    },
+    ToolSpec {
+        name: SEARCH_FILES_TOOL,
+        description: "Fuzzy-search indexed workspace files and directories by path.",
+        parameters: ToolParameters::SearchFiles,
+        supports_parallel: false,
+    },
+    ToolSpec {
+        name: SEARCH_TEXT_TOOL,
+        description: "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
+        parameters: ToolParameters::SearchText,
+        supports_parallel: false,
     },
 ];
 
@@ -87,12 +122,18 @@ impl Serialize for ToolSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolParameters {
     Path { description: &'static str },
+    SearchFiles,
+    SearchText,
 }
 
 impl ToolParameters {
     const fn cache_key(self) -> &'static str {
         match self {
             Self::Path { .. } => "path:string:required:no_additional_properties",
+            Self::SearchFiles => "search_files:query:string:required:limit:integer:offset:integer",
+            Self::SearchText => {
+                "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:context:integer"
+            }
         }
     }
 }
@@ -108,6 +149,22 @@ impl Serialize for ToolParameters {
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &PathProperties { description })?;
                 map.serialize_entry("required", &["path"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::SearchFiles => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &SearchFilesProperties)?;
+                map.serialize_entry("required", &["query"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::SearchText => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &SearchTextProperties)?;
+                map.serialize_entry("required", &["query"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
             }
@@ -151,10 +208,121 @@ impl Serialize for StringProperty {
     }
 }
 
+struct IntegerProperty {
+    description: &'static str,
+    minimum: usize,
+    maximum: usize,
+}
+
+impl Serialize for IntegerProperty {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("IntegerProperty", 4)?;
+        state.serialize_field("type", "integer")?;
+        state.serialize_field("description", self.description)?;
+        state.serialize_field("minimum", &self.minimum)?;
+        state.serialize_field("maximum", &self.maximum)?;
+        state.end()
+    }
+}
+
+struct SearchFilesProperties;
+
+impl Serialize for SearchFilesProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry(
+            "query",
+            &StringProperty {
+                description: "Fuzzy path query, such as main rs, src tools, or config.",
+            },
+        )?;
+        map.serialize_entry(
+            "limit",
+            &IntegerProperty {
+                description: "Maximum number of results to return.",
+                minimum: 1,
+                maximum: MAX_SEARCH_RESULTS,
+            },
+        )?;
+        map.serialize_entry(
+            "offset",
+            &IntegerProperty {
+                description: "Result offset for pagination.",
+                minimum: 0,
+                maximum: MAX_SEARCH_OFFSET,
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct SearchTextProperties;
+
+impl Serialize for SearchTextProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry(
+            "query",
+            &StringProperty {
+                description: "Text query. Path constraints like src/*.rs may be included.",
+            },
+        )?;
+        map.serialize_entry(
+            "mode",
+            &StringProperty {
+                description: "Search mode: plain, regex, or fuzzy. Defaults to plain.",
+            },
+        )?;
+        map.serialize_entry(
+            "limit",
+            &IntegerProperty {
+                description: "Maximum number of matching lines to return.",
+                minimum: 1,
+                maximum: MAX_SEARCH_RESULTS,
+            },
+        )?;
+        map.serialize_entry(
+            "file_offset",
+            &IntegerProperty {
+                description: "File pagination offset returned by an earlier search_text call.",
+                minimum: 0,
+                maximum: MAX_SEARCH_OFFSET,
+            },
+        )?;
+        map.serialize_entry(
+            "before_context",
+            &IntegerProperty {
+                description: "Context lines to include before each match.",
+                minimum: 0,
+                maximum: MAX_TEXT_CONTEXT_LINES,
+            },
+        )?;
+        map.serialize_entry(
+            "after_context",
+            &IntegerProperty {
+                description: "Context lines to include after each match.",
+                minimum: 0,
+                maximum: MAX_TEXT_CONTEXT_LINES,
+            },
+        )?;
+        map.end()
+    }
+}
+
 /// Registry for built-in tools.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolRegistry {
     root: Arc<PathBuf>,
+    search: FffSearchIndex,
 }
 
 impl Default for ToolRegistry {
@@ -170,6 +338,7 @@ impl ToolRegistry {
         let root = root.into();
         let root = root.canonicalize().unwrap_or(root);
         Self {
+            search: FffSearchIndex::new(root.clone()),
             root: Arc::new(root),
         }
     }
@@ -192,6 +361,22 @@ impl ToolRegistry {
         let result = match call.name.as_str() {
             READ_FILE_TOOL => read_file(&self.root, &call.arguments).await,
             LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
+            SEARCH_FILES_TOOL => {
+                let search = self.search.clone();
+                let arguments = call.arguments.clone();
+                tokio::task::spawn_blocking(move || search.search_files(&arguments))
+                    .await
+                    .context("search_files task failed")
+                    .and_then(|result| result)
+            }
+            SEARCH_TEXT_TOOL => {
+                let search = self.search.clone();
+                let arguments = call.arguments.clone();
+                tokio::task::spawn_blocking(move || search.search_text(&arguments))
+                    .await
+                    .context("search_text task failed")
+                    .and_then(|result| result)
+            }
             _ => Err(anyhow::anyhow!("unknown tool {}", call.name)),
         };
 
@@ -225,6 +410,156 @@ pub(crate) struct ToolExecution {
 #[serde(deny_unknown_fields)]
 struct PathArguments {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchFilesArguments {
+    query: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchTextArguments {
+    query: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    file_offset: Option<usize>,
+    #[serde(default)]
+    before_context: Option<usize>,
+    #[serde(default)]
+    after_context: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct FffSearchIndex {
+    root: Arc<PathBuf>,
+    state: Arc<Mutex<Option<FffSearchState>>>,
+}
+
+impl FffSearchIndex {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root: Arc::new(root),
+            state: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn search_files(&self, arguments: &str) -> Result<String> {
+        let args = parse_search_files_arguments(arguments)?;
+        let query = trimmed_required("query", &args.query)?;
+        let limit = bounded_limit(args.limit, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
+        let offset = args.offset.unwrap_or(0).min(MAX_SEARCH_OFFSET);
+        let state = self.ready_state()?;
+        let picker_guard = state.picker.read()?;
+        let picker = picker_guard
+            .as_ref()
+            .context("search index is not initialized")?;
+        let tracker_guard = state.query_tracker.read()?;
+        let parser = QueryParser::default();
+        let query = parser.parse(query);
+        let results = picker.fuzzy_search_mixed(
+            &query,
+            tracker_guard.as_ref(),
+            FuzzySearchOptions {
+                max_threads: 0,
+                current_file: None,
+                project_path: Some(&self.root),
+                pagination: PaginationArgs { offset, limit },
+                ..Default::default()
+            },
+        );
+
+        Ok(format_file_search_results(picker, &results, offset, limit))
+    }
+
+    fn search_text(&self, arguments: &str) -> Result<String> {
+        let args = parse_search_text_arguments(arguments)?;
+        let query = trimmed_required("query", &args.query)?;
+        let limit = bounded_limit(args.limit, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
+        let state = self.ready_state()?;
+        let picker_guard = state.picker.read()?;
+        let picker = picker_guard
+            .as_ref()
+            .context("search index is not initialized")?;
+        let query = parse_grep_query(query);
+        let results = picker.grep(
+            &query,
+            &GrepSearchOptions {
+                mode: parse_grep_mode(args.mode.as_deref())?,
+                page_limit: limit,
+                file_offset: args.file_offset.unwrap_or(0).min(MAX_SEARCH_OFFSET),
+                before_context: args.before_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES),
+                after_context: args.after_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES),
+                time_budget_ms: DEFAULT_TEXT_SEARCH_TIMEOUT_MS,
+                trim_whitespace: false,
+                ..Default::default()
+            },
+        );
+
+        Ok(format_text_search_results(picker, &results))
+    }
+
+    fn ready_state(&self) -> Result<FffSearchState> {
+        let state = self.state()?;
+        anyhow::ensure!(
+            state.picker.wait_for_scan(FFF_SCAN_WAIT_TIMEOUT),
+            "search index is still scanning; retry shortly"
+        );
+        Ok(state)
+    }
+
+    fn state(&self) -> Result<FffSearchState> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("search index lock was poisoned"))?;
+        if let Some(state) = state.as_ref() {
+            return Ok(state.clone());
+        }
+
+        let initialized = FffSearchState::new(&self.root)?;
+        *state = Some(initialized.clone());
+        Ok(initialized)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FffSearchState {
+    picker: SharedPicker,
+    query_tracker: SharedQueryTracker,
+    _frecency: SharedFrecency,
+}
+
+impl FffSearchState {
+    fn new(root: &Path) -> Result<Self> {
+        let picker = SharedPicker::default();
+        let frecency = SharedFrecency::noop();
+        let query_tracker = SharedQueryTracker::noop();
+        FilePicker::new_with_shared_state(
+            picker.clone(),
+            frecency.clone(),
+            FilePickerOptions {
+                base_path: root.to_string_lossy().into_owned(),
+                mode: FFFMode::Ai,
+                watch: true,
+                ..Default::default()
+            },
+        )
+        .context("failed to initialize FFF search index")?;
+        Ok(Self {
+            picker,
+            query_tracker,
+            _frecency: frecency,
+        })
+    }
 }
 
 async fn read_file(root: &Path, arguments: &str) -> Result<String> {
@@ -294,6 +629,120 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
 
 fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
     serde_json::from_str(arguments).context("invalid path arguments")
+}
+
+fn parse_search_files_arguments(arguments: &str) -> Result<SearchFilesArguments> {
+    serde_json::from_str(arguments).context("invalid search_files arguments")
+}
+
+fn parse_search_text_arguments(arguments: &str) -> Result<SearchTextArguments> {
+    serde_json::from_str(arguments).context("invalid search_text arguments")
+}
+
+fn trimmed_required<'a>(name: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "{name} cannot be empty");
+    Ok(value)
+}
+
+fn bounded_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
+    limit.unwrap_or(default).clamp(1, max)
+}
+
+fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
+    let mode = mode.map(str::trim).filter(|mode| !mode.is_empty());
+    let mode = mode.map(str::to_ascii_lowercase);
+    match mode.as_deref() {
+        None | Some("plain") | Some("literal") => Ok(GrepMode::PlainText),
+        Some("regex") => Ok(GrepMode::Regex),
+        Some("fuzzy") => Ok(GrepMode::Fuzzy),
+        Some(mode) => anyhow::bail!("unsupported search_text mode {mode:?}"),
+    }
+}
+
+fn format_file_search_results(
+    picker: &FilePicker,
+    results: &fff_search::MixedSearchResult<'_>,
+    offset: usize,
+    limit: usize,
+) -> String {
+    if results.items.is_empty() {
+        return format!(
+            "No files or directories matched. total_files={} total_dirs={}",
+            results.total_files, results.total_dirs
+        );
+    }
+
+    let mut output = String::new();
+    for item in &results.items {
+        match item {
+            MixedItemRef::File(file) => {
+                output.push_str(&file.relative_path(picker));
+            }
+            MixedItemRef::Dir(dir) => {
+                output.push_str(&dir.relative_path(picker));
+                if !output.ends_with(std::path::MAIN_SEPARATOR) {
+                    output.push(std::path::MAIN_SEPARATOR);
+                }
+            }
+        }
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "[matched={} total_files={} total_dirs={} offset={} limit={}]",
+        results.total_matched, results.total_files, results.total_dirs, offset, limit
+    ));
+    output
+}
+
+fn format_text_search_results(
+    picker: &FilePicker,
+    results: &fff_search::grep::GrepResult<'_>,
+) -> String {
+    if results.matches.is_empty() {
+        return format!(
+            "No text matched. searched_files={} searchable_files={} total_files={}",
+            results.total_files_searched, results.filtered_file_count, results.total_files
+        );
+    }
+
+    let mut output = String::new();
+    if let Some(error) = &results.regex_fallback_error {
+        output.push_str("Regex fallback: ");
+        output.push_str(error);
+        output.push('\n');
+    }
+    for search_match in &results.matches {
+        let Some(file) = results.files.get(search_match.file_index) else {
+            continue;
+        };
+        output.push_str(&format!(
+            "{}:{}:{}: {}\n",
+            file.relative_path(picker),
+            search_match.line_number,
+            search_match.col.saturating_add(1),
+            search_match.line_content
+        ));
+        for line in &search_match.context_before {
+            output.push_str("  before: ");
+            output.push_str(line);
+            output.push('\n');
+        }
+        for line in &search_match.context_after {
+            output.push_str("  after: ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push_str(&format!(
+        "[matches={} files_with_matches={} searched_files={} searchable_files={} next_file_offset={}]",
+        results.matches.len(),
+        results.files_with_matches,
+        results.total_files_searched,
+        results.filtered_file_count,
+        results.next_file_offset,
+    ));
+    output
 }
 
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
@@ -370,6 +819,78 @@ mod tests {
                         "additionalProperties": false,
                     },
                 },
+                {
+                    "type": "function",
+                    "name": "search_files",
+                    "description": "Fuzzy-search indexed workspace files and directories by path.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Fuzzy path query, such as main rs, src tools, or config.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return.",
+                                "minimum": 1,
+                                "maximum": MAX_SEARCH_RESULTS,
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Result offset for pagination.",
+                                "minimum": 0,
+                                "maximum": MAX_SEARCH_OFFSET,
+                            },
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false,
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "search_text",
+                    "description": "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Text query. Path constraints like src/*.rs may be included.",
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Search mode: plain, regex, or fuzzy. Defaults to plain.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of matching lines to return.",
+                                "minimum": 1,
+                                "maximum": MAX_SEARCH_RESULTS,
+                            },
+                            "file_offset": {
+                                "type": "integer",
+                                "description": "File pagination offset returned by an earlier search_text call.",
+                                "minimum": 0,
+                                "maximum": MAX_SEARCH_OFFSET,
+                            },
+                            "before_context": {
+                                "type": "integer",
+                                "description": "Context lines to include before each match.",
+                                "minimum": 0,
+                                "maximum": MAX_TEXT_CONTEXT_LINES,
+                            },
+                            "after_context": {
+                                "type": "integer",
+                                "description": "Context lines to include after each match.",
+                                "minimum": 0,
+                                "maximum": MAX_TEXT_CONTEXT_LINES,
+                            },
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false,
+                    },
+                },
             ])
         );
     }
@@ -404,6 +925,50 @@ mod tests {
         assert!(list.success);
         assert_eq!(list.output, "src/");
 
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn executes_fff_search_tools() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-search-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("src")).unwrap();
+        fs::write(
+            temp.join("src").join("main.rs"),
+            "fn main() {\n    println!(\"special_needle\");\n}\n",
+        )
+        .unwrap();
+        fs::write(temp.join("src").join("lib.rs"), "pub fn helper() {}\n").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        let files = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_search_files".to_string(),
+                name: SEARCH_FILES_TOOL.to_string(),
+                arguments: r#"{"query":"main","limit":5}"#.to_string(),
+            })
+            .await;
+        let text = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_search_text".to_string(),
+                name: SEARCH_TEXT_TOOL.to_string(),
+                arguments: r#"{"query":"special_needle","limit":5}"#.to_string(),
+            })
+            .await;
+
+        assert!(files.success, "{}", files.output);
+        assert!(files.output.contains("src/main.rs"), "{}", files.output);
+        assert!(text.success, "{}", text.output);
+        assert!(text.output.contains("src/main.rs:2:"), "{}", text.output);
+        assert!(text.output.contains("special_needle"), "{}", text.output);
+
+        drop(registry);
         fs::remove_dir_all(&temp).unwrap();
     }
 
@@ -508,5 +1073,12 @@ mod tests {
         assert!(!result.success);
         assert!(result.output.contains("path escapes workspace"));
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    fn unique_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
