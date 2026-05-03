@@ -9,16 +9,18 @@ async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }
 base64 = "0.22"
 bytes = "1"
-fff-search = { version = "0.6.4", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.3"
+globset = "0.4"
 h3 = "0.0.8"
 h3-axum = "0.2"
 h3-quinn = "0.0.10"
+ignore = "0.4"
 memchr = "2"
 mimalloc = "0.1"
 quinn = "0.11"
 rcgen = "0.14"
+regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
