@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,6 +31,7 @@ use axum::Router;
 use base64::Engine;
 use bytes::Bytes;
 use rcgen::CertifiedKey;
+use rustls::pki_types::pem::PemObject;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -211,10 +211,8 @@ fn generate_self_signed_cert() -> Result<CertifiedKey<rcgen::KeyPair>> {
 }
 
 fn read_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read TLS certificate {}", path.display()))?;
-    let mut reader = BufReader::new(bytes.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = rustls::pki_types::CertificateDer::pem_file_iter(path)
+        .with_context(|| format!("failed to read TLS certificate {}", path.display()))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .with_context(|| format!("failed to parse TLS certificate {}", path.display()))?;
     anyhow::ensure!(
@@ -226,17 +224,8 @@ fn read_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<
 }
 
 fn read_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read TLS private key {}", path.display()))?;
-    let mut reader = BufReader::new(bytes.as_slice());
-    rustls_pemfile::private_key(&mut reader)
-        .with_context(|| format!("failed to parse TLS private key {}", path.display()))?
-        .with_context(|| {
-            format!(
-                "TLS private key {} did not contain a private key",
-                path.display()
-            )
-        })
+    rustls::pki_types::PrivateKeyDer::from_pem_file(path)
+        .with_context(|| format!("failed to parse TLS private key {}", path.display()))
 }
 
 async fn handle_h3_connection(incoming: quinn::Incoming, app: Router) -> Result<()> {
