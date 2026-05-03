@@ -1,0 +1,33 @@
+# Model Client Architecture
+
+`ChatGptClient` is the async transport for ChatGPT Codex Responses calls. It
+implements `ModelStreamer`, which keeps the agent loop independent from a
+specific backend provider.
+
+## Flow
+
+1. `ChatGptClient::new` builds one reusable async `reqwest::Client`.
+2. `stream_conversation` receives a borrowed prompt window and `SessionId`.
+3. The request is serialized from typed borrowed structs.
+4. The response body is parsed as SSE.
+5. Assistant text deltas are forwarded immediately through the callback.
+6. Completed assistant text is returned to the session loop for storage.
+
+## Responsibilities
+
+- `ClientConfig` supplies model, endpoint, instructions, headers, and timeout.
+- `ChatGptClient` authenticates with Codex OAuth credentials.
+- The typed request structs shape Responses API payloads.
+- `AssistantText` accumulates streamed text and handles fallback completed items.
+
+## Performance Notes
+
+- Async HTTP avoids blocking backend request workers.
+- Typed request serialization avoids constructing a generic JSON tree first.
+- SSE event parsing borrows event fields and raw nested payloads where possible.
+- Prompt-cache keys are stable per configured namespace and session.
+
+## Current Scope
+
+The client does not yet support request cancellation, retries, websocket
+transport, provider failover, or remote compaction.

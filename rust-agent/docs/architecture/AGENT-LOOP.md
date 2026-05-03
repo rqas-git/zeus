@@ -59,3 +59,11 @@ emit an error event.
 Conversation history is in memory only. Persistence, tools, cancellation, and
 semantic context compaction are intentionally out of scope until product behavior
 requires them.
+
+## Related Docs
+
+- [Service Layer](SERVICE.md)
+- [Model Client](MODEL-CLIENT.md)
+- [Configuration](CONFIGURATION.md)
+- [Context Window](CONTEXT-WINDOW.md)
+- [Terminal Harness](TERMINAL-HARNESS.md)
