@@ -4,9 +4,10 @@ use anyhow::Context;
 use anyhow::Result;
 use reqwest::blocking::Client;
 use reqwest::header;
+use serde::ser::SerializeSeq;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 use std::io::BufRead;
 use std::io::BufReader;
 
@@ -79,17 +80,17 @@ impl ChatGptClient {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get());
-        let body = serde_json::json!({
-            "model": self.config.model(),
-            "instructions": self.config.instructions(),
-            "input": responses_input(messages),
-            "tools": [],
-            "tool_choice": "auto",
-            "parallel_tool_calls": false,
-            "store": false,
-            "stream": true,
-            "prompt_cache_key": prompt_cache_key,
-        });
+        let body = ResponsesRequest {
+            model: self.config.model(),
+            instructions: self.config.instructions(),
+            input: responses_input(messages),
+            tools: EmptyArray,
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            store: false,
+            stream: true,
+            prompt_cache_key: &prompt_cache_key,
+        };
 
         let response = self
             .http
@@ -118,8 +119,51 @@ impl ChatGptClient {
     }
 }
 
-fn responses_input<'a>(messages: &'a [ConversationMessage<'a>]) -> Vec<ResponsesMessage<'a>> {
-    messages.iter().map(ResponsesMessage::from).collect()
+#[derive(Debug, Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    instructions: &'a str,
+    input: ResponsesInput<'a>,
+    tools: EmptyArray,
+    tool_choice: &'static str,
+    parallel_tool_calls: bool,
+    store: bool,
+    stream: bool,
+    prompt_cache_key: &'a str,
+}
+
+fn responses_input<'a>(messages: &'a [ConversationMessage<'a>]) -> ResponsesInput<'a> {
+    ResponsesInput { messages }
+}
+
+#[derive(Debug)]
+struct ResponsesInput<'a> {
+    messages: &'a [ConversationMessage<'a>],
+}
+
+impl Serialize for ResponsesInput<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.messages.len()))?;
+        for message in self.messages {
+            seq.serialize_element(&ResponsesMessage::from(message))?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EmptyArray;
+
+impl Serialize for EmptyArray {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_seq(Some(0))?.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -238,7 +282,7 @@ impl AssistantText {
         let event: StreamEvent = serde_json::from_str(data)
             .with_context(|| format!("failed to parse SSE data: {}", truncate_for_error(data)))?;
 
-        match event.kind.as_str() {
+        match event.kind {
             "response.output_text.delta" => {
                 if let Some(delta) = event.delta {
                     on_delta(&delta)?;
@@ -247,10 +291,10 @@ impl AssistantText {
             }
             "response.output_item.done" if self.text.is_empty() => {
                 self.fallback_text
-                    .push_str(&assistant_text_from_item(event.item.as_ref()));
+                    .push_str(&assistant_text_from_item(event.item));
             }
             "response.failed" => {
-                let message = response_error_message(event.response.as_ref())
+                let message = response_error_message(event.response)
                     .unwrap_or_else(|| "response failed".to_string());
                 anyhow::bail!("{message}");
             }
@@ -276,29 +320,54 @@ impl AssistantText {
     }
 }
 
-fn assistant_text_from_item(item: Option<&Value>) -> String {
+fn assistant_text_from_item(item: Option<&RawValue>) -> String {
     let Some(item) = item else {
         return String::new();
     };
-    if item.get("role").and_then(Value::as_str) != Some("assistant") {
+
+    let Ok(item) = serde_json::from_str::<OutputItem>(item.get()) else {
+        return String::new();
+    };
+    if item.role != Some("assistant") {
         return String::new();
     }
 
-    item.get("content")
-        .and_then(Value::as_array)
+    item.content
         .into_iter()
-        .flatten()
-        .filter(|content| content.get("type").and_then(Value::as_str) == Some("output_text"))
-        .filter_map(|content| content.get("text").and_then(Value::as_str))
+        .filter(|content| content.kind == "output_text")
+        .filter_map(|content| content.text)
         .collect::<String>()
 }
 
-fn response_error_message(response: Option<&Value>) -> Option<String> {
-    response?
-        .get("error")?
-        .get("message")?
-        .as_str()
-        .map(ToOwned::to_owned)
+#[derive(Debug, Deserialize)]
+struct OutputItem<'a> {
+    role: Option<&'a str>,
+    #[serde(default, borrow)]
+    content: Vec<OutputContent<'a>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    text: Option<&'a str>,
+}
+
+fn response_error_message(response: Option<&RawValue>) -> Option<String> {
+    let response = response?;
+    let response = serde_json::from_str::<FailedResponse>(response.get()).ok()?;
+    response.error?.message.map(ToOwned::to_owned)
+}
+
+#[derive(Debug, Deserialize)]
+struct FailedResponse<'a> {
+    #[serde(borrow)]
+    error: Option<ResponseError<'a>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseError<'a> {
+    message: Option<&'a str>,
 }
 
 fn truncate_for_error(value: &str) -> String {
@@ -318,12 +387,14 @@ fn truncate_for_error(value: &str) -> String {
 }
 
 #[derive(Debug, Deserialize)]
-struct StreamEvent {
+struct StreamEvent<'a> {
     #[serde(rename = "type")]
-    kind: String,
-    delta: Option<String>,
-    response: Option<Value>,
-    item: Option<Value>,
+    kind: &'a str,
+    delta: Option<&'a str>,
+    #[serde(borrow)]
+    response: Option<&'a RawValue>,
+    #[serde(borrow)]
+    item: Option<&'a RawValue>,
 }
 
 #[cfg(test)]
