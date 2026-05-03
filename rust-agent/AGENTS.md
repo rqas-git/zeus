@@ -32,7 +32,7 @@ cd /Users/ajc/rust-agent
 cargo run
 ```
 
-Then type messages after the `You:` prompt. The interactive session keeps conversation history in memory until it exits. Submit a blank line to exit.
+Then type messages after the `You:` prompt. The interactive session keeps recent conversation history in memory until it exits, bounded by `RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Submit a blank line to exit.
 
 ## Authentication
 

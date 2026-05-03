@@ -10,7 +10,8 @@ can submit work without rebuilding transport state for every request.
 2. Each request supplies a `SessionId` and user message or session model update.
 3. `AgentService` validates model updates against `ModelConfig`.
 4. `AgentService` finds or creates the matching `AgentLoop`.
-5. The session loop streams the selected model response and emits `AgentEvent`s.
+5. The session loop streams the selected model response and emits `AgentEvent`s,
+   including the completed assistant message.
 6. The caller decides how to translate events into terminal output, SSE, or
    WebSocket messages.
 
@@ -26,10 +27,13 @@ can submit work without rebuilding transport state for every request.
 
 - The model client is reused across sessions.
 - Session state is reused across turns.
+- Session history is pruned by each session loop according to the configured
+  history limits.
 - Session model changes do not rebuild the HTTP client.
 - The service avoids frontend assumptions; event sinks stay caller-provided.
 
 ## Current Scope
 
-The session map is process-local and unbounded. Eviction, persistence, and
-cross-process coordination should be added before multi-tenant production use.
+The session map is process-local and unbounded, but each session's retained
+message history is bounded. Session eviction, persistence, and cross-process
+coordination should be added before multi-tenant production use.

@@ -25,6 +25,8 @@ into client, model, context-window, output, and telemetry configuration.
 - `RUST_AGENT_PROMPT_CACHE_NAMESPACE`
 - `RUST_AGENT_CONTEXT_MAX_MESSAGES`
 - `RUST_AGENT_CONTEXT_MAX_BYTES`
+- `RUST_AGENT_HISTORY_MAX_MESSAGES`
+- `RUST_AGENT_HISTORY_MAX_BYTES`
 - `RUST_AGENT_DELTA_FLUSH_INTERVAL_MS`
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
 - `RUST_AGENT_CACHE_HEALTH`
@@ -40,7 +42,7 @@ into client, model, context-window, output, and telemetry configuration.
 
 - Configuration is loaded once, not per turn.
 - Model changes validate against an in-memory allowlist.
-- Context and output limits are plain copyable values.
+- Prompt, history, and output limits are plain copyable values.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 
