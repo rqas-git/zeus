@@ -7,6 +7,7 @@ use anyhow::Result;
 use reqwest::blocking::Client;
 use reqwest::header;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 
@@ -17,7 +18,38 @@ const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_VERSION: &str = "0.128.0";
 const MODEL: &str = "gpt-5.5";
 
-/// Blocking client for one-message ChatGPT requests through Codex OAuth.
+/// One message in the current in-memory conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConversationMessage {
+    role: ConversationRole,
+    text: String,
+}
+
+impl ConversationMessage {
+    /// Creates a user message.
+    pub(crate) fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: ConversationRole::User,
+            text: text.into(),
+        }
+    }
+
+    /// Creates an assistant message.
+    pub(crate) fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: ConversationRole::Assistant,
+            text: text.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConversationRole {
+    User,
+    Assistant,
+}
+
+/// Blocking client for ChatGPT requests through Codex OAuth.
 pub(crate) struct ChatGptClient {
     auth: CodexAuth,
     http: Client,
@@ -42,17 +74,20 @@ impl ChatGptClient {
     /// # Errors
     /// Returns an error for transport failures, backend errors, or malformed SSE.
     pub(crate) fn send_message(&self, message: &str) -> Result<String> {
+        self.send_conversation(&[ConversationMessage::user(message)])
+    }
+
+    /// Sends a conversation and returns the assistant text.
+    ///
+    /// # Errors
+    /// Returns an error for transport failures, backend errors, or malformed SSE.
+    pub(crate) fn send_conversation(&self, messages: &[ConversationMessage]) -> Result<String> {
+        anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
+
         let body = json!({
             "model": MODEL,
             "instructions": "You are a concise assistant.",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": message,
-                }],
-            }],
+            "input": responses_input(messages),
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": false,
@@ -85,6 +120,54 @@ impl ChatGptClient {
 
         extract_assistant_text(&response_text)
     }
+}
+
+fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesMessage<'_>> {
+    messages.iter().map(ResponsesMessage::from).collect()
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesMessage<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    role: &'static str,
+    content: [ResponsesContent<'a>; 1],
+}
+
+impl<'a> From<&'a ConversationMessage> for ResponsesMessage<'a> {
+    fn from(message: &'a ConversationMessage) -> Self {
+        Self {
+            kind: "message",
+            role: message.role.as_str(),
+            content: [ResponsesContent {
+                kind: message.role.content_type(),
+                text: &message.text,
+            }],
+        }
+    }
+}
+
+impl ConversationRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+
+    fn content_type(&self) -> &'static str {
+        match self {
+            Self::User => "input_text",
+            Self::Assistant => "output_text",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
 }
 
 fn extract_assistant_text(stream: &str) -> Result<String> {
@@ -200,6 +283,32 @@ struct StreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn serializes_conversation_history() {
+        let messages = [
+            ConversationMessage::user("hello"),
+            ConversationMessage::assistant("hi"),
+        ];
+        let input = responses_input(&messages);
+
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hi"}],
+                },
+            ])
+        );
+    }
 
     #[test]
     fn extracts_text_deltas() {

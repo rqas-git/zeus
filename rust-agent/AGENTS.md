@@ -30,7 +30,7 @@ cd /Users/ajc/rust-agent
 cargo run
 ```
 
-Then type a message after the `You:` prompt.
+Then type messages after the `You:` prompt. The interactive session keeps conversation history in memory until it exits. Submit a blank line to exit.
 
 ## Authentication
 
