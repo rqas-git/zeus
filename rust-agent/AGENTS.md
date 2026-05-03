@@ -1,5 +1,13 @@
 # Running rust-agent
 
+## Development Guidance
+
+When making changes, always validate all implemented functionality before finishing. Run the relevant automated checks and any live or end-to-end validation needed to prove the changed behavior works.
+
+Write concise, correct code. Follow DRY and YAGNI principles: avoid duplication, avoid speculative abstractions, and keep the implementation as small as the current behavior allows.
+
+Use [RUST-GUIDELINES.md](RUST-GUIDELINES.md) as the Rust design and style guide for this repository.
+
 Run the application from the repository root:
 
 ```bash
