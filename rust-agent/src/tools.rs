@@ -783,10 +783,15 @@ impl ToolRegistry {
 
     /// Executes a model tool call and converts failures into model-visible output.
     pub(crate) async fn execute(&self, call: ModelToolCall) -> ToolExecution {
+        self.execute_ref(&call).await
+    }
+
+    /// Executes a borrowed model tool call and converts failures into model-visible output.
+    pub(crate) async fn execute_ref(&self, call: &ModelToolCall) -> ToolExecution {
         if !self.specs().iter().any(|spec| spec.name() == call.name) {
             return ToolExecution {
-                call_id: call.call_id,
-                tool_name: call.name,
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
                 output: "Tool error: tool is not enabled by the current policy".to_string(),
                 success: false,
             };
@@ -822,14 +827,14 @@ impl ToolRegistry {
 
         match result {
             Ok(output) => ToolExecution {
-                call_id: call.call_id,
-                tool_name: call.name,
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
                 output,
                 success: true,
             },
             Err(error) => ToolExecution {
-                call_id: call.call_id,
-                tool_name: call.name,
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
                 output: format!("Tool error: {error}"),
                 success: false,
             },

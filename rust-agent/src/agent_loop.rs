@@ -748,7 +748,7 @@ impl AgentLoop {
                 return Ok(());
             }
 
-            self.execute_tool_calls(&tool_calls, emit).await?;
+            self.execute_tool_calls(tool_calls, emit).await?;
             self.store.prune_history(self.context_window);
         }
 
@@ -805,11 +805,11 @@ impl AgentLoop {
 
     async fn execute_tool_calls(
         &mut self,
-        tool_calls: &[ModelToolCall],
+        tool_calls: Vec<ModelToolCall>,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         let session_id = self.session_id();
-        for tool_call in tool_calls {
+        for tool_call in &tool_calls {
             emit(AgentEvent::ToolCallStarted {
                 session_id,
                 tool_call_id: &tool_call.call_id,
@@ -824,26 +824,34 @@ impl AgentLoop {
             join_all(
                 tool_calls
                     .iter()
-                    .cloned()
-                    .map(|tool_call| self.tools.execute(tool_call)),
+                    .map(|tool_call| self.tools.execute_ref(tool_call)),
             )
             .await
         } else {
             let mut executions = Vec::new();
-            for tool_call in tool_calls.iter().cloned() {
-                executions.push(self.tools.execute(tool_call).await);
+            for tool_call in &tool_calls {
+                executions.push(self.tools.execute_ref(tool_call).await);
             }
             executions
         };
 
-        self.store
-            .append_tool_transcript(tool_calls.iter().cloned(), executions.iter().cloned());
-        for execution in &executions {
+        let completions = executions
+            .iter()
+            .map(|execution| {
+                (
+                    execution.call_id.clone(),
+                    execution.tool_name.clone(),
+                    execution.success,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.store.append_tool_transcript(tool_calls, executions);
+        for (tool_call_id, tool_name, success) in completions {
             emit(AgentEvent::ToolCallCompleted {
                 session_id,
-                tool_call_id: &execution.call_id,
-                tool_name: &execution.tool_name,
-                success: execution.success,
+                tool_call_id: &tool_call_id,
+                tool_name: &tool_name,
+                success,
             })?;
         }
         Ok(())
