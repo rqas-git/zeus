@@ -14,8 +14,12 @@ use std::borrow::Cow;
 #[cfg(test)]
 use std::io::BufRead;
 
+use crate::agent_loop::CacheHealth;
+use crate::agent_loop::CacheStatus;
+use crate::agent_loop::ModelResponse;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionId;
+use crate::agent_loop::TokenUsage;
 use crate::auth::CodexAuth;
 use crate::config::ClientConfig;
 
@@ -80,34 +84,37 @@ impl ModelStreamer for ChatGptClient {
         session_id: SessionId,
         model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
-        let body = ResponsesRequest {
-            model,
-            instructions: self.config.instructions(),
-            input: responses_input(messages),
-            tools: EmptyArray,
-            tool_choice: "auto",
-            parallel_tool_calls: false,
-            store: false,
-            stream: true,
-            prompt_cache_key: &prompt_cache_key,
-        };
+        let stable_prefix = stable_prefix_stats(self.config.instructions());
+        let input_bytes = conversation_input_bytes(messages);
+        let response = {
+            let body = ResponsesRequest {
+                model,
+                instructions: self.config.instructions(),
+                input: responses_input(messages),
+                tools: EmptyArray,
+                tool_choice: "auto",
+                parallel_tool_calls: false,
+                store: false,
+                stream: true,
+                prompt_cache_key: &prompt_cache_key,
+            };
 
-        let response = self
-            .http
-            .post(self.config.responses_url())
-            .bearer_auth(self.auth.access_token())
-            .header("ChatGPT-Account-ID", self.auth.account_id())
-            .header("originator", self.config.originator())
-            .header("version", self.config.version())
-            .header(header::ACCEPT, "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .context("failed to send request to ChatGPT Codex backend")?;
+            self.http
+                .post(self.config.responses_url())
+                .bearer_auth(self.auth.access_token())
+                .header("ChatGPT-Account-ID", self.auth.account_id())
+                .header("originator", self.config.originator())
+                .header("version", self.config.version())
+                .header(header::ACCEPT, "text/event-stream")
+                .json(&body)
+                .send()
+                .await
+                .context("failed to send request to ChatGPT Codex backend")?
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -121,14 +128,29 @@ impl ModelStreamer for ChatGptClient {
             );
         }
 
-        read_assistant_text_stream(response, on_delta).await
+        let completion = read_assistant_text_stream(response, on_delta).await?;
+        let cache_health = CacheHealth {
+            model: model.to_string(),
+            prompt_cache_key,
+            stable_prefix_hash: stable_prefix.hash,
+            stable_prefix_bytes: stable_prefix.bytes,
+            message_count: messages.len(),
+            input_bytes,
+            response_id: completion.response_id,
+            usage: completion.usage,
+            cache_status: CacheStatus::FirstRequest,
+        };
+        Ok(ModelResponse::with_cache_health(
+            completion.text,
+            cache_health,
+        ))
     }
 }
 
 async fn read_assistant_text_stream(
     response: reqwest::Response,
     mut on_delta: impl FnMut(&str) -> Result<()>,
-) -> Result<String> {
+) -> Result<StreamCompletion> {
     let mut state = AssistantText::default();
     let mut stream = response.bytes_stream().eventsource();
 
@@ -140,6 +162,50 @@ async fn read_assistant_text_stream(
     }
 
     state.finish(&mut on_delta)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StablePrefixStats {
+    hash: String,
+    bytes: usize,
+}
+
+fn stable_prefix_stats(instructions: &str) -> StablePrefixStats {
+    let mut hash = Fnv1a64::new();
+    hash.update("instructions\0");
+    hash.update(instructions);
+    hash.update("\0tools\0[]");
+    StablePrefixStats {
+        hash: format!("{:016x}", hash.finish()),
+        bytes: instructions.len(),
+    }
+}
+
+fn conversation_input_bytes(messages: &[ConversationMessage<'_>]) -> usize {
+    messages.iter().map(|message| message.text.len()).sum()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    const fn new() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    fn update(&mut self, value: &str) {
+        for byte in value.as_bytes() {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    const fn finish(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -243,6 +309,14 @@ fn read_assistant_text(
     mut reader: impl BufRead,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<String> {
+    read_assistant_completion(&mut reader, &mut on_delta).map(|completion| completion.text)
+}
+
+#[cfg(test)]
+fn read_assistant_completion(
+    mut reader: impl BufRead,
+    mut on_delta: impl FnMut(&str) -> Result<()>,
+) -> Result<StreamCompletion> {
     let mut state = AssistantText::default();
     let mut event_data = String::new();
     let mut has_event_data = false;
@@ -289,6 +363,8 @@ fn read_assistant_text(
 struct AssistantText {
     text: String,
     fallback_text: String,
+    response_id: Option<String>,
+    usage: Option<TokenUsage>,
     completed: bool,
 }
 
@@ -323,6 +399,9 @@ impl AssistantText {
                 anyhow::bail!("{message}");
             }
             "response.completed" => {
+                let metadata = response_metadata(event.response);
+                self.response_id = metadata.response_id.or_else(|| self.response_id.take());
+                self.usage = metadata.usage.or(self.usage);
                 self.completed = true;
             }
             _ => {}
@@ -331,7 +410,7 @@ impl AssistantText {
         Ok(())
     }
 
-    fn finish(mut self, on_delta: &mut impl FnMut(&str) -> Result<()>) -> Result<String> {
+    fn finish(mut self, on_delta: &mut impl FnMut(&str) -> Result<()>) -> Result<StreamCompletion> {
         anyhow::ensure!(self.completed, "response stream ended before completion");
         if self.text.is_empty() {
             self.text = self.fallback_text;
@@ -340,8 +419,80 @@ impl AssistantText {
             }
         }
         anyhow::ensure!(!self.text.trim().is_empty(), "assistant response was empty");
-        Ok(self.text)
+        Ok(StreamCompletion {
+            text: self.text,
+            response_id: self.response_id,
+            usage: self.usage,
+        })
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StreamCompletion {
+    text: String,
+    response_id: Option<String>,
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Default)]
+struct ResponseMetadata {
+    response_id: Option<String>,
+    usage: Option<TokenUsage>,
+}
+
+fn response_metadata(response: Option<&RawValue>) -> ResponseMetadata {
+    let Some(response) = response else {
+        return ResponseMetadata::default();
+    };
+    let Ok(response) = serde_json::from_str::<CompletedResponse>(response.get()) else {
+        return ResponseMetadata::default();
+    };
+    ResponseMetadata {
+        response_id: response.id.map(Cow::into_owned),
+        usage: response.usage.map(ResponseUsage::into_token_usage),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletedResponse<'a> {
+    #[serde(borrow)]
+    id: Option<Cow<'a, str>>,
+    usage: Option<ResponseUsage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct ResponseUsage {
+    #[serde(default, alias = "prompt_tokens")]
+    input_tokens: Option<u64>,
+    #[serde(default, alias = "completion_tokens")]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default, alias = "cached_prompt_tokens")]
+    cached_input_tokens: Option<u64>,
+    #[serde(default, alias = "prompt_tokens_details")]
+    input_tokens_details: Option<InputTokenDetails>,
+}
+
+impl ResponseUsage {
+    fn into_token_usage(self) -> TokenUsage {
+        let cached_input_tokens = self.cached_input_tokens.or_else(|| {
+            self.input_tokens_details
+                .and_then(|details| details.cached_tokens)
+        });
+        TokenUsage::new(
+            self.input_tokens,
+            cached_input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct InputTokenDetails {
+    #[serde(default, alias = "cached_input_tokens")]
+    cached_tokens: Option<u64>,
 }
 
 fn assistant_text_from_item(item: Option<&RawValue>) -> String {
@@ -545,5 +696,35 @@ data: {"type":"response.failed","response":{"error":{"message":"nope"}}}
 
         let error = extract_assistant_text(stream).unwrap_err().to_string();
         assert_eq!(error, "nope");
+    }
+
+    #[test]
+    fn extracts_response_cache_metadata() {
+        let stream = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":64},"output_tokens":7,"total_tokens":107}}}
+
+"#;
+
+        let completion =
+            read_assistant_completion(std::io::Cursor::new(stream.as_bytes()), |_| Ok(())).unwrap();
+
+        assert_eq!(completion.text, "hello");
+        assert_eq!(completion.response_id.as_deref(), Some("resp_1"));
+        assert_eq!(
+            completion.usage,
+            Some(TokenUsage::new(Some(100), Some(64), Some(7), Some(107)))
+        );
+    }
+
+    #[test]
+    fn stable_prefix_hash_changes_with_instructions() {
+        let first = stable_prefix_stats("You are concise.");
+        let second = stable_prefix_stats("You are verbose.");
+
+        assert_eq!(first.bytes, "You are concise.".len());
+        assert_ne!(first.hash, second.hash);
     }
 }

@@ -13,7 +13,8 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
    with the configured context-window bounds and default model.
 4. The loop appends the user message, marks the session `Running`, builds a
    bounded borrowed prompt window, streams the selected model response, emits text
-   deltas, stores the assistant message, then returns to `Idle`.
+   deltas and cache telemetry, stores the assistant message, then returns to
+   `Idle`.
 5. Interactive mode reuses the same service and session, so history lasts for
    the current terminal process.
 
@@ -44,9 +45,9 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
 
 ## Events
 
-`AgentEvent` reports status changes, streamed assistant text, completed messages,
-and errors. This gives a future HTTP, WebSocket, or SSE frontend a clear boundary
-without coupling it to terminal output.
+`AgentEvent` reports status changes, streamed assistant text, cache-health
+telemetry, completed messages, and errors. This gives a future HTTP, WebSocket,
+or SSE frontend a clear boundary without coupling it to terminal output.
 
 ## Error Handling
 

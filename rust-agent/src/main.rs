@@ -11,7 +11,9 @@ use std::io::Write;
 use std::time::Instant;
 
 use agent_loop::AgentEvent;
+use agent_loop::CacheHealth;
 use agent_loop::SessionId;
+use agent_loop::TokenUsage;
 use anyhow::Context;
 use anyhow::Result;
 use auth::CodexAuth;
@@ -30,6 +32,7 @@ async fn main() -> Result<()> {
         context,
         models,
         output,
+        telemetry,
     } = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
     let client = ChatGptClient::new(auth, client)?;
@@ -37,10 +40,10 @@ async fn main() -> Result<()> {
     let session_id = SessionId::new(1);
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&mut service, session_id, output).await;
+        return run_interactive_loop(&mut service, session_id, output, telemetry).await;
     };
 
-    print_agent_response(&mut service, session_id, output, message).await?;
+    print_agent_response(&mut service, session_id, output, telemetry, message).await?;
     Ok(())
 }
 
@@ -57,6 +60,7 @@ async fn run_interactive_loop(
     service: &mut AgentService<ChatGptClient>,
     session_id: SessionId,
     output: config::OutputConfig,
+    telemetry: config::TelemetryConfig,
 ) -> Result<()> {
     loop {
         let Some(input) = read_prompt()? else {
@@ -65,7 +69,7 @@ async fn run_interactive_loop(
 
         match input {
             InteractiveInput::Message(message) => {
-                print_agent_response(service, session_id, output, message).await?;
+                print_agent_response(service, session_id, output, telemetry, message).await?;
             }
             InteractiveInput::ShowModel => {
                 println!("Model: {}", service.session_model(session_id));
@@ -87,6 +91,7 @@ async fn print_agent_response(
     service: &mut AgentService<ChatGptClient>,
     session_id: SessionId,
     output: config::OutputConfig,
+    telemetry: config::TelemetryConfig,
     message: String,
 ) -> Result<String> {
     let mut stdout = io::stdout().lock();
@@ -94,14 +99,66 @@ async fn print_agent_response(
     stdout.flush().context("failed to flush assistant prompt")?;
 
     let mut delta_writer = DeltaWriter::new(stdout, output);
+    let mut cache_health = None;
     let response = service
         .submit_user_message(session_id, message, |event| match event {
             AgentEvent::TextDelta { delta, .. } => delta_writer.write_delta(delta),
+            AgentEvent::CacheHealth {
+                cache_health: health,
+                ..
+            } => {
+                cache_health = Some(health.clone());
+                Ok(())
+            }
             _ => Ok(()),
         })
         .await;
     delta_writer.finish_line()?;
+    if telemetry.cache_health() {
+        if let Some(cache_health) = &cache_health {
+            eprintln!("{}", format_cache_health(cache_health));
+        }
+    }
     response
+}
+
+fn format_cache_health(cache_health: &CacheHealth) -> String {
+    let usage = cache_health
+        .usage
+        .map(format_token_usage)
+        .unwrap_or_else(|| "usage=unreported".to_string());
+    let response_id = cache_health.response_id.as_deref().unwrap_or("none");
+    format!(
+        "Cache: status={} model={} key={} prefix_hash={} prefix_bytes={} messages={} input_bytes={} response_id={} {}",
+        cache_health.cache_status.as_str(),
+        cache_health.model,
+        cache_health.prompt_cache_key,
+        cache_health.stable_prefix_hash,
+        cache_health.stable_prefix_bytes,
+        cache_health.message_count,
+        cache_health.input_bytes,
+        response_id,
+        usage,
+    )
+}
+
+fn format_token_usage(usage: TokenUsage) -> String {
+    let cache_hit = usage
+        .cache_hit_ratio()
+        .map(|ratio| format!("{:.1}%", ratio * 100.0))
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "input_tokens={} cached_input_tokens={} cache_hit={} output_tokens={} total_tokens={}",
+        format_optional_u64(usage.input_tokens),
+        format_optional_u64(usage.cached_input_tokens),
+        cache_hit,
+        format_optional_u64(usage.output_tokens),
+        format_optional_u64(usage.total_tokens),
+    )
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
 }
 
 struct DeltaWriter<W> {

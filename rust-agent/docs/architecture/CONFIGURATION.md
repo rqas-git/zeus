@@ -1,7 +1,7 @@
 # Configuration Architecture
 
 `AppConfig` collects runtime settings from environment variables and splits them
-into client, model, context-window, and output configuration.
+into client, model, context-window, output, and telemetry configuration.
 
 ## Flow
 
@@ -10,7 +10,8 @@ into client, model, context-window, and output configuration.
 3. `ModelConfig` configures the default model and backend allowlist.
 4. `ContextWindowConfig` configures prompt history bounds.
 5. `OutputConfig` configures terminal delta buffering.
-6. The resulting values are passed into long-lived services.
+6. `TelemetryConfig` configures optional terminal telemetry output.
+7. The resulting values are passed into long-lived services.
 
 ## Environment Variables
 
@@ -26,6 +27,7 @@ into client, model, context-window, and output configuration.
 - `RUST_AGENT_CONTEXT_MAX_BYTES`
 - `RUST_AGENT_DELTA_FLUSH_INTERVAL_MS`
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
+- `RUST_AGENT_CACHE_HEALTH`
 
 ## Responsibilities
 
@@ -39,6 +41,7 @@ into client, model, context-window, and output configuration.
 - Configuration is loaded once, not per turn.
 - Model changes validate against an in-memory allowlist.
 - Context and output limits are plain copyable values.
+- Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 
 ## Current Scope

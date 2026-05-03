@@ -12,12 +12,14 @@ to exercise the same service path that future endpoints should use.
 5. `/model` shows or changes the session model through `AgentService`.
 6. `/models` lists the backend allowlist.
 7. `TextDelta` events are buffered and written to stdout.
+8. When `RUST_AGENT_CACHE_HEALTH=1`, cache-health events are printed to stderr.
 
 ## Responsibilities
 
 - `main.rs` owns terminal prompts and stdout formatting.
 - Interactive commands stay local to the harness and call service methods.
 - `DeltaWriter` batches assistant text deltas.
+- Cache-health telemetry is opt-in and stays off stdout.
 - `AgentService` owns session state and model execution.
 - `ChatGptClient` owns remote model I/O.
 

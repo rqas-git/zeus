@@ -108,6 +108,7 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use crate::agent_loop::ModelResponse;
     use crate::client::ConversationMessage;
 
     use super::*;
@@ -255,8 +256,8 @@ mod tests {
             _session_id: SessionId,
             model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String> {
-            (self.stream.borrow_mut())(messages, model, on_delta)
+        ) -> Result<ModelResponse> {
+            (self.stream.borrow_mut())(messages, model, on_delta).map(ModelResponse::new)
         }
     }
 }

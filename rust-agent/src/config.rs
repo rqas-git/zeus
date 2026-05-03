@@ -15,6 +15,7 @@ const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
 const DEFAULT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
+const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
 
 /// Configuration for one running rust-agent process.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub(crate) struct AppConfig {
     pub(crate) context: ContextWindowConfig,
     pub(crate) models: ModelConfig,
     pub(crate) output: OutputConfig,
+    pub(crate) telemetry: TelemetryConfig,
 }
 
 impl AppConfig {
@@ -36,6 +38,7 @@ impl AppConfig {
             context: ContextWindowConfig::from_env()?,
             models: ModelConfig::from_env()?,
             output: OutputConfig::from_env()?,
+            telemetry: TelemetryConfig::from_env()?,
         })
     }
 }
@@ -320,6 +323,32 @@ impl Default for OutputConfig {
     }
 }
 
+/// Controls optional terminal telemetry output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TelemetryConfig {
+    cache_health: bool,
+}
+
+impl TelemetryConfig {
+    /// Loads telemetry configuration from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if a boolean environment variable is invalid.
+    pub(crate) fn from_env() -> Result<Self> {
+        Ok(Self {
+            cache_health: env_parse_bool(
+                "RUST_AGENT_CACHE_HEALTH",
+                DEFAULT_CACHE_HEALTH_TELEMETRY,
+            )?,
+        })
+    }
+
+    /// Returns whether cache-health lines are printed by the terminal harness.
+    pub(crate) const fn cache_health(self) -> bool {
+        self.cache_health
+    }
+}
+
 fn env_string(name: &str, default: &str) -> String {
     std::env::var(name)
         .ok()
@@ -372,6 +401,17 @@ fn env_parse_u64(name: &str, default: u64) -> Result<u64> {
 
 fn env_parse_usize(name: &str, default: usize) -> Result<usize> {
     parse_env(name, default)
+}
+
+fn env_parse_bool(name: &str, default: bool) -> Result<bool> {
+    let Some(raw) = std::env::var(name).ok().filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("failed to parse {name}={raw:?}: expected boolean"),
+    }
 }
 
 fn parse_env<T>(name: &str, default: T) -> Result<T>

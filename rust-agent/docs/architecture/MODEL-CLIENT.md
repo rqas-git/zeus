@@ -12,7 +12,8 @@ specific backend provider.
 3. The request is serialized from typed borrowed structs.
 4. The response body is parsed as SSE.
 5. Assistant text deltas are forwarded immediately through the callback.
-6. Completed assistant text is returned to the session loop for storage.
+6. Completed response metadata is parsed from the terminal SSE event.
+7. Assistant text and cache-health telemetry are returned to the session loop.
 
 ## Responsibilities
 
@@ -20,7 +21,8 @@ specific backend provider.
 - `AgentService` supplies the selected model for each request.
 - `ChatGptClient` authenticates with Codex OAuth credentials.
 - The typed request structs shape Responses API payloads.
-- `AssistantText` accumulates streamed text and handles fallback completed items.
+- `AssistantText` accumulates streamed text, handles fallback completed items,
+  and captures response id plus token usage when the backend reports it.
 
 ## Performance Notes
 
@@ -28,6 +30,8 @@ specific backend provider.
 - Typed request serialization avoids constructing a generic JSON tree first.
 - SSE event parsing borrows event fields and raw nested payloads where possible.
 - Prompt-cache keys are stable per configured namespace, session, and model.
+- Cache-health telemetry records prompt-cache key, stable-prefix hash,
+  retained-message shape, response id, and provider token counters.
 
 ## Current Scope
 

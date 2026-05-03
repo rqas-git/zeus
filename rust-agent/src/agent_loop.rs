@@ -93,10 +93,110 @@ pub(crate) enum AgentEvent<'a> {
         role: MessageRole,
         text: &'a str,
     },
+    CacheHealth {
+        session_id: SessionId,
+        cache_health: &'a CacheHealth,
+    },
     Error {
         session_id: SessionId,
         message: &'a str,
     },
+}
+
+/// Provider token usage reported for one completed model response.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TokenUsage {
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) cached_input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
+    pub(crate) total_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Creates token usage from provider-reported counters.
+    pub(crate) const fn new(
+        input_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+    ) -> Self {
+        Self {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            total_tokens,
+        }
+    }
+
+    /// Returns the ratio of cached input tokens to all input tokens.
+    pub(crate) fn cache_hit_ratio(self) -> Option<f64> {
+        let input_tokens = self.input_tokens?;
+        if input_tokens == 0 {
+            return None;
+        }
+        Some(self.cached_input_tokens.unwrap_or(0) as f64 / input_tokens as f64)
+    }
+}
+
+/// Whether the cacheable request shape matches the previous turn in this session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheStatus {
+    FirstRequest,
+    ReusedPrefix,
+    CacheKeyChanged,
+    StablePrefixChanged,
+}
+
+impl CacheStatus {
+    /// Returns a stable telemetry label.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstRequest => "first_request",
+            Self::ReusedPrefix => "reused_prefix",
+            Self::CacheKeyChanged => "cache_key_changed",
+            Self::StablePrefixChanged => "stable_prefix_changed",
+        }
+    }
+}
+
+/// Cache-related telemetry for one model request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CacheHealth {
+    pub(crate) model: String,
+    pub(crate) prompt_cache_key: String,
+    pub(crate) stable_prefix_hash: String,
+    pub(crate) stable_prefix_bytes: usize,
+    pub(crate) message_count: usize,
+    pub(crate) input_bytes: usize,
+    pub(crate) response_id: Option<String>,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) cache_status: CacheStatus,
+}
+
+/// Completed model response plus optional provider telemetry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelResponse {
+    pub(crate) text: String,
+    pub(crate) cache_health: Option<CacheHealth>,
+}
+
+impl ModelResponse {
+    /// Creates a model response without provider telemetry.
+    #[cfg(test)]
+    pub(crate) fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_health: None,
+        }
+    }
+
+    /// Creates a model response with cache telemetry.
+    pub(crate) fn with_cache_health(text: impl Into<String>, cache_health: CacheHealth) -> Self {
+        Self {
+            text: text.into(),
+            cache_health: Some(cache_health),
+        }
+    }
 }
 
 /// Streams a prompt window into an assistant response.
@@ -108,7 +208,7 @@ pub(crate) trait ModelStreamer {
         session_id: SessionId,
         model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-    ) -> impl Future<Output = Result<String>> + 'a;
+    ) -> impl Future<Output = Result<ModelResponse>> + 'a;
 }
 
 /// Per-session runtime settings.
@@ -143,6 +243,7 @@ pub(crate) struct InMemorySessionStore {
     config: SessionConfig,
     next_message_id: MessageId,
     messages: Vec<AgentMessage>,
+    last_cache_observation: Option<CacheObservation>,
 }
 
 impl InMemorySessionStore {
@@ -154,6 +255,7 @@ impl InMemorySessionStore {
             config,
             next_message_id: MessageId(1),
             messages: Vec::new(),
+            last_cache_observation: None,
         }
     }
 
@@ -229,6 +331,32 @@ impl InMemorySessionStore {
         retained.reverse();
         retained
     }
+
+    fn cache_status(&self, cache_health: &CacheHealth) -> CacheStatus {
+        let Some(previous) = &self.last_cache_observation else {
+            return CacheStatus::FirstRequest;
+        };
+        if previous.prompt_cache_key != cache_health.prompt_cache_key {
+            return CacheStatus::CacheKeyChanged;
+        }
+        if previous.stable_prefix_hash != cache_health.stable_prefix_hash {
+            return CacheStatus::StablePrefixChanged;
+        }
+        CacheStatus::ReusedPrefix
+    }
+
+    fn record_cache_observation(&mut self, cache_health: &CacheHealth) {
+        self.last_cache_observation = Some(CacheObservation {
+            prompt_cache_key: cache_health.prompt_cache_key.clone(),
+            stable_prefix_hash: cache_health.stable_prefix_hash.clone(),
+        });
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheObservation {
+    prompt_cache_key: String,
+    stable_prefix_hash: String,
 }
 
 /// Runs ordered turns for a single in-memory session.
@@ -381,9 +509,18 @@ impl AgentLoop {
         let session_id = self.session_id();
         let selected_model = self.store.model();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
-        let assistant_text = model
+        let mut model_response = model
             .stream_conversation(&history, session_id, selected_model, &mut on_delta)
             .await?;
+        if let Some(cache_health) = model_response.cache_health.as_mut() {
+            cache_health.cache_status = self.store.cache_status(cache_health);
+            emit(AgentEvent::CacheHealth {
+                session_id,
+                cache_health,
+            })?;
+            self.store.record_cache_observation(cache_health);
+        }
+        let assistant_text = model_response.text;
         let assistant_id = self
             .store
             .append_message(MessageRole::Assistant, assistant_text.clone());
@@ -579,6 +716,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emits_cache_health_status_for_model_responses() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let streamer = CacheStreamer { turn: Cell::new(0) };
+        let mut events = Vec::new();
+
+        agent
+            .submit_user_message("first", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        agent
+            .submit_user_message("second", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events,
+            [
+                "message:user:first",
+                "status:Running",
+                "cache:first_request",
+                "message:assistant:first answer",
+                "status:Idle",
+                "message:user:second",
+                "status:Running",
+                "cache:reused_prefix",
+                "message:assistant:second answer",
+                "status:Idle",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn records_failed_status_and_error_event() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
@@ -727,6 +902,9 @@ mod tests {
             AgentEvent::MessageCompleted { role, text, .. } => {
                 format!("message:{}:{text}", role_name(role))
             }
+            AgentEvent::CacheHealth { cache_health, .. } => {
+                format!("cache:{}", cache_health.cache_status.as_str())
+            }
             AgentEvent::Error { message, .. } => format!("error:{message}"),
         }
     }
@@ -764,8 +942,44 @@ mod tests {
             _session_id: SessionId,
             model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String> {
-            (self.stream.borrow_mut())(messages, model, on_delta)
+        ) -> Result<ModelResponse> {
+            (self.stream.borrow_mut())(messages, model, on_delta).map(ModelResponse::new)
+        }
+    }
+
+    struct CacheStreamer {
+        turn: Cell<usize>,
+    }
+
+    impl ModelStreamer for CacheStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _session_id: SessionId,
+            model: &'a str,
+            _on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.get();
+            self.turn.set(turn + 1);
+            let text = if turn == 0 {
+                "first answer"
+            } else {
+                "second answer"
+            };
+            Ok(ModelResponse::with_cache_health(
+                text,
+                CacheHealth {
+                    model: model.to_string(),
+                    prompt_cache_key: format!("cache-key-{model}"),
+                    stable_prefix_hash: "stable-prefix-hash".to_string(),
+                    stable_prefix_bytes: 24,
+                    message_count: 1,
+                    input_bytes: 5,
+                    response_id: Some(format!("resp_{turn}")),
+                    usage: Some(TokenUsage::new(Some(100), Some(80), Some(10), Some(110))),
+                    cache_status: CacheStatus::FirstRequest,
+                },
+            ))
         }
     }
 }
