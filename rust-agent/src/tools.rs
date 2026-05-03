@@ -9,9 +9,9 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use fff_search::file_picker::FilePicker;
+use fff_search::grep::parse_grep_query;
 use fff_search::grep::GrepMode;
 use fff_search::grep::GrepSearchOptions;
-use fff_search::grep::parse_grep_query;
 use fff_search::FFFMode;
 use fff_search::FilePickerOptions;
 use fff_search::FuzzySearchOptions;
@@ -41,7 +41,7 @@ const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
-const FFF_SCAN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
@@ -68,7 +68,8 @@ const TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: SEARCH_TEXT_TOOL,
-        description: "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
+        description:
+            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
         parameters: ToolParameters::SearchText,
         supports_parallel: false,
     },
@@ -343,6 +344,12 @@ impl ToolRegistry {
         }
     }
 
+    /// Starts FFF search indexing on a blocking worker.
+    pub(crate) fn spawn_search_index_warmup(&self) -> tokio::task::JoinHandle<Result<()>> {
+        let search = self.search.clone();
+        tokio::task::spawn_blocking(move || search.warm())
+    }
+
     /// Returns the stable model-visible tool specs.
     pub(crate) const fn specs(&self) -> &'static [ToolSpec] {
         TOOL_SPECS
@@ -452,6 +459,11 @@ impl FffSearchIndex {
         }
     }
 
+    fn warm(&self) -> Result<()> {
+        let _state = self.ready_state()?;
+        Ok(())
+    }
+
     fn search_files(&self, arguments: &str) -> Result<String> {
         let args = parse_search_files_arguments(arguments)?;
         let query = trimmed_required("query", &args.query)?;
@@ -509,10 +521,7 @@ impl FffSearchIndex {
 
     fn ready_state(&self) -> Result<FffSearchState> {
         let state = self.state()?;
-        anyhow::ensure!(
-            state.picker.wait_for_scan(FFF_SCAN_WAIT_TIMEOUT),
-            "search index is still scanning; retry shortly"
-        );
+        state.wait_until_scanned();
         Ok(state)
     }
 
@@ -559,6 +568,10 @@ impl FffSearchState {
             query_tracker,
             _frecency: frecency,
         })
+    }
+
+    fn wait_until_scanned(&self) {
+        while !self.picker.wait_for_scan(FFF_SCAN_WAIT_POLL_INTERVAL) {}
     }
 }
 
@@ -967,6 +980,43 @@ mod tests {
         assert!(text.success, "{}", text.output);
         assert!(text.output.contains("src/main.rs:2:"), "{}", text.output);
         assert!(text.output.contains("special_needle"), "{}", text.output);
+
+        drop(registry);
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn warms_fff_search_index_before_first_search() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-warmup-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("src")).unwrap();
+        fs::write(temp.join("src").join("lib.rs"), "pub fn warm_target() {}\n").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        assert!(registry.search.state.lock().unwrap().is_none());
+
+        registry
+            .spawn_search_index_warmup()
+            .await
+            .expect("warmup task should not panic")
+            .expect("warmup should finish");
+
+        assert!(registry.search.state.lock().unwrap().is_some());
+        let files = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_search_files".to_string(),
+                name: SEARCH_FILES_TOOL.to_string(),
+                arguments: r#"{"query":"lib","limit":5}"#.to_string(),
+            })
+            .await;
+
+        assert!(files.success, "{}", files.output);
+        assert!(files.output.contains("src/lib.rs"), "{}", files.output);
 
         drop(registry);
         fs::remove_dir_all(&temp).unwrap();
