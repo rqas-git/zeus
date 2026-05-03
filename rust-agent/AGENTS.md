@@ -59,3 +59,5 @@ cd /Users/ajc/rust-agent
 cargo build --release
 ./target/release/rust-agent "Reply with exactly: rust-agent-ok"
 ```
+
+Release builds strip symbols, use thin LTO, and abort on panic to keep the standalone binary smaller.

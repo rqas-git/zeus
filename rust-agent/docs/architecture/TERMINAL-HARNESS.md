@@ -28,6 +28,10 @@ to exercise the same service path that future endpoints should use.
 - Terminal flushing is byte and interval bounded.
 - The interactive prompt keeps one warm service and session.
 - Model changes reuse the same service and transport client.
+- The CLI uses Tokio's current-thread runtime because it drives one terminal
+  session at a time.
+- Cache-health event details are cloned for terminal output only when telemetry
+  is enabled.
 - The CLI path does not introduce terminal behavior into service internals.
 
 ## Current Scope

@@ -10,9 +10,10 @@ specific backend provider.
 2. `stream_conversation` receives a borrowed prompt window, `SessionId`, and
    selected model.
 3. The request is serialized from typed borrowed structs.
-4. The response body is parsed as SSE.
+4. The response body is parsed as SSE with a small chunk parser.
 5. Assistant text deltas are forwarded immediately through the callback.
-6. Completed response metadata is parsed from the terminal SSE event.
+6. Completed response metadata is parsed from the terminal SSE event only when
+   cache telemetry is enabled for the client.
 7. Assistant text and cache-health telemetry are returned to the session loop.
 
 ## Responsibilities
@@ -28,7 +29,9 @@ specific backend provider.
 
 - Async HTTP avoids blocking backend request workers.
 - Typed request serialization avoids constructing a generic JSON tree first.
-- SSE event parsing borrows event fields and raw nested payloads where possible.
+- SSE parsing is local and chunk-based, avoiding an extra parser dependency.
+- SSE event JSON parsing borrows event fields and raw nested payloads where
+  possible.
 - Prompt-cache keys are stable per configured namespace, session, and model.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained-message shape, response id, and provider token counters.
