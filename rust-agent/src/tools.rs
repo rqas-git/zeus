@@ -10,12 +10,14 @@ use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
 
 use crate::agent_loop::ModelToolCall;
 
 const READ_FILE_TOOL: &str = "read_file";
 const LIST_DIR_TOOL: &str = "list_dir";
 const MAX_FILE_BYTES: usize = 64 * 1024;
+const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const MAX_DIR_ENTRIES: usize = 200;
 
 const TOOL_SPECS: &[ToolSpec] = &[
@@ -237,7 +239,13 @@ async fn read_file(root: &Path, arguments: &str) -> Result<String> {
         display_path(root, &path)
     );
 
-    let mut bytes = tokio::fs::read(&path)
+    let file = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
+    let mut bytes = Vec::with_capacity(MAX_FILE_BYTES + 1);
+    let mut limited = file.take((MAX_FILE_BYTES + 1) as u64);
+    limited
+        .read_to_end(&mut bytes)
         .await
         .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
     let truncated = bytes.len() > MAX_FILE_BYTES;
@@ -247,7 +255,7 @@ async fn read_file(root: &Path, arguments: &str) -> Result<String> {
 
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if truncated {
-        text.push_str("\n[truncated: file exceeds 65536 bytes]");
+        text.push_str(FILE_TRUNCATION_MARKER);
     }
     Ok(text)
 }
@@ -393,6 +401,38 @@ mod tests {
         assert_eq!(read.output, "fn main() {}\n");
         assert!(list.success);
         assert_eq!(list.output, "src/");
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_file_returns_capped_output_for_large_files() {
+        let temp =
+            std::env::temp_dir().join(format!("rust-agent-tools-large-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("large.log"), vec![b'a'; MAX_FILE_BYTES + 1024]).unwrap();
+        let registry = ToolRegistry::for_root(&temp);
+
+        let read = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_read".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: r#"{"path":"large.log"}"#.to_string(),
+            })
+            .await;
+
+        assert!(read.success);
+        assert_eq!(
+            read.output.len(),
+            MAX_FILE_BYTES + FILE_TRUNCATION_MARKER.len()
+        );
+        assert!(read.output[..MAX_FILE_BYTES]
+            .as_bytes()
+            .iter()
+            .all(|byte| *byte == b'a'));
+        assert!(read.output.ends_with(FILE_TRUNCATION_MARKER));
 
         fs::remove_dir_all(&temp).unwrap();
     }

@@ -47,7 +47,9 @@ transport, and session state separate.
 - Default model, model allowlist, instructions, endpoint, timeout,
   context-window, and delta-flush settings are environment-configurable.
 - Prompt payloads keep the latest messages within configurable message and byte
-  budgets. The latest message is always retained.
+  budgets. Consecutive function-call and function-output transcript items are
+  retained or dropped as one unit so follow-up requests do not contain orphaned
+  tool outputs. The latest message or tool transcript unit is always retained.
 - Stored session history is retained within configurable message and byte
   budgets.
 - Prompt request bodies serialize from typed borrowed structures rather than
@@ -57,7 +59,8 @@ transport, and session state separate.
 - Tool arguments are retained as raw JSON until the tool boundary, where they are
   deserialized once into typed argument structs.
 - Read-only tool calls are executed concurrently and their outputs are replayed
-  to the model in one follow-up request.
+  to the model in one follow-up request. `read_file` reads only one byte past its
+  output cap before truncating, so large files do not allocate unbounded memory.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session

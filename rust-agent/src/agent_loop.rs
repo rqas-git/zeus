@@ -1,6 +1,7 @@
 //! In-memory agent loop for ordered session turns.
 
 use std::future::Future;
+use std::ops::Range;
 
 use anyhow::Result;
 use futures_util::future::join_all;
@@ -99,6 +100,15 @@ enum AgentItem {
         output: String,
         success: bool,
     },
+}
+
+impl AgentItem {
+    fn is_tool_transcript_item(&self) -> bool {
+        matches!(
+            self,
+            Self::FunctionCall { .. } | Self::FunctionOutput { .. }
+        )
+    }
 }
 
 impl AgentMessage {
@@ -458,53 +468,68 @@ impl InMemorySessionStore {
     }
 
     fn conversation_window(&self, config: ContextWindowConfig) -> Vec<ConversationMessage<'_>> {
-        let mut retained = Vec::with_capacity(config.max_messages().min(self.messages.len()));
-        let mut retained_bytes = 0usize;
+        let ranges = self.retained_ranges(config.max_messages(), config.max_bytes());
+        let retained_count = ranges.iter().map(|range| range.end - range.start).sum();
+        let mut retained = Vec::with_capacity(retained_count);
 
-        for message in self.messages.iter().rev() {
-            if retained.len() >= config.max_messages() {
-                break;
+        for range in ranges {
+            for message in &self.messages[range] {
+                retained.push(message.conversation_message());
             }
-
-            let message_bytes = message.input_bytes();
-            let would_exceed_budget =
-                retained_bytes.saturating_add(message_bytes) > config.max_bytes();
-            if would_exceed_budget && !retained.is_empty() {
-                break;
-            }
-
-            retained.push(message.conversation_message());
-            retained_bytes = retained_bytes.saturating_add(message_bytes);
         }
-
-        retained.reverse();
         retained
     }
 
     fn prune_history(&mut self, config: ContextWindowConfig) {
-        let mut retained_bytes = 0usize;
-        let mut first_retained = self.messages.len();
-
-        for (retained_count, (index, message)) in self.messages.iter().enumerate().rev().enumerate()
-        {
-            if retained_count >= config.history_max_messages() {
-                break;
-            }
-
-            let message_bytes = message.input_bytes();
-            let would_exceed_budget =
-                retained_bytes.saturating_add(message_bytes) > config.history_max_bytes();
-            if would_exceed_budget && retained_count > 0 {
-                break;
-            }
-
-            retained_bytes = retained_bytes.saturating_add(message_bytes);
-            first_retained = index;
-        }
+        let ranges =
+            self.retained_ranges(config.history_max_messages(), config.history_max_bytes());
+        let first_retained = ranges
+            .first()
+            .map_or(self.messages.len(), |range| range.start);
 
         if first_retained > 0 {
             self.messages.drain(0..first_retained);
         }
+    }
+
+    fn retained_ranges(&self, max_messages: usize, max_bytes: usize) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut retained_messages = 0usize;
+        let mut retained_bytes = 0usize;
+        let mut end = self.messages.len();
+
+        while end > 0 {
+            let start = self.retention_unit_start_before(end);
+            let unit_messages = end - start;
+            let unit_bytes = self.messages[start..end]
+                .iter()
+                .map(AgentMessage::input_bytes)
+                .sum::<usize>();
+            let would_exceed_messages =
+                retained_messages.saturating_add(unit_messages) > max_messages;
+            let would_exceed_bytes = retained_bytes.saturating_add(unit_bytes) > max_bytes;
+            if (would_exceed_messages || would_exceed_bytes) && !ranges.is_empty() {
+                break;
+            }
+
+            ranges.push(start..end);
+            retained_messages = retained_messages.saturating_add(unit_messages);
+            retained_bytes = retained_bytes.saturating_add(unit_bytes);
+            end = start;
+        }
+
+        ranges.reverse();
+        ranges
+    }
+
+    fn retention_unit_start_before(&self, end: usize) -> usize {
+        let mut start = end - 1;
+        if self.messages[start].item.is_tool_transcript_item() {
+            while start > 0 && self.messages[start - 1].item.is_tool_transcript_item() {
+                start -= 1;
+            }
+        }
+        start
     }
 
     fn cache_status(&self, cache_health: &CacheHealth) -> CacheStatus {
@@ -943,6 +968,61 @@ mod tests {
         assert_eq!(agent.messages()[5].text(), "third answer");
     }
 
+    #[test]
+    fn keeps_tool_transcript_items_atomic_in_context_window() {
+        let mut store =
+            InMemorySessionStore::new(SessionId::new(7), SessionConfig::new("test-model"));
+        store.append_message(MessageRole::User, "older user");
+        store.append_tool_call(model_tool_call("call_1"));
+        let large_output = "x".repeat(80);
+        store.append_tool_output(tool_execution("call_1", large_output.clone()));
+
+        let history = store.conversation_window(ContextWindowConfig::new(1, 1));
+
+        assert_eq!(
+            history,
+            [
+                ConversationMessage::function_call(None, "call_1", "read_file", "{}"),
+                ConversationMessage::function_output("call_1", &large_output, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_tool_transcript_unit_atomically_when_newer_message_fits() {
+        let mut store =
+            InMemorySessionStore::new(SessionId::new(7), SessionConfig::new("test-model"));
+        store.append_message(MessageRole::User, "older user");
+        store.append_tool_call(model_tool_call("call_1"));
+        store.append_tool_output(tool_execution("call_1", "x".repeat(80)));
+        store.append_message(MessageRole::Assistant, "done");
+
+        let history = store.conversation_window(ContextWindowConfig::new(2, 8));
+
+        assert_eq!(history, [ConversationMessage::assistant("done")]);
+    }
+
+    #[test]
+    fn prunes_tool_transcript_items_atomically() {
+        let mut store =
+            InMemorySessionStore::new(SessionId::new(7), SessionConfig::new("test-model"));
+        store.append_message(MessageRole::User, "older user");
+        store.append_tool_call(model_tool_call("call_1"));
+        store.append_tool_output(tool_execution("call_1", "x".repeat(80)));
+
+        store.prune_history(ContextWindowConfig::with_history_limits(8, 1024, 1, 1));
+
+        assert_eq!(store.messages().len(), 2);
+        assert!(matches!(
+            store.messages()[0].item,
+            AgentItem::FunctionCall { .. }
+        ));
+        assert!(matches!(
+            store.messages()[1].item,
+            AgentItem::FunctionOutput { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn prunes_retained_session_history() {
         let mut agent = AgentLoop::with_context_window(
@@ -1260,6 +1340,24 @@ mod tests {
         assert_eq!(agent.store.status(), SessionStatus::Idle);
         assert_eq!(agent.messages().len(), 2);
         assert_eq!(agent.messages()[0].text(), "again");
+    }
+
+    fn model_tool_call(call_id: &str) -> ModelToolCall {
+        ModelToolCall {
+            item_id: None,
+            call_id: call_id.to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+        }
+    }
+
+    fn tool_execution(call_id: &str, output: impl Into<String>) -> ToolExecution {
+        ToolExecution {
+            call_id: call_id.to_string(),
+            tool_name: "read_file".to_string(),
+            output: output.into(),
+            success: true,
+        }
     }
 
     fn format_event(event: AgentEvent<'_>) -> String {
