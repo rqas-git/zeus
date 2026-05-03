@@ -22,17 +22,18 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
     let client = ChatGptClient::new(auth, config.client)?;
     let mut agent = AgentLoop::with_context_window(SessionId::new(1), config.context);
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&client, &mut agent, config.output);
+        return run_interactive_loop(&client, &mut agent, config.output).await;
     };
 
-    print_agent_response(&client, &mut agent, config.output, message)?;
+    print_agent_response(&client, &mut agent, config.output, message).await?;
     Ok(())
 }
 
@@ -45,7 +46,7 @@ fn message_from_args() -> Option<String> {
     }
 }
 
-fn run_interactive_loop(
+async fn run_interactive_loop(
     client: &ChatGptClient,
     agent: &mut AgentLoop,
     output: config::OutputConfig,
@@ -55,11 +56,11 @@ fn run_interactive_loop(
             return Ok(());
         };
 
-        print_agent_response(client, agent, output, message)?;
+        print_agent_response(client, agent, output, message).await?;
     }
 }
 
-fn print_agent_response(
+async fn print_agent_response(
     client: &ChatGptClient,
     agent: &mut AgentLoop,
     output: config::OutputConfig,
@@ -69,16 +70,13 @@ fn print_agent_response(
     write!(stdout, "Assistant: ").context("failed to write assistant prompt")?;
     stdout.flush().context("failed to flush assistant prompt")?;
 
-    let session_id = agent.session_id();
     let mut delta_writer = DeltaWriter::new(stdout, output);
-    let response = agent.submit_user_message(
-        message,
-        |conversation, on_delta| client.stream_conversation(conversation, session_id, on_delta),
-        |event| match event {
+    let response = agent
+        .submit_user_message(message, client, |event| match event {
             AgentEvent::TextDelta { delta, .. } => delta_writer.write_delta(delta),
             _ => Ok(()),
-        },
-    );
+        })
+        .await;
     delta_writer.finish_line()?;
     response
 }

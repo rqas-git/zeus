@@ -1,5 +1,7 @@
 //! In-memory agent loop for ordered session turns.
 
+use std::future::Future;
+
 use anyhow::Result;
 
 use crate::client::ConversationMessage;
@@ -95,6 +97,17 @@ pub(crate) enum AgentEvent<'a> {
         session_id: SessionId,
         message: &'a str,
     },
+}
+
+/// Streams a prompt window into an assistant response.
+pub(crate) trait ModelStreamer {
+    /// Sends the prompt window and streams assistant text deltas.
+    fn stream_conversation<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        session_id: SessionId,
+        on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+    ) -> impl Future<Output = Result<String>> + 'a;
 }
 
 /// In-memory storage for one session.
@@ -211,13 +224,10 @@ impl AgentLoop {
     ///
     /// # Errors
     /// Returns an error if the session is already running, model streaming fails, or event publishing fails.
-    pub(crate) fn submit_user_message(
+    pub(crate) async fn submit_user_message(
         &mut self,
         text: impl Into<String>,
-        stream_model: impl FnOnce(
-            &[ConversationMessage<'_>],
-            &mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String>,
+        model: &impl ModelStreamer,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
     ) -> Result<String> {
         anyhow::ensure!(
@@ -240,7 +250,7 @@ impl AgentLoop {
         })?;
 
         self.begin_running(&mut emit)?;
-        let result = self.run_once(stream_model, &mut emit);
+        let result = self.run_once(model, &mut emit).await;
         match result {
             Ok(response) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
@@ -286,18 +296,17 @@ impl AgentLoop {
         })
     }
 
-    fn run_once(
+    async fn run_once(
         &mut self,
-        stream_model: impl FnOnce(
-            &[ConversationMessage<'_>],
-            &mut dyn FnMut(&str) -> Result<()>,
-        ) -> Result<String>,
+        model: &impl ModelStreamer,
         emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
     ) -> Result<String> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
-        let assistant_text = stream_model(&history, &mut on_delta)?;
+        let assistant_text = model
+            .stream_conversation(&history, session_id, &mut on_delta)
+            .await?;
         let assistant_id = self
             .store
             .append_message(MessageRole::Assistant, assistant_text.clone());
@@ -313,26 +322,29 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+
     use super::*;
 
-    #[test]
-    fn stores_one_turn_and_emits_ordered_events() {
+    #[tokio::test]
+    async fn stores_one_turn_and_emits_ordered_events() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>], on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                assert_eq!(history.len(), 1);
+                on_delta("hi")?;
+                Ok("hi".to_string())
+            },
+        );
 
         let response = agent
-            .submit_user_message(
-                "hello",
-                |history, on_delta| {
-                    assert_eq!(history.len(), 1);
-                    on_delta("hi")?;
-                    Ok("hi".to_string())
-                },
-                |event| {
-                    events.push(format_event(event));
-                    Ok(())
-                },
-            )
+            .submit_user_message("hello", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
             .unwrap();
 
         assert_eq!(response, "hi");
@@ -354,30 +366,37 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sends_full_history_on_later_turns() {
+    #[tokio::test]
+    async fn sends_full_history_on_later_turns() {
         let mut agent = AgentLoop::new(SessionId::new(7));
+        let turn = Cell::new(0);
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>], on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                match turn.get() {
+                    0 => {
+                        assert_eq!(history.len(), 1);
+                        turn.set(1);
+                        Ok("remembered".to_string())
+                    }
+                    1 => {
+                        assert_eq!(history.len(), 3);
+                        on_delta("rust-agent")?;
+                        turn.set(2);
+                        Ok("rust-agent".to_string())
+                    }
+                    _ => unreachable!("unexpected turn"),
+                }
+            },
+        );
+
         agent
-            .submit_user_message(
-                "remember rust-agent",
-                |history, _| {
-                    assert_eq!(history.len(), 1);
-                    Ok("remembered".to_string())
-                },
-                |_| Ok(()),
-            )
+            .submit_user_message("remember rust-agent", &streamer, |_| Ok(()))
+            .await
             .unwrap();
 
         let response = agent
-            .submit_user_message(
-                "what did I ask you to remember?",
-                |history, on_delta| {
-                    assert_eq!(history.len(), 3);
-                    on_delta("rust-agent")?;
-                    Ok("rust-agent".to_string())
-                },
-                |_| Ok(()),
-            )
+            .submit_user_message("what did I ask you to remember?", &streamer, |_| Ok(()))
+            .await
             .unwrap();
 
         assert_eq!(response, "rust-agent");
@@ -385,57 +404,69 @@ mod tests {
         assert_eq!(agent.messages()[3].text(), "rust-agent");
     }
 
-    #[test]
-    fn sends_bounded_recent_history() {
+    #[tokio::test]
+    async fn sends_bounded_recent_history() {
         let mut agent =
             AgentLoop::with_context_window(SessionId::new(7), ContextWindowConfig::new(3, 24));
+        let turn = Cell::new(0);
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                match turn.get() {
+                    0 => {
+                        turn.set(1);
+                        Ok("first answer".to_string())
+                    }
+                    1 => {
+                        turn.set(2);
+                        Ok("second answer".to_string())
+                    }
+                    2 => {
+                        assert_eq!(history.len(), 2);
+                        assert_eq!(history[0], ConversationMessage::assistant("second answer"));
+                        assert_eq!(history[1], ConversationMessage::user("third user"));
+                        turn.set(3);
+                        Ok("third answer".to_string())
+                    }
+                    _ => unreachable!("unexpected turn"),
+                }
+            },
+        );
 
         agent
-            .submit_user_message(
-                "first user",
-                |_history, _| Ok("first answer".to_string()),
-                |_| Ok(()),
-            )
+            .submit_user_message("first user", &streamer, |_| Ok(()))
+            .await
             .unwrap();
         agent
-            .submit_user_message(
-                "second user",
-                |_history, _| Ok("second answer".to_string()),
-                |_| Ok(()),
-            )
+            .submit_user_message("second user", &streamer, |_| Ok(()))
+            .await
             .unwrap();
 
         let response = agent
-            .submit_user_message(
-                "third user",
-                |history, _| {
-                    assert_eq!(history.len(), 2);
-                    assert_eq!(history[0], ConversationMessage::assistant("second answer"));
-                    assert_eq!(history[1], ConversationMessage::user("third user"));
-                    Ok("third answer".to_string())
-                },
-                |_| Ok(()),
-            )
+            .submit_user_message("third user", &streamer, |_| Ok(()))
+            .await
             .unwrap();
 
         assert_eq!(response, "third answer");
         assert_eq!(agent.messages().len(), 6);
     }
 
-    #[test]
-    fn records_failed_status_and_error_event() {
+    #[tokio::test]
+    async fn records_failed_status_and_error_event() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
+        let streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                anyhow::bail!("backend failed")
+            },
+        );
 
         let error = agent
-            .submit_user_message(
-                "hello",
-                |_history, _| anyhow::bail!("backend failed"),
-                |event| {
-                    events.push(format_event(event));
-                    Ok(())
-                },
-            )
+            .submit_user_message("hello", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
             .unwrap_err()
             .to_string();
 
@@ -452,40 +483,46 @@ mod tests {
         );
     }
 
-    #[test]
-    fn running_status_publish_failure_does_not_stick_session_running() {
+    #[tokio::test]
+    async fn running_status_publish_failure_does_not_stick_session_running() {
         let mut agent = AgentLoop::new(SessionId::new(7));
-        let mut model_called = false;
+        let model_called = Cell::new(false);
+        let streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                model_called.set(true);
+                Ok("unused".to_string())
+            },
+        );
 
         let error = agent
-            .submit_user_message(
-                "hello",
-                |_history, _| {
-                    model_called = true;
-                    Ok("unused".to_string())
-                },
-                |event| {
-                    if matches!(
-                        event,
-                        AgentEvent::StatusChanged {
-                            status: SessionStatus::Running,
-                            ..
-                        }
-                    ) {
-                        anyhow::bail!("sink failed");
+            .submit_user_message("hello", &streamer, |event| {
+                if matches!(
+                    event,
+                    AgentEvent::StatusChanged {
+                        status: SessionStatus::Running,
+                        ..
                     }
-                    Ok(())
-                },
-            )
+                ) {
+                    anyhow::bail!("sink failed");
+                }
+                Ok(())
+            })
+            .await
             .unwrap_err()
             .to_string();
 
         assert_eq!(error, "sink failed");
-        assert!(!model_called);
+        assert!(!model_called.get());
         assert_eq!(agent.store.status(), SessionStatus::Idle);
 
+        let ok_streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| Ok("ok".to_string()),
+        );
         let response = agent
-            .submit_user_message("again", |_history, _| Ok("ok".to_string()), |_| Ok(()))
+            .submit_user_message("again", &ok_streamer, |_| Ok(()))
+            .await
             .unwrap();
 
         assert_eq!(response, "ok");
@@ -507,6 +544,35 @@ mod tests {
         match role {
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
+        }
+    }
+
+    struct FnStreamer<F> {
+        stream: RefCell<F>,
+    }
+
+    impl<F> FnStreamer<F> {
+        fn new(stream: F) -> Self {
+            Self {
+                stream: RefCell::new(stream),
+            }
+        }
+    }
+
+    impl<F> ModelStreamer for FnStreamer<F>
+    where
+        F: for<'a> FnMut(
+            &'a [ConversationMessage<'a>],
+            &'a mut dyn FnMut(&str) -> Result<()>,
+        ) -> Result<String>,
+    {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            _session_id: SessionId,
+            on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
+        ) -> Result<String> {
+            (self.stream.borrow_mut())(messages, on_delta)
         }
     }
 }
