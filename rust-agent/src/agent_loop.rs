@@ -450,6 +450,19 @@ impl InMemorySessionStore {
         })
     }
 
+    fn append_tool_transcript(
+        &mut self,
+        tool_calls: impl IntoIterator<Item = ModelToolCall>,
+        executions: impl IntoIterator<Item = ToolExecution>,
+    ) {
+        for tool_call in tool_calls {
+            self.append_tool_call(tool_call);
+        }
+        for execution in executions {
+            self.append_tool_output(execution);
+        }
+    }
+
     fn append_item(&mut self, item: AgentItem) -> MessageId {
         let id = self.next_message_id;
         self.next_message_id = self.next_message_id.next();
@@ -731,13 +744,12 @@ impl AgentLoop {
         for _ in 0..MAX_TOOL_ROUNDS {
             let tool_calls = self.run_once(model, emit).await?;
             if tool_calls.is_empty() {
+                self.store.prune_history(self.context_window);
                 return Ok(());
             }
 
-            let executions = self.execute_tool_calls(tool_calls, emit).await?;
-            for execution in executions {
-                self.store.append_tool_output(execution);
-            }
+            let executions = self.execute_tool_calls(&tool_calls, emit).await?;
+            self.store.append_tool_transcript(tool_calls, executions);
             self.store.prune_history(self.context_window);
         }
 
@@ -789,21 +801,16 @@ impl AgentLoop {
                 text: assistant_text,
             })?;
         }
-        let tool_calls = model_response.tool_calls;
-        for tool_call in tool_calls.iter().cloned() {
-            self.store.append_tool_call(tool_call);
-        }
-        self.store.prune_history(self.context_window);
-        Ok(tool_calls)
+        Ok(model_response.tool_calls)
     }
 
     async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<ModelToolCall>,
+        tool_calls: &[ModelToolCall],
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ToolExecution>> {
         let session_id = self.session_id();
-        for tool_call in &tool_calls {
+        for tool_call in tool_calls {
             emit(AgentEvent::ToolCallStarted {
                 session_id,
                 tool_call_id: &tool_call.call_id,
@@ -817,13 +824,14 @@ impl AgentLoop {
         {
             join_all(
                 tool_calls
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|tool_call| self.tools.execute(tool_call)),
             )
             .await
         } else {
             let mut executions = Vec::new();
-            for tool_call in tool_calls {
+            for tool_call in tool_calls.iter().cloned() {
                 executions.push(self.tools.execute(tool_call).await);
             }
             executions
@@ -1263,6 +1271,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_event_publish_failure_does_not_leave_orphaned_tool_calls() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let streamer = RetryAfterToolEventFailureStreamer {
+            turn: AtomicUsize::new(0),
+        };
+
+        let error = agent
+            .submit_user_message("read the manifest", &streamer, |event| {
+                if matches!(event, AgentEvent::ToolCallCompleted { .. }) {
+                    anyhow::bail!("sink failed");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "sink failed");
+        assert_eq!(agent.store.status(), SessionStatus::Failed);
+        assert!(agent
+            .messages()
+            .iter()
+            .all(|message| matches!(message.item, AgentItem::Message { .. })));
+
+        agent
+            .submit_user_message("continue", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert_eq!(agent.messages().last().unwrap().text(), "ok");
+        assert_eq!(streamer.turn.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn records_failed_status_and_error_event() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
@@ -1589,6 +1632,51 @@ mod tests {
                     cache_status: CacheStatus::FirstRequest,
                 },
             ))
+        }
+    }
+
+    struct RetryAfterToolEventFailureStreamer {
+        turn: AtomicUsize,
+    }
+
+    impl ModelStreamer for RetryAfterToolEventFailureStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => {
+                    assert!(!tools.is_empty());
+                    assert!(parallel_tool_calls);
+                    assert_eq!(messages, &[ConversationMessage::user("read the manifest")]);
+                    Ok(ModelResponse::with_tool_calls(
+                        "",
+                        [ModelToolCall {
+                            item_id: Some("fc_read".to_string()),
+                            call_id: "call_read".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                        }],
+                    ))
+                }
+                1 => {
+                    assert_eq!(
+                        messages,
+                        &[
+                            ConversationMessage::user("read the manifest"),
+                            ConversationMessage::user("continue"),
+                        ]
+                    );
+                    Ok(ModelResponse::new("ok"))
+                }
+                _ => unreachable!("unexpected turn"),
+            }
         }
     }
 
