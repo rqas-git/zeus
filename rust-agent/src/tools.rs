@@ -4,9 +4,13 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -50,8 +54,14 @@ const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const MAX_COMMAND_TIMEOUT_MS: u64 = 300_000;
+const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const DEFAULT_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_COMMAND_TOTAL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_GIT_PATHS: usize = 128;
+const MAX_GIT_PATH_BYTES: usize = 8 * 1024;
+const MAX_GIT_COMMIT_MESSAGE_BYTES: usize = 8 * 1024;
 const DEFAULT_GIT_LOG_COUNT: usize = 10;
 const MAX_GIT_LOG_COUNT: usize = 50;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
@@ -782,6 +792,7 @@ impl ToolRegistry {
     }
 
     /// Executes a model tool call and converts failures into model-visible output.
+    #[cfg(test)]
     pub(crate) async fn execute(&self, call: ModelToolCall) -> ToolExecution {
         self.execute_ref(&call).await
     }
@@ -795,6 +806,50 @@ impl ToolRegistry {
                 output: "Tool error: tool is not enabled by the current policy".to_string(),
                 success: false,
             };
+        }
+
+        match call.name.as_str() {
+            EXEC_COMMAND_TOOL => {
+                return exec_command(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_STATUS_TOOL => {
+                return git_status(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_DIFF_TOOL => {
+                return git_diff(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_LOG_TOOL => {
+                return git_log(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_COMMIT_TOOL => {
+                return git_commit(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            _ => {}
         }
 
         let result = match call.name.as_str() {
@@ -817,27 +872,12 @@ impl ToolRegistry {
                     .and_then(|result| result)
             }
             APPLY_PATCH_TOOL => apply_patch(&self.root, &call.arguments).await,
-            EXEC_COMMAND_TOOL => exec_command(&self.root, &call.arguments).await,
-            GIT_STATUS_TOOL => git_status(&self.root, &call.arguments).await,
-            GIT_DIFF_TOOL => git_diff(&self.root, &call.arguments).await,
-            GIT_LOG_TOOL => git_log(&self.root, &call.arguments).await,
-            GIT_COMMIT_TOOL => git_commit(&self.root, &call.arguments).await,
             _ => Err(anyhow::anyhow!("unknown tool {}", call.name)),
         };
 
         match result {
-            Ok(output) => ToolExecution {
-                call_id: call.call_id.clone(),
-                tool_name: call.name.clone(),
-                output,
-                success: true,
-            },
-            Err(error) => ToolExecution {
-                call_id: call.call_id.clone(),
-                tool_name: call.name.clone(),
-                output: format!("Tool error: {error}"),
-                success: false,
-            },
+            Ok(output) => tool_execution(call, output, true),
+            Err(error) => tool_execution(call, format!("Tool error: {error}"), false),
         }
     }
 }
@@ -849,6 +889,21 @@ pub(crate) struct ToolExecution {
     pub(crate) tool_name: String,
     pub(crate) output: String,
     pub(crate) success: bool,
+}
+
+#[derive(Debug)]
+struct ToolOutput {
+    output: String,
+    success: bool,
+}
+
+fn tool_execution(call: &ModelToolCall, output: String, success: bool) -> ToolExecution {
+    ToolExecution {
+        call_id: call.call_id.clone(),
+        tool_name: call.name.clone(),
+        output,
+        success,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1125,9 +1180,13 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
     Ok(names.join("\n"))
 }
 
-async fn exec_command(root: &Path, arguments: &str) -> Result<String> {
+async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_exec_command_arguments(arguments)?;
     let command = trimmed_required("command", &args.command)?;
+    anyhow::ensure!(
+        command.len() <= MAX_COMMAND_BYTES,
+        "command exceeds {MAX_COMMAND_BYTES} bytes"
+    );
     anyhow::ensure!(
         !mentions_git_executable(command),
         "exec_command cannot run git; use git_status, git_diff, git_log, or git_commit"
@@ -1153,10 +1212,10 @@ async fn exec_command(root: &Path, arguments: &str) -> Result<String> {
         max_output_bytes,
     )
     .await?;
-    process_result_output(result)
+    Ok(process_result_output(result))
 }
 
-async fn git_status(root: &Path, arguments: &str) -> Result<String> {
+async fn git_status(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let _args = parse_git_status_arguments(arguments)?;
     let args = vec![
         "status".to_string(),
@@ -1164,10 +1223,10 @@ async fn git_status(root: &Path, arguments: &str) -> Result<String> {
         "--branch".to_string(),
     ];
     let result = run_git(root, args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
-    process_result_output(result)
+    Ok(process_result_output(result))
 }
 
-async fn git_diff(root: &Path, arguments: &str) -> Result<String> {
+async fn git_diff(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_git_diff_arguments(arguments)?;
     let max_output_bytes = bounded_limit(
         args.max_output_bytes,
@@ -1184,10 +1243,10 @@ async fn git_diff(root: &Path, arguments: &str) -> Result<String> {
     }
 
     let result = run_git(root, git_args, max_output_bytes).await?;
-    process_result_output(result)
+    Ok(process_result_output(result))
 }
 
-async fn git_log(root: &Path, arguments: &str) -> Result<String> {
+async fn git_log(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_git_log_arguments(arguments)?;
     let max_count = bounded_limit(args.max_count, DEFAULT_GIT_LOG_COUNT, MAX_GIT_LOG_COUNT);
     let git_args = vec![
@@ -1199,22 +1258,43 @@ async fn git_log(root: &Path, arguments: &str) -> Result<String> {
     ];
 
     let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
-    process_result_output(result)
+    Ok(process_result_output(result))
 }
 
-async fn git_commit(root: &Path, arguments: &str) -> Result<String> {
+async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_git_commit_arguments(arguments)?;
     let message = trimmed_required("message", &args.message)?;
+    anyhow::ensure!(
+        message.len() <= MAX_GIT_COMMIT_MESSAGE_BYTES,
+        "message exceeds {MAX_GIT_COMMIT_MESSAGE_BYTES} bytes"
+    );
     anyhow::ensure!(!args.paths.is_empty(), "paths cannot be empty");
+    anyhow::ensure!(
+        args.paths.len() <= MAX_GIT_PATHS,
+        "paths exceed {MAX_GIT_PATHS} entries"
+    );
     let mut pathspecs = Vec::with_capacity(args.paths.len());
+    let mut path_bytes = 0usize;
     for path in &args.paths {
-        pathspecs.push(git_pathspec(path)?);
+        let pathspec = git_pathspec(path)?;
+        path_bytes = path_bytes.saturating_add(pathspec.len());
+        anyhow::ensure!(
+            path_bytes <= MAX_GIT_PATH_BYTES,
+            "paths exceed {MAX_GIT_PATH_BYTES} bytes"
+        );
+        pathspecs.push(pathspec);
     }
 
     let mut add_args = vec!["add".to_string(), "--".to_string()];
     add_args.extend(pathspecs.iter().cloned());
     let add_result = run_git(root, add_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
-    let add_output = process_result_output(add_result)?;
+    let add_output = process_result_output(add_result);
+    if !add_output.success {
+        return Ok(ToolOutput {
+            output: format!("git add:\n{}", add_output.output),
+            success: false,
+        });
+    }
 
     let mut commit_args = vec![
         "commit".to_string(),
@@ -1224,11 +1304,15 @@ async fn git_commit(root: &Path, arguments: &str) -> Result<String> {
     ];
     commit_args.extend(pathspecs);
     let commit_result = run_git(root, commit_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
-    let commit_output = process_result_output(commit_result)?;
+    let commit_output = process_result_output(commit_result);
 
-    Ok(format!(
-        "git add:\n{add_output}\n\ngit commit:\n{commit_output}"
-    ))
+    Ok(ToolOutput {
+        success: commit_output.success,
+        output: format!(
+            "git add:\n{}\n\ngit commit:\n{}",
+            add_output.output, commit_output.output
+        ),
+    })
 }
 
 async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
@@ -1425,9 +1509,11 @@ async fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_process_group(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to spawn {display:?}"))?;
+    let child_id = child.id();
     let stdout = child
         .stdout
         .take()
@@ -1436,17 +1522,38 @@ async fn run_process(
         .stderr
         .take()
         .context("failed to capture command stderr")?;
-    let stdout_task = tokio::spawn(read_limited_output(stdout, max_output_bytes));
-    let stderr_task = tokio::spawn(read_limited_output(stderr, max_output_bytes));
+    let output_limit_exceeded = Arc::new(AtomicBool::new(false));
+    let total_output_bytes = Arc::new(AtomicUsize::new(0));
+    let stdout_task = tokio::spawn(read_limited_output(
+        stdout,
+        max_output_bytes,
+        Arc::clone(&total_output_bytes),
+        Arc::clone(&output_limit_exceeded),
+    ));
+    let stderr_task = tokio::spawn(read_limited_output(
+        stderr,
+        max_output_bytes,
+        Arc::clone(&total_output_bytes),
+        Arc::clone(&output_limit_exceeded),
+    ));
 
+    let started = Instant::now();
     let mut timed_out = false;
-    let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-        Ok(status) => Some(status.context("failed to wait for command")?),
-        Err(_) => {
+    let mut killed_for_output = false;
+    let status = loop {
+        if output_limit_exceeded.load(Ordering::Relaxed) {
+            killed_for_output = true;
+            kill_process(child_id, &mut child).await;
+            break Some(child.wait().await.context("failed to wait for command")?);
+        }
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
             timed_out = true;
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            None
+            kill_process(child_id, &mut child).await;
+            break Some(child.wait().await.context("failed to wait for command")?);
+        }
+
+        if let Ok(status) = tokio::time::timeout(COMMAND_WAIT_POLL_INTERVAL, child.wait()).await {
+            break Some(status.context("failed to wait for command")?);
         }
     };
 
@@ -1458,6 +1565,7 @@ async fn run_process(
         .await
         .context("stderr reader task failed")?
         .context("failed to read command stderr")?;
+    let output_limit_exceeded = killed_for_output || output_limit_exceeded.load(Ordering::Relaxed);
 
     Ok(ProcessResult {
         display,
@@ -1465,12 +1573,43 @@ async fn run_process(
         timeout_ms,
         status,
         timed_out,
+        output_limit_exceeded,
         stdout,
         stderr,
     })
 }
 
-async fn read_limited_output<R>(mut reader: R, max_bytes: usize) -> Result<LimitedOutput>
+fn configure_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+async fn kill_process(child_id: Option<u32>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(child_id) = child_id {
+        unsafe {
+            let _ = libc::kill(-(child_id as libc::pid_t), libc::SIGKILL);
+        }
+        return;
+    }
+
+    let _ = child.kill().await;
+}
+
+async fn read_limited_output<R>(
+    mut reader: R,
+    max_bytes: usize,
+    total_output_bytes: Arc<AtomicUsize>,
+    output_limit_exceeded: Arc<AtomicBool>,
+) -> Result<LimitedOutput>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -1486,6 +1625,11 @@ where
             return Ok(output);
         }
         output.total_bytes = output.total_bytes.saturating_add(bytes_read);
+        let total_bytes = total_output_bytes.fetch_add(bytes_read, Ordering::Relaxed) + bytes_read;
+        if total_bytes > MAX_COMMAND_TOTAL_OUTPUT_BYTES {
+            output_limit_exceeded.store(true, Ordering::Relaxed);
+            return Ok(output);
+        }
         if output.bytes.len() < max_bytes {
             let remaining = max_bytes - output.bytes.len();
             output
@@ -1502,6 +1646,7 @@ struct ProcessResult {
     timeout_ms: u64,
     status: Option<std::process::ExitStatus>,
     timed_out: bool,
+    output_limit_exceeded: bool,
     stdout: LimitedOutput,
     stderr: LimitedOutput,
 }
@@ -1518,18 +1663,15 @@ impl LimitedOutput {
     }
 }
 
-fn process_result_output(result: ProcessResult) -> Result<String> {
+fn process_result_output(result: ProcessResult) -> ToolOutput {
     let success = result
         .status
         .as_ref()
         .is_some_and(std::process::ExitStatus::success)
-        && !result.timed_out;
+        && !result.timed_out
+        && !result.output_limit_exceeded;
     let output = format_process_result(&result);
-    if success {
-        Ok(output)
-    } else {
-        anyhow::bail!("{output}")
-    }
+    ToolOutput { output, success }
 }
 
 fn format_process_result(result: &ProcessResult) -> String {
@@ -1548,6 +1690,11 @@ fn format_process_result(result: &ProcessResult) -> String {
         output.push_str(&format!(
             "status: timed out after {} ms\n",
             result.timeout_ms
+        ));
+    } else if result.output_limit_exceeded {
+        output.push_str(&format!(
+            "status: output exceeded {} bytes; process killed\n",
+            MAX_COMMAND_TOTAL_OUTPUT_BYTES
         ));
     } else if let Some(status) = result.status.as_ref() {
         output.push_str(&format!("status: {}\n", format_exit_status(status)));
@@ -2394,6 +2541,26 @@ mod tests {
                 arguments: json!({ "command": "git status --short" }).to_string(),
             })
             .await;
+        let failed = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_exec_failed".to_string(),
+                name: EXEC_COMMAND_TOOL.to_string(),
+                arguments: json!({ "command": "printf fail >&2; exit 7" }).to_string(),
+            })
+            .await;
+        let capped = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_exec_capped".to_string(),
+                name: EXEC_COMMAND_TOOL.to_string(),
+                arguments: json!({
+                    "command": format!("yes x | head -c {}", MAX_COMMAND_TOTAL_OUTPUT_BYTES + 1024),
+                    "max_output_bytes": 1024,
+                })
+                .to_string(),
+            })
+            .await;
 
         assert!(command.success, "{}", command.output);
         assert!(command.output.contains("src"), "{}", command.output);
@@ -2402,6 +2569,20 @@ mod tests {
             blocked.output.contains("cannot run git"),
             "{}",
             blocked.output
+        );
+        assert!(!failed.success);
+        assert!(
+            failed.output.contains("status: exit 7"),
+            "{}",
+            failed.output
+        );
+        assert!(failed.output.contains("fail"), "{}", failed.output);
+        assert!(!failed.output.contains("Tool error"), "{}", failed.output);
+        assert!(!capped.success);
+        assert!(
+            capped.output.contains("output exceeded"),
+            "{}",
+            capped.output
         );
 
         fs::remove_dir_all(&temp).unwrap();

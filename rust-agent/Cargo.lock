@@ -2007,6 +2007,7 @@ dependencies = [
  "h3",
  "h3-axum",
  "h3-quinn",
+ "libc",
  "memchr",
  "mimalloc",
  "quinn",

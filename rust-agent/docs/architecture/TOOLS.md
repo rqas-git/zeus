@@ -44,11 +44,12 @@ operations are path-based.
 - Patch input is capped at 256 KiB, and edited files are capped at 2 MiB.
 - `exec_command` runs commands through `bash -lc` from a workspace-confined
   current directory, captures stdout and stderr separately, caps retained output,
-  and enforces a timeout.
+  enforces a timeout, rejects oversized command inputs, and kills the process
+  group when total output exceeds the hard output ceiling.
 - `exec_command` rejects command lines that mention a direct `git` executable
   token. Repository operations must use the dedicated git wrappers.
 - `git_commit` requires explicit workspace-relative paths and commits only those
-  pathspecs.
+  pathspecs. Git path lists and commit messages are bounded before execution.
 
 ## Current Scope
 
