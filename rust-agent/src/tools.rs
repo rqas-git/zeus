@@ -1,6 +1,7 @@
 //! Built-in tool registry and execution.
 
 use std::collections::BinaryHeap;
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -1454,79 +1455,96 @@ async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
     );
 
     let patch = ParsedPatch::parse(&args.patch)?;
-    let changes = plan_patch_changes(root, patch).await?;
+    let changes = prepare_patch_changes(root, patch).await?;
     for change in &changes {
-        match change {
-            PlannedChange::Write {
-                path,
-                content,
-                permissions,
-                ..
-            } => write_file_atomically(path, content, permissions.clone()).await?,
-            PlannedChange::Delete { path, .. } => tokio::fs::remove_file(path)
+        let result = match change {
+            PreparedChange::Write {
+                path, temp_path, ..
+            } => commit_temp_file(path, temp_path).await,
+            PreparedChange::Delete { path, .. } => tokio::fs::remove_file(path)
                 .await
-                .with_context(|| format!("failed to delete {}", display_path(root, path)))?,
+                .with_context(|| format!("failed to delete {}", display_path(root, path))),
+        };
+        if let Err(error) = result {
+            cleanup_prepared_changes(&changes).await;
+            return Err(error);
         }
     }
 
     Ok(format_patch_summary(&changes))
 }
 
-async fn plan_patch_changes(root: &Path, patch: ParsedPatch) -> Result<Vec<PlannedChange>> {
+async fn prepare_patch_changes(root: &Path, patch: ParsedPatch) -> Result<Vec<PreparedChange>> {
     anyhow::ensure!(
         !patch.operations.is_empty(),
         "patch contains no file operations"
     );
     let mut changes = Vec::with_capacity(patch.operations.len());
-    let mut seen = Vec::with_capacity(patch.operations.len());
+    let mut seen = HashSet::with_capacity(patch.operations.len());
 
     for operation in patch.operations {
-        let change = match operation {
-            PatchOperation::Add { path, content } => {
-                let path = resolve_new_workspace_path(root, &path)?;
-                ensure_unique_patch_path(&mut seen, &path)?;
-                ensure_new_file_target(root, &path).await?;
-                ensure_patch_file_size(content.len() as u64)?;
-                PlannedChange::Write {
-                    display_path: display_path(root, &path),
-                    before_bytes: None,
-                    after_bytes: content.len(),
-                    path,
-                    content,
-                    permissions: None,
-                }
-            }
-            PatchOperation::Update { path, hunks } => {
-                let path = resolve_workspace_path(root, &path)?;
-                ensure_unique_patch_path(&mut seen, &path)?;
-                let (content, permissions) = read_patch_target(root, &path).await?;
-                let before_bytes = content.len();
-                let content = apply_hunks(&content, &hunks, &display_path(root, &path))?;
-                ensure_patch_file_size(content.len() as u64)?;
-                PlannedChange::Write {
-                    display_path: display_path(root, &path),
-                    before_bytes: Some(before_bytes),
-                    after_bytes: content.len(),
-                    path,
-                    content,
-                    permissions: Some(permissions),
-                }
-            }
-            PatchOperation::Delete { path } => {
-                let path = resolve_workspace_path(root, &path)?;
-                ensure_unique_patch_path(&mut seen, &path)?;
-                let (content, _permissions) = read_patch_target(root, &path).await?;
-                PlannedChange::Delete {
-                    display_path: display_path(root, &path),
-                    before_bytes: content.len(),
-                    path,
-                }
+        let change = match prepare_patch_change(root, operation, &mut seen).await {
+            Ok(change) => change,
+            Err(error) => {
+                cleanup_prepared_changes(&changes).await;
+                return Err(error);
             }
         };
         changes.push(change);
     }
 
     Ok(changes)
+}
+
+async fn prepare_patch_change(
+    root: &Path,
+    operation: PatchOperation,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<PreparedChange> {
+    match operation {
+        PatchOperation::Add { path, content } => {
+            let path = resolve_new_workspace_path(root, &path)?;
+            ensure_unique_patch_path(seen, &path)?;
+            ensure_new_file_target(root, &path).await?;
+            ensure_patch_file_size(content.len() as u64)?;
+            let after_bytes = content.len();
+            let temp_path = write_temp_sibling(&path, &content, None).await?;
+            Ok(PreparedChange::Write {
+                display_path: display_path(root, &path),
+                before_bytes: None,
+                after_bytes,
+                path,
+                temp_path,
+            })
+        }
+        PatchOperation::Update { path, hunks } => {
+            let path = resolve_workspace_path(root, &path)?;
+            ensure_unique_patch_path(seen, &path)?;
+            let (content, permissions) = read_patch_target(root, &path).await?;
+            let before_bytes = content.len();
+            let content = apply_hunks(&content, &hunks, &display_path(root, &path))?;
+            ensure_patch_file_size(content.len() as u64)?;
+            let after_bytes = content.len();
+            let temp_path = write_temp_sibling(&path, &content, Some(permissions)).await?;
+            Ok(PreparedChange::Write {
+                display_path: display_path(root, &path),
+                before_bytes: Some(before_bytes),
+                after_bytes,
+                path,
+                temp_path,
+            })
+        }
+        PatchOperation::Delete { path } => {
+            let path = resolve_workspace_path(root, &path)?;
+            ensure_unique_patch_path(seen, &path)?;
+            let (content, _permissions) = read_patch_target(root, &path).await?;
+            Ok(PreparedChange::Delete {
+                display_path: display_path(root, &path),
+                before_bytes: content.len(),
+                path,
+            })
+        }
+    }
 }
 
 fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
@@ -2102,14 +2120,13 @@ struct PatchHunk {
 }
 
 #[derive(Debug)]
-enum PlannedChange {
+enum PreparedChange {
     Write {
         display_path: String,
         before_bytes: Option<usize>,
         after_bytes: usize,
         path: PathBuf,
-        content: String,
-        permissions: Option<std::fs::Permissions>,
+        temp_path: PathBuf,
     },
     Delete {
         display_path: String,
@@ -2279,21 +2296,20 @@ fn ensure_patch_file_size(bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn ensure_unique_patch_path(seen: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
+fn ensure_unique_patch_path(seen: &mut HashSet<PathBuf>, path: &Path) -> Result<()> {
     anyhow::ensure!(
-        !seen.iter().any(|seen_path| seen_path == path),
+        seen.insert(path.to_path_buf()),
         "patch touches {} more than once",
         path.display()
     );
-    seen.push(path.to_path_buf());
     Ok(())
 }
 
-async fn write_file_atomically(
+async fn write_temp_sibling(
     path: &Path,
     content: &str,
     permissions: Option<std::fs::Permissions>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let (temp_path, mut file) = create_temp_sibling(path).await?;
     if let Err(error) = file.write_all(content.as_bytes()).await {
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -2313,11 +2329,23 @@ async fn write_file_atomically(
         }
     }
 
+    Ok(temp_path)
+}
+
+async fn commit_temp_file(path: &Path, temp_path: &Path) -> Result<()> {
     if let Err(error) = tokio::fs::rename(&temp_path, path).await {
         let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(error).with_context(|| format!("failed to replace {}", path.display()));
     }
     Ok(())
+}
+
+async fn cleanup_prepared_changes(changes: &[PreparedChange]) {
+    for change in changes {
+        if let PreparedChange::Write { temp_path, .. } = change {
+            let _ = tokio::fs::remove_file(temp_path).await;
+        }
+    }
 }
 
 async fn create_temp_sibling(path: &Path) -> Result<(PathBuf, tokio::fs::File)> {
@@ -2358,12 +2386,12 @@ fn temp_sibling_path(path: &Path, attempt: u8) -> Result<PathBuf> {
     )))
 }
 
-fn format_patch_summary(changes: &[PlannedChange]) -> String {
+fn format_patch_summary(changes: &[PreparedChange]) -> String {
     let mut output = format!("Applied patch: {} file(s) changed", changes.len());
     for change in changes {
         output.push('\n');
         match change {
-            PlannedChange::Write {
+            PreparedChange::Write {
                 display_path,
                 before_bytes: Some(before_bytes),
                 after_bytes,
@@ -2373,7 +2401,7 @@ fn format_patch_summary(changes: &[PlannedChange]) -> String {
                     "updated {display_path} ({before_bytes} -> {after_bytes} bytes)"
                 ));
             }
-            PlannedChange::Write {
+            PreparedChange::Write {
                 display_path,
                 before_bytes: None,
                 after_bytes,
@@ -2381,7 +2409,7 @@ fn format_patch_summary(changes: &[PlannedChange]) -> String {
             } => {
                 output.push_str(&format!("added {display_path} ({after_bytes} bytes)"));
             }
-            PlannedChange::Delete {
+            PreparedChange::Delete {
                 display_path,
                 before_bytes,
                 ..
