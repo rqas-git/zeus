@@ -4,13 +4,13 @@ mod agent_loop;
 mod auth;
 mod client;
 mod config;
+mod service;
 
 use std::io;
 use std::io::Write;
 use std::time::Instant;
 
 use agent_loop::AgentEvent;
-use agent_loop::AgentLoop;
 use agent_loop::SessionId;
 use anyhow::Context;
 use anyhow::Result;
@@ -18,6 +18,7 @@ use auth::CodexAuth;
 use client::ChatGptClient;
 use config::AppConfig;
 use mimalloc::MiMalloc;
+use service::AgentService;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -27,13 +28,14 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
     let client = ChatGptClient::new(auth, config.client)?;
-    let mut agent = AgentLoop::with_context_window(SessionId::new(1), config.context);
+    let mut service = AgentService::new(client, config.context);
+    let session_id = SessionId::new(1);
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&client, &mut agent, config.output).await;
+        return run_interactive_loop(&mut service, session_id, config.output).await;
     };
 
-    print_agent_response(&client, &mut agent, config.output, message).await?;
+    print_agent_response(&mut service, session_id, config.output, message).await?;
     Ok(())
 }
 
@@ -47,8 +49,8 @@ fn message_from_args() -> Option<String> {
 }
 
 async fn run_interactive_loop(
-    client: &ChatGptClient,
-    agent: &mut AgentLoop,
+    service: &mut AgentService<ChatGptClient>,
+    session_id: SessionId,
     output: config::OutputConfig,
 ) -> Result<()> {
     loop {
@@ -56,13 +58,13 @@ async fn run_interactive_loop(
             return Ok(());
         };
 
-        print_agent_response(client, agent, output, message).await?;
+        print_agent_response(service, session_id, output, message).await?;
     }
 }
 
 async fn print_agent_response(
-    client: &ChatGptClient,
-    agent: &mut AgentLoop,
+    service: &mut AgentService<ChatGptClient>,
+    session_id: SessionId,
     output: config::OutputConfig,
     message: String,
 ) -> Result<String> {
@@ -71,8 +73,8 @@ async fn print_agent_response(
     stdout.flush().context("failed to flush assistant prompt")?;
 
     let mut delta_writer = DeltaWriter::new(stdout, output);
-    let response = agent
-        .submit_user_message(message, client, |event| match event {
+    let response = service
+        .submit_user_message(session_id, message, |event| match event {
             AgentEvent::TextDelta { delta, .. } => delta_writer.write_delta(delta),
             _ => Ok(()),
         })
