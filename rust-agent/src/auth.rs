@@ -25,6 +25,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ACCESS_TOKEN_REFRESH_BUFFER_SECONDS: u64 = 60;
 const MAX_REFRESH_AGE_SECONDS: u64 = 8 * 24 * 60 * 60;
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const AUTH_TEMP_ATTEMPTS: u8 = 16;
 
 /// Short-lived credentials required by the model backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,17 +597,10 @@ impl AuthStorage {
             .path
             .parent()
             .context("auth file path has no parent directory")?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("failed to create auth directory {}", parent.display()))?;
-        let temp_path = self.path.with_extension("json.tmp");
+        ensure_private_auth_dir(parent)?;
         let bytes =
             serde_json::to_vec_pretty(auth_file).context("failed to serialize auth file")?;
-        write_private_file(&temp_path, &bytes)
-            .with_context(|| format!("failed to write auth file {}", temp_path.display()))?;
-        tokio::fs::rename(&temp_path, &self.path)
-            .await
-            .with_context(|| format!("failed to replace auth file {}", self.path.display()))
+        write_private_file_atomically(&self.path, parent, &bytes)
     }
 
     async fn remove(&self) -> Result<bool> {
@@ -627,25 +621,129 @@ fn default_auth_file() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".rust-agent").join("auth.json"))
 }
 
-#[cfg(unix)]
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+fn ensure_private_auth_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create auth directory {}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect auth directory {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "auth directory {} is not a directory",
+        path.display()
+    );
 
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "auth directory {} cannot be a symlink",
+            path.display()
+        );
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("failed to secure auth directory {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_private_file_atomically(path: &Path, parent: &Path, bytes: &[u8]) -> Result<()> {
+    let (temp_path, mut file) = create_private_temp_file(path, parent)?;
+    if let Err(error) = write_private_file_contents(&mut file, bytes) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to write auth file {}", temp_path.display()));
+    }
+    drop(file);
+
+    if let Err(error) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error)
+            .with_context(|| format!("failed to replace auth file {}", path.display()));
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn create_private_temp_file(path: &Path, parent: &Path) -> Result<(PathBuf, std::fs::File)> {
+    for attempt in 0..AUTH_TEMP_ATTEMPTS {
+        let temp_path = temp_auth_path(path, parent, attempt)?;
+        match open_private_new_file(&temp_path) {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create auth file {}", temp_path.display())
+                });
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to allocate temporary auth file for {}",
+        path.display()
+    )
+}
+
+fn temp_auth_path(path: &Path, parent: &Path, attempt: u8) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("auth file path has no file name: {}", path.display()))?
+        .to_string_lossy();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(parent.join(format!(
+        ".{name}.{}.{unique}.{attempt}.tmp",
+        std::process::id()
+    )))
+}
+
+fn open_private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.mode(0o600);
+    }
+
+    let file = options.open(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(file)
+}
+
+fn write_private_file_contents(file: &mut std::fs::File, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
 }
 
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .with_context(|| format!("failed to open auth directory {}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("failed to sync auth directory {}", path.display()))
+}
+
 #[cfg(not(unix))]
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes)?;
+fn sync_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -832,6 +930,44 @@ mod tests {
         assert_eq!(storage.load().await.unwrap(), Some(auth_file));
         assert!(storage.remove().await.unwrap());
         assert_eq!(storage.load().await.unwrap(), None);
+
+        remove_parent(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn save_does_not_reuse_stale_auth_temp_file() {
+        let auth_path = temp_auth_file("stale-temp");
+        let parent = auth_path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let stale_temp = auth_path.with_extension("json.tmp");
+        std::fs::write(&stale_temp, b"stale").unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+            std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let storage = AuthStorage::new(auth_path.clone());
+        let auth_file = AuthFile::new(tokens_with_exp("account-a", now_unix() + 600, "refresh"));
+
+        storage.save(&auth_file).await.unwrap();
+
+        assert_eq!(storage.load().await.unwrap(), Some(auth_file));
+        assert_eq!(std::fs::read_to_string(&stale_temp).unwrap(), "stale");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&stale_temp).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
 
         remove_parent(&auth_path);
     }
