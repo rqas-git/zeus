@@ -1,51 +1,45 @@
 //! Minimal ChatGPT Codex Responses client.
 
-use std::io::BufRead;
-use std::io::BufReader;
-use std::time::Duration;
-
 use anyhow::Context;
 use anyhow::Result;
 use reqwest::blocking::Client;
 use reqwest::header;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::json;
 use serde_json::Value;
+use std::io::BufRead;
+use std::io::BufReader;
 
+use crate::agent_loop::SessionId;
 use crate::auth::CodexAuth;
-
-const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_ORIGINATOR: &str = "codex_cli_rs";
-const CODEX_VERSION: &str = "0.128.0";
-const MODEL: &str = "gpt-5.5";
+use crate::config::ClientConfig;
 
 /// One message in the current in-memory conversation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ConversationMessage {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConversationMessage<'a> {
     role: ConversationRole,
-    text: String,
+    text: &'a str,
 }
 
-impl ConversationMessage {
+impl<'a> ConversationMessage<'a> {
     /// Creates a user message.
-    pub(crate) fn user(text: impl Into<String>) -> Self {
+    pub(crate) fn user(text: &'a str) -> Self {
         Self {
             role: ConversationRole::User,
-            text: text.into(),
+            text,
         }
     }
 
     /// Creates an assistant message.
-    pub(crate) fn assistant(text: impl Into<String>) -> Self {
+    pub(crate) fn assistant(text: &'a str) -> Self {
         Self {
             role: ConversationRole::Assistant,
-            text: text.into(),
+            text,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversationRole {
     User,
     Assistant,
@@ -54,21 +48,22 @@ enum ConversationRole {
 /// Blocking client for ChatGPT requests through Codex OAuth.
 pub(crate) struct ChatGptClient {
     auth: CodexAuth,
+    config: ClientConfig,
     http: Client,
 }
 
 impl ChatGptClient {
-    /// Creates a client with hardcoded backend configuration.
+    /// Creates a client with explicit backend configuration.
     ///
     /// # Errors
     /// Returns an error if the HTTP client cannot be constructed.
-    pub(crate) fn new(auth: CodexAuth) -> Result<Self> {
+    pub(crate) fn new(auth: CodexAuth, config: ClientConfig) -> Result<Self> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(config.request_timeout())
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self { auth, http })
+        Ok(Self { auth, config, http })
     }
 
     /// Sends a conversation and streams assistant text deltas.
@@ -77,29 +72,32 @@ impl ChatGptClient {
     /// Returns an error for transport failures, backend errors, malformed SSE, or callback failures.
     pub(crate) fn stream_conversation(
         &self,
-        messages: &[ConversationMessage],
+        messages: &[ConversationMessage<'_>],
+        session_id: SessionId,
         on_delta: impl FnMut(&str) -> Result<()>,
     ) -> Result<String> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
-        let body = json!({
-            "model": MODEL,
-            "instructions": "You are a concise assistant.",
+        let prompt_cache_key = self.config.prompt_cache_key(session_id.get());
+        let body = serde_json::json!({
+            "model": self.config.model(),
+            "instructions": self.config.instructions(),
             "input": responses_input(messages),
             "tools": [],
             "tool_choice": "auto",
             "parallel_tool_calls": false,
             "store": false,
             "stream": true,
+            "prompt_cache_key": prompt_cache_key,
         });
 
         let response = self
             .http
-            .post(CODEX_RESPONSES_URL)
+            .post(self.config.responses_url())
             .bearer_auth(self.auth.access_token())
             .header("ChatGPT-Account-ID", self.auth.account_id())
-            .header("originator", CODEX_ORIGINATOR)
-            .header("version", CODEX_VERSION)
+            .header("originator", self.config.originator())
+            .header("version", self.config.version())
             .header(header::ACCEPT, "text/event-stream")
             .json(&body)
             .send()
@@ -120,7 +118,7 @@ impl ChatGptClient {
     }
 }
 
-fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesMessage<'_>> {
+fn responses_input<'a>(messages: &'a [ConversationMessage<'a>]) -> Vec<ResponsesMessage<'a>> {
     messages.iter().map(ResponsesMessage::from).collect()
 }
 
@@ -132,14 +130,14 @@ struct ResponsesMessage<'a> {
     content: [ResponsesContent<'a>; 1],
 }
 
-impl<'a> From<&'a ConversationMessage> for ResponsesMessage<'a> {
-    fn from(message: &'a ConversationMessage) -> Self {
+impl<'a> From<&'a ConversationMessage<'a>> for ResponsesMessage<'a> {
+    fn from(message: &'a ConversationMessage<'a>) -> Self {
         Self {
             kind: "message",
             role: message.role.as_str(),
             content: [ResponsesContent {
                 kind: message.role.content_type(),
-                text: &message.text,
+                text: message.text,
             }],
         }
     }

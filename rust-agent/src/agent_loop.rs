@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::client::ConversationMessage;
+use crate::config::ContextWindowConfig;
 
 /// Strong identifier for an agent session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -12,6 +13,11 @@ impl SessionId {
     /// Creates a session identifier from a stable numeric value.
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
+    }
+
+    /// Returns the numeric session identifier.
+    pub(crate) const fn get(self) -> u64 {
+        self.0
     }
 }
 
@@ -60,10 +66,10 @@ impl AgentMessage {
         &self.text
     }
 
-    fn conversation_message(&self) -> ConversationMessage {
+    fn conversation_message(&self) -> ConversationMessage<'_> {
         match self.role {
-            MessageRole::User => ConversationMessage::user(self.text.clone()),
-            MessageRole::Assistant => ConversationMessage::assistant(self.text.clone()),
+            MessageRole::User => ConversationMessage::user(&self.text),
+            MessageRole::Assistant => ConversationMessage::assistant(&self.text),
         }
     }
 }
@@ -141,11 +147,28 @@ impl InMemorySessionStore {
         id
     }
 
-    fn conversation_history(&self) -> Vec<ConversationMessage> {
-        self.messages
-            .iter()
-            .map(AgentMessage::conversation_message)
-            .collect()
+    fn conversation_window(&self, config: ContextWindowConfig) -> Vec<ConversationMessage<'_>> {
+        let mut retained = Vec::new();
+        let mut retained_bytes = 0usize;
+
+        for message in self.messages.iter().rev() {
+            if retained.len() >= config.max_messages() {
+                break;
+            }
+
+            let message_bytes = message.text().len();
+            let would_exceed_budget =
+                retained_bytes.saturating_add(message_bytes) > config.max_bytes();
+            if would_exceed_budget && !retained.is_empty() {
+                break;
+            }
+
+            retained.push(message.conversation_message());
+            retained_bytes = retained_bytes.saturating_add(message_bytes);
+        }
+
+        retained.reverse();
+        retained
     }
 }
 
@@ -153,13 +176,23 @@ impl InMemorySessionStore {
 #[derive(Debug)]
 pub(crate) struct AgentLoop {
     store: InMemorySessionStore,
+    context_window: ContextWindowConfig,
 }
 
 impl AgentLoop {
     /// Creates an agent loop for one session.
     pub(crate) fn new(session_id: SessionId) -> Self {
+        Self::with_context_window(session_id, ContextWindowConfig::default())
+    }
+
+    /// Creates an agent loop with explicit context-window bounds.
+    pub(crate) fn with_context_window(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+    ) -> Self {
         Self {
             store: InMemorySessionStore::new(session_id),
+            context_window,
         }
     }
 
@@ -182,7 +215,7 @@ impl AgentLoop {
         &mut self,
         text: impl Into<String>,
         stream_model: impl FnOnce(
-            &[ConversationMessage],
+            &[ConversationMessage<'_>],
             &mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String>,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
@@ -256,12 +289,12 @@ impl AgentLoop {
     fn run_once(
         &mut self,
         stream_model: impl FnOnce(
-            &[ConversationMessage],
+            &[ConversationMessage<'_>],
             &mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String>,
         emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
     ) -> Result<String> {
-        let history = self.store.conversation_history();
+        let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
         let assistant_text = stream_model(&history, &mut on_delta)?;
@@ -350,6 +383,43 @@ mod tests {
         assert_eq!(response, "rust-agent");
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[3].text(), "rust-agent");
+    }
+
+    #[test]
+    fn sends_bounded_recent_history() {
+        let mut agent =
+            AgentLoop::with_context_window(SessionId::new(7), ContextWindowConfig::new(3, 24));
+
+        agent
+            .submit_user_message(
+                "first user",
+                |_history, _| Ok("first answer".to_string()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        agent
+            .submit_user_message(
+                "second user",
+                |_history, _| Ok("second answer".to_string()),
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        let response = agent
+            .submit_user_message(
+                "third user",
+                |history, _| {
+                    assert_eq!(history.len(), 2);
+                    assert_eq!(history[0], ConversationMessage::assistant("second answer"));
+                    assert_eq!(history[1], ConversationMessage::user("third user"));
+                    Ok("third answer".to_string())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(response, "third answer");
+        assert_eq!(agent.messages().len(), 6);
     }
 
     #[test]
