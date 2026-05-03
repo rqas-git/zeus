@@ -8,6 +8,7 @@ const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex
 const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CODEX_VERSION: &str = "0.128.0";
 const DEFAULT_MODEL: &str = "gpt-5.5";
+const DEFAULT_ALLOWED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
@@ -16,10 +17,11 @@ const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 
 /// Configuration for one running rust-agent process.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AppConfig {
     pub(crate) client: ClientConfig,
     pub(crate) context: ContextWindowConfig,
+    pub(crate) models: ModelConfig,
     pub(crate) output: OutputConfig,
 }
 
@@ -32,25 +34,15 @@ impl AppConfig {
         Ok(Self {
             client: ClientConfig::from_env()?,
             context: ContextWindowConfig::from_env()?,
+            models: ModelConfig::from_env()?,
             output: OutputConfig::from_env()?,
         })
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            client: ClientConfig::default(),
-            context: ContextWindowConfig::default(),
-            output: OutputConfig::default(),
-        }
     }
 }
 
 /// Configuration for ChatGPT Codex backend requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClientConfig {
-    model: String,
     instructions: String,
     responses_url: String,
     originator: String,
@@ -71,7 +63,6 @@ impl ClientConfig {
         )?;
 
         Ok(Self {
-            model: env_string("RUST_AGENT_MODEL", DEFAULT_MODEL),
             instructions: env_string("RUST_AGENT_INSTRUCTIONS", DEFAULT_INSTRUCTIONS),
             responses_url: env_string("RUST_AGENT_RESPONSES_URL", DEFAULT_CODEX_RESPONSES_URL),
             originator: env_string("RUST_AGENT_ORIGINATOR", DEFAULT_CODEX_ORIGINATOR),
@@ -79,11 +70,6 @@ impl ClientConfig {
             request_timeout: Duration::from_secs(request_timeout_secs),
             prompt_cache_namespace: env_string("RUST_AGENT_PROMPT_CACHE_NAMESPACE", "rust-agent"),
         })
-    }
-
-    /// Returns the configured model slug.
-    pub(crate) fn model(&self) -> &str {
-        &self.model
     }
 
     /// Returns the configured assistant instructions.
@@ -112,21 +98,116 @@ impl ClientConfig {
     }
 
     /// Builds a stable prompt-cache key for a session.
-    pub(crate) fn prompt_cache_key(&self, session_id: u64) -> String {
-        format!("{}-{session_id}", self.prompt_cache_namespace)
+    pub(crate) fn prompt_cache_key(&self, session_id: u64, model: &str) -> String {
+        format!("{}-{session_id}-{model}", self.prompt_cache_namespace)
     }
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            model: DEFAULT_MODEL.to_string(),
             instructions: DEFAULT_INSTRUCTIONS.to_string(),
             responses_url: DEFAULT_CODEX_RESPONSES_URL.to_string(),
             originator: DEFAULT_CODEX_ORIGINATOR.to_string(),
             version: DEFAULT_CODEX_VERSION.to_string(),
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             prompt_cache_namespace: "rust-agent".to_string(),
+        }
+    }
+}
+
+/// Model defaults and allowlist enforced by the backend service.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelConfig {
+    default_model: String,
+    allowed_models: Vec<String>,
+}
+
+impl ModelConfig {
+    /// Loads model configuration from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if no allowed models are configured or the default is not allowed.
+    pub(crate) fn from_env() -> Result<Self> {
+        let default_model = normalized_model(env_string("RUST_AGENT_MODEL", DEFAULT_MODEL))?;
+        let allowed_models = match env_model_list("RUST_AGENT_ALLOWED_MODELS") {
+            Some(models) => {
+                let models = normalized_model_list(models)?;
+                anyhow::ensure!(
+                    models.iter().any(|model| model == &default_model),
+                    "RUST_AGENT_MODEL={default_model:?} is not in RUST_AGENT_ALLOWED_MODELS"
+                );
+                models
+            }
+            None => {
+                let mut models = default_allowed_models();
+                if !models.iter().any(|model| model == &default_model) {
+                    models.push(default_model.clone());
+                }
+                models
+            }
+        };
+
+        Ok(Self {
+            default_model,
+            allowed_models,
+        })
+    }
+
+    /// Creates model configuration with explicit values.
+    #[cfg(test)]
+    pub(crate) fn new(
+        default_model: impl Into<String>,
+        allowed_models: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        let default_model = normalized_model(default_model)?;
+        let allowed_models = normalized_model_list(allowed_models)?;
+        anyhow::ensure!(
+            allowed_models.iter().any(|model| model == &default_model),
+            "default model {default_model:?} is not in allowed models"
+        );
+        Ok(Self {
+            default_model,
+            allowed_models,
+        })
+    }
+
+    /// Returns the default model slug for new sessions.
+    pub(crate) fn default_model(&self) -> &str {
+        &self.default_model
+    }
+
+    /// Returns the backend allowlist for model changes.
+    pub(crate) fn allowed_models(&self) -> &[String] {
+        &self.allowed_models
+    }
+
+    /// Returns the canonical allowed model matching a requested slug.
+    ///
+    /// # Errors
+    /// Returns an error if the model is empty or not in the allowlist.
+    pub(crate) fn allowed_model(&self, model: &str) -> Result<&str> {
+        let requested = model.trim();
+        anyhow::ensure!(!requested.is_empty(), "model cannot be empty");
+
+        self.allowed_models
+            .iter()
+            .find(|candidate| candidate.as_str() == requested)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported model {requested:?}; allowed models: {}",
+                    self.allowed_models.join(", ")
+                )
+            })
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            default_model: DEFAULT_MODEL.to_string(),
+            allowed_models: default_allowed_models(),
         }
     }
 }
@@ -244,6 +325,45 @@ fn env_string(name: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+fn env_model_list(name: &str) -> Option<Vec<String>> {
+    std::env::var(name).ok().map(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn default_allowed_models() -> Vec<String> {
+    DEFAULT_ALLOWED_MODELS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn normalized_model(model: impl Into<String>) -> Result<String> {
+    let model = model.into();
+    let model = model.trim();
+    anyhow::ensure!(!model.is_empty(), "model cannot be empty");
+    Ok(model.to_string())
+}
+
+fn normalized_model_list(
+    models: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = normalized_model(model)?;
+        if !normalized.iter().any(|existing| existing == &model) {
+            normalized.push(model);
+        }
+    }
+    anyhow::ensure!(!normalized.is_empty(), "allowed models cannot be empty");
+    Ok(normalized)
 }
 
 fn env_parse_u64(name: &str, default: u64) -> Result<u64> {

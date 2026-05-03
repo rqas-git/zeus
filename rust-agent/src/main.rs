@@ -25,17 +25,22 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = AppConfig::from_env()?;
+    let AppConfig {
+        client,
+        context,
+        models,
+        output,
+    } = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
-    let client = ChatGptClient::new(auth, config.client)?;
-    let mut service = AgentService::new(client, config.context);
+    let client = ChatGptClient::new(auth, client)?;
+    let mut service = AgentService::new(client, context, models);
     let session_id = SessionId::new(1);
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&mut service, session_id, config.output).await;
+        return run_interactive_loop(&mut service, session_id, output).await;
     };
 
-    print_agent_response(&mut service, session_id, config.output, message).await?;
+    print_agent_response(&mut service, session_id, output, message).await?;
     Ok(())
 }
 
@@ -54,11 +59,27 @@ async fn run_interactive_loop(
     output: config::OutputConfig,
 ) -> Result<()> {
     loop {
-        let Some(message) = read_prompt()? else {
+        let Some(input) = read_prompt()? else {
             return Ok(());
         };
 
-        print_agent_response(service, session_id, output, message).await?;
+        match input {
+            InteractiveInput::Message(message) => {
+                print_agent_response(service, session_id, output, message).await?;
+            }
+            InteractiveInput::ShowModel => {
+                println!("Model: {}", service.session_model(session_id));
+            }
+            InteractiveInput::SetModel(model) => {
+                match service.set_session_model(session_id, &model) {
+                    Ok(model) => println!("Model: {model}"),
+                    Err(error) => println!("Error: {error}"),
+                }
+            }
+            InteractiveInput::ListModels => {
+                println!("Models: {}", service.allowed_models().join(", "));
+            }
+        }
     }
 }
 
@@ -140,7 +161,15 @@ where
     }
 }
 
-fn read_prompt() -> Result<Option<String>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InteractiveInput {
+    Message(String),
+    ShowModel,
+    SetModel(String),
+    ListModels,
+}
+
+fn read_prompt() -> Result<Option<InteractiveInput>> {
     print!("You: ");
     io::stdout().flush().context("failed to flush prompt")?;
 
@@ -148,12 +177,26 @@ fn read_prompt() -> Result<Option<String>> {
     io::stdin()
         .read_line(&mut input)
         .context("failed to read message from stdin")?;
-    let input = input.trim().to_string();
+    Ok(parse_interactive_input(&input))
+}
+
+fn parse_interactive_input(input: &str) -> Option<InteractiveInput> {
+    let input = input.trim();
     if input.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(input))
+        return None;
     }
+    if input == "/models" {
+        return Some(InteractiveInput::ListModels);
+    }
+    if input.split_whitespace().next() == Some("/model") {
+        let model = input.trim_start_matches("/model").trim();
+        return if model.is_empty() {
+            Some(InteractiveInput::ShowModel)
+        } else {
+            Some(InteractiveInput::SetModel(model.to_string()))
+        };
+    }
+    Some(InteractiveInput::Message(input.to_string()))
 }
 
 #[cfg(test)]
@@ -180,5 +223,26 @@ mod tests {
         writer.finish_line().unwrap();
 
         assert_eq!(String::from_utf8(writer.writer).unwrap(), "hello world!\n");
+    }
+
+    #[test]
+    fn parses_model_commands() {
+        assert_eq!(parse_interactive_input(""), None);
+        assert_eq!(
+            parse_interactive_input("/model"),
+            Some(InteractiveInput::ShowModel)
+        );
+        assert_eq!(
+            parse_interactive_input("/model gpt-5.4"),
+            Some(InteractiveInput::SetModel("gpt-5.4".to_string()))
+        );
+        assert_eq!(
+            parse_interactive_input("/models"),
+            Some(InteractiveInput::ListModels)
+        );
+        assert_eq!(
+            parse_interactive_input("/help"),
+            Some(InteractiveInput::Message("/help".to_string()))
+        );
     }
 }

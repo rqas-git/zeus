@@ -7,7 +7,8 @@ specific backend provider.
 ## Flow
 
 1. `ChatGptClient::new` builds one reusable async `reqwest::Client`.
-2. `stream_conversation` receives a borrowed prompt window and `SessionId`.
+2. `stream_conversation` receives a borrowed prompt window, `SessionId`, and
+   selected model.
 3. The request is serialized from typed borrowed structs.
 4. The response body is parsed as SSE.
 5. Assistant text deltas are forwarded immediately through the callback.
@@ -15,7 +16,8 @@ specific backend provider.
 
 ## Responsibilities
 
-- `ClientConfig` supplies model, endpoint, instructions, headers, and timeout.
+- `ClientConfig` supplies endpoint, instructions, headers, and timeout.
+- `AgentService` supplies the selected model for each request.
 - `ChatGptClient` authenticates with Codex OAuth credentials.
 - The typed request structs shape Responses API payloads.
 - `AssistantText` accumulates streamed text and handles fallback completed items.
@@ -25,7 +27,7 @@ specific backend provider.
 - Async HTTP avoids blocking backend request workers.
 - Typed request serialization avoids constructing a generic JSON tree first.
 - SSE event parsing borrows event fields and raw nested payloads where possible.
-- Prompt-cache keys are stable per configured namespace and session.
+- Prompt-cache keys are stable per configured namespace, session, and model.
 
 ## Current Scope
 

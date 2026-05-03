@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use std::borrow::Cow;
-use std::future::Future;
 #[cfg(test)]
 use std::io::BufRead;
 
@@ -75,55 +74,54 @@ impl ChatGptClient {
 
 impl ModelStreamer for ChatGptClient {
     /// Sends a conversation and streams assistant text deltas.
-    fn stream_conversation<'a>(
+    async fn stream_conversation<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
         session_id: SessionId,
+        model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
-    ) -> impl Future<Output = Result<String>> + 'a {
-        async move {
-            anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
+    ) -> Result<String> {
+        anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
-            let prompt_cache_key = self.config.prompt_cache_key(session_id.get());
-            let body = ResponsesRequest {
-                model: self.config.model(),
-                instructions: self.config.instructions(),
-                input: responses_input(messages),
-                tools: EmptyArray,
-                tool_choice: "auto",
-                parallel_tool_calls: false,
-                store: false,
-                stream: true,
-                prompt_cache_key: &prompt_cache_key,
-            };
+        let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
+        let body = ResponsesRequest {
+            model,
+            instructions: self.config.instructions(),
+            input: responses_input(messages),
+            tools: EmptyArray,
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            store: false,
+            stream: true,
+            prompt_cache_key: &prompt_cache_key,
+        };
 
-            let response = self
-                .http
-                .post(self.config.responses_url())
-                .bearer_auth(self.auth.access_token())
-                .header("ChatGPT-Account-ID", self.auth.account_id())
-                .header("originator", self.config.originator())
-                .header("version", self.config.version())
-                .header(header::ACCEPT, "text/event-stream")
-                .json(&body)
-                .send()
+        let response = self
+            .http
+            .post(self.config.responses_url())
+            .bearer_auth(self.auth.access_token())
+            .header("ChatGPT-Account-ID", self.auth.account_id())
+            .header("originator", self.config.originator())
+            .header("version", self.config.version())
+            .header(header::ACCEPT, "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .context("failed to send request to ChatGPT Codex backend")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let response_text = response
+                .text()
                 .await
-                .context("failed to send request to ChatGPT Codex backend")?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let response_text = response
-                    .text()
-                    .await
-                    .context("failed to read ChatGPT Codex error response")?;
-                anyhow::bail!(
-                    "ChatGPT Codex backend returned {status}: {}",
-                    truncate_for_error(&response_text)
-                );
-            }
-
-            read_assistant_text_stream(response, on_delta).await
+                .context("failed to read ChatGPT Codex error response")?;
+            anyhow::bail!(
+                "ChatGPT Codex backend returned {status}: {}",
+                truncate_for_error(&response_text)
+            );
         }
+
+        read_assistant_text_stream(response, on_delta).await
     }
 }
 

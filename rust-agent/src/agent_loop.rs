@@ -106,8 +106,33 @@ pub(crate) trait ModelStreamer {
         &'a self,
         messages: &'a [ConversationMessage<'a>],
         session_id: SessionId,
+        model: &'a str,
         on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
     ) -> impl Future<Output = Result<String>> + 'a;
+}
+
+/// Per-session runtime settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionConfig {
+    model: String,
+}
+
+impl SessionConfig {
+    /// Creates session settings with an initial model.
+    pub(crate) fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+        }
+    }
+
+    /// Returns the selected model for future turns.
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
 }
 
 /// In-memory storage for one session.
@@ -115,16 +140,18 @@ pub(crate) trait ModelStreamer {
 pub(crate) struct InMemorySessionStore {
     session_id: SessionId,
     status: SessionStatus,
+    config: SessionConfig,
     next_message_id: MessageId,
     messages: Vec<AgentMessage>,
 }
 
 impl InMemorySessionStore {
     /// Creates empty session storage.
-    pub(crate) fn new(session_id: SessionId) -> Self {
+    pub(crate) fn new(session_id: SessionId, config: SessionConfig) -> Self {
         Self {
             session_id,
             status: SessionStatus::Idle,
+            config,
             next_message_id: MessageId(1),
             messages: Vec::new(),
         }
@@ -140,6 +167,11 @@ impl InMemorySessionStore {
         self.status
     }
 
+    /// Returns the selected model for this session.
+    pub(crate) fn model(&self) -> &str {
+        self.config.model()
+    }
+
     /// Returns stored messages in order.
     pub(crate) fn messages(&self) -> &[AgentMessage] {
         &self.messages
@@ -147,6 +179,10 @@ impl InMemorySessionStore {
 
     fn set_status(&mut self, status: SessionStatus) {
         self.status = status;
+    }
+
+    fn set_model(&mut self, model: impl Into<String>) {
+        self.config.set_model(model);
     }
 
     fn append_message(&mut self, role: MessageRole, text: impl Into<String>) -> MessageId {
@@ -206,16 +242,21 @@ impl AgentLoop {
     /// Creates an agent loop for one session.
     #[cfg(test)]
     pub(crate) fn new(session_id: SessionId) -> Self {
-        Self::with_context_window(session_id, ContextWindowConfig::default())
+        Self::with_context_window(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+        )
     }
 
     /// Creates an agent loop with explicit context-window bounds.
     pub(crate) fn with_context_window(
         session_id: SessionId,
         context_window: ContextWindowConfig,
+        config: SessionConfig,
     ) -> Self {
         Self {
-            store: InMemorySessionStore::new(session_id),
+            store: InMemorySessionStore::new(session_id, config),
             context_window,
         }
     }
@@ -225,10 +266,28 @@ impl AgentLoop {
         self.store.session_id()
     }
 
+    /// Returns the selected model for future turns.
+    pub(crate) fn model(&self) -> &str {
+        self.store.model()
+    }
+
     /// Returns stored messages in order.
     #[cfg(test)]
     pub(crate) fn messages(&self) -> &[AgentMessage] {
         self.store.messages()
+    }
+
+    /// Changes the selected model for future turns.
+    ///
+    /// # Errors
+    /// Returns an error if a turn is currently running.
+    pub(crate) fn set_model(&mut self, model: impl Into<String>) -> Result<()> {
+        anyhow::ensure!(
+            self.store.status() != SessionStatus::Running,
+            "cannot change model while session is running"
+        );
+        self.store.set_model(model);
+        Ok(())
     }
 
     /// Appends a user message, streams the model response, and stores the assistant message.
@@ -320,9 +379,10 @@ impl AgentLoop {
     ) -> Result<String> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
+        let selected_model = self.store.model();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
         let assistant_text = model
-            .stream_conversation(&history, session_id, &mut on_delta)
+            .stream_conversation(&history, session_id, selected_model, &mut on_delta)
             .await?;
         let assistant_id = self
             .store
@@ -349,7 +409,9 @@ mod tests {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
         let streamer = FnStreamer::new(
-            |history: &[ConversationMessage<'_>], on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history.len(), 1);
                 on_delta("hi")?;
                 Ok("hi".to_string())
@@ -388,7 +450,9 @@ mod tests {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
-            |history: &[ConversationMessage<'_>], on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.get() {
                     0 => {
                         assert_eq!(history.len(), 1);
@@ -423,11 +487,16 @@ mod tests {
 
     #[tokio::test]
     async fn sends_bounded_recent_history() {
-        let mut agent =
-            AgentLoop::with_context_window(SessionId::new(7), ContextWindowConfig::new(3, 24));
+        let mut agent = AgentLoop::with_context_window(
+            SessionId::new(7),
+            ContextWindowConfig::new(3, 24),
+            SessionConfig::new("test-model"),
+        );
         let turn = Cell::new(0);
         let streamer = FnStreamer::new(
-            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 match turn.get() {
                     0 => {
                         turn.set(1);
@@ -468,11 +537,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_selected_model_to_streamer() {
+        let mut agent = AgentLoop::with_context_window(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            SessionConfig::new("first-model"),
+        );
+        let turn = Cell::new(0);
+        let streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             model: &str,
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                match turn.get() {
+                    0 => {
+                        assert_eq!(model, "first-model");
+                        turn.set(1);
+                    }
+                    1 => {
+                        assert_eq!(model, "second-model");
+                        turn.set(2);
+                    }
+                    _ => unreachable!("unexpected turn"),
+                }
+                Ok(model.to_string())
+            },
+        );
+
+        let first = agent
+            .submit_user_message("hello", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+        agent.set_model("second-model").unwrap();
+        let second = agent
+            .submit_user_message("again", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(first, "first-model");
+        assert_eq!(second, "second-model");
+        assert_eq!(turn.get(), 2);
+    }
+
+    #[tokio::test]
     async fn records_failed_status_and_error_event() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let mut events = Vec::new();
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 anyhow::bail!("backend failed")
             },
@@ -506,6 +618,7 @@ mod tests {
         let model_called = Cell::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 model_called.set(true);
                 Ok("unused".to_string())
@@ -535,7 +648,9 @@ mod tests {
         assert!(agent.messages().is_empty());
 
         let ok_streamer = FnStreamer::new(
-            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history, &[ConversationMessage::user("retry")]);
                 Ok("ok".to_string())
             },
@@ -557,6 +672,7 @@ mod tests {
         let model_called = Cell::new(false);
         let streamer = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
+             _model: &str,
              _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 model_called.set(true);
                 Ok("unused".to_string())
@@ -586,7 +702,9 @@ mod tests {
         assert!(agent.messages().is_empty());
 
         let ok_streamer = FnStreamer::new(
-            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
                 assert_eq!(history, &[ConversationMessage::user("again")]);
                 Ok("ok".to_string())
             },
@@ -636,6 +754,7 @@ mod tests {
     where
         F: for<'a> FnMut(
             &'a [ConversationMessage<'a>],
+            &'a str,
             &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String>,
     {
@@ -643,9 +762,10 @@ mod tests {
             &'a self,
             messages: &'a [ConversationMessage<'a>],
             _session_id: SessionId,
+            model: &'a str,
             on_delta: &'a mut dyn FnMut(&str) -> Result<()>,
         ) -> Result<String> {
-            (self.stream.borrow_mut())(messages, on_delta)
+            (self.stream.borrow_mut())(messages, model, on_delta)
         }
     }
 }
