@@ -1,5 +1,6 @@
 //! Built-in tool registry and execution.
 
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +27,7 @@ use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 use crate::agent_loop::ModelToolCall;
 
@@ -33,9 +35,12 @@ const READ_FILE_TOOL: &str = "read_file";
 const LIST_DIR_TOOL: &str = "list_dir";
 const SEARCH_FILES_TOOL: &str = "search_files";
 const SEARCH_TEXT_TOOL: &str = "search_text";
+const APPLY_PATCH_TOOL: &str = "apply_patch";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const MAX_DIR_ENTRIES: usize = 200;
+const MAX_PATCH_BYTES: usize = 256 * 1024;
+const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
@@ -43,7 +48,7 @@ const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-const TOOL_SPECS: &[ToolSpec] = &[
+const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         name: READ_FILE_TOOL,
         description: "Read a UTF-8 text file from the current workspace.",
@@ -74,6 +79,61 @@ const TOOL_SPECS: &[ToolSpec] = &[
         supports_parallel: false,
     },
 ];
+
+const WORKSPACE_WRITE_TOOL_SPECS: &[ToolSpec] = &[
+    ToolSpec {
+        name: READ_FILE_TOOL,
+        description: "Read a UTF-8 text file from the current workspace.",
+        parameters: ToolParameters::Path {
+            description: "Workspace-relative path to the file to read.",
+        },
+        supports_parallel: true,
+    },
+    ToolSpec {
+        name: LIST_DIR_TOOL,
+        description: "List files and directories under a workspace directory.",
+        parameters: ToolParameters::Path {
+            description: "Workspace-relative directory path. Use . for the workspace root.",
+        },
+        supports_parallel: true,
+    },
+    ToolSpec {
+        name: SEARCH_FILES_TOOL,
+        description: "Fuzzy-search indexed workspace files and directories by path.",
+        parameters: ToolParameters::SearchFiles,
+        supports_parallel: false,
+    },
+    ToolSpec {
+        name: SEARCH_TEXT_TOOL,
+        description:
+            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
+        parameters: ToolParameters::SearchText,
+        supports_parallel: false,
+    },
+    ToolSpec {
+        name: APPLY_PATCH_TOOL,
+        description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
+        parameters: ToolParameters::ApplyPatch,
+        supports_parallel: false,
+    },
+];
+
+/// Permission set controlling which built-in tools are exposed and executable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ToolPolicy {
+    #[default]
+    ReadOnly,
+    WorkspaceWrite,
+}
+
+impl ToolPolicy {
+    const fn specs(self) -> &'static [ToolSpec] {
+        match self {
+            Self::ReadOnly => READ_ONLY_TOOL_SPECS,
+            Self::WorkspaceWrite => WORKSPACE_WRITE_TOOL_SPECS,
+        }
+    }
+}
 
 /// Model-visible tool declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +185,7 @@ enum ToolParameters {
     Path { description: &'static str },
     SearchFiles,
     SearchText,
+    ApplyPatch,
 }
 
 impl ToolParameters {
@@ -135,6 +196,7 @@ impl ToolParameters {
             Self::SearchText => {
                 "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:context:integer"
             }
+            Self::ApplyPatch => "apply_patch:patch:string:required:no_additional_properties",
         }
     }
 }
@@ -166,6 +228,14 @@ impl Serialize for ToolParameters {
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &SearchTextProperties)?;
                 map.serialize_entry("required", &["query"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::ApplyPatch => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &ApplyPatchProperties)?;
+                map.serialize_entry("required", &["patch"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
             }
@@ -319,9 +389,28 @@ impl Serialize for SearchTextProperties {
     }
 }
 
+struct ApplyPatchProperties;
+
+impl Serialize for ApplyPatchProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(
+            "patch",
+            &StringProperty {
+                description: "Patch text using *** Begin Patch / *** End Patch blocks.",
+            },
+        )?;
+        map.end()
+    }
+}
+
 /// Registry for built-in tools.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolRegistry {
+    policy: ToolPolicy,
     root: Arc<PathBuf>,
     search: FffSearchIndex,
 }
@@ -336,9 +425,15 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     /// Creates a tool registry rooted at `root`.
     pub(crate) fn for_root(root: impl Into<PathBuf>) -> Self {
+        Self::for_root_with_policy(root, ToolPolicy::ReadOnly)
+    }
+
+    /// Creates a tool registry rooted at `root` with explicit permissions.
+    pub(crate) fn for_root_with_policy(root: impl Into<PathBuf>, policy: ToolPolicy) -> Self {
         let root = root.into();
         let root = root.canonicalize().unwrap_or(root);
         Self {
+            policy,
             search: FffSearchIndex::new(root.clone()),
             root: Arc::new(root),
         }
@@ -351,13 +446,13 @@ impl ToolRegistry {
     }
 
     /// Returns the stable model-visible tool specs.
-    pub(crate) const fn specs(&self) -> &'static [ToolSpec] {
-        TOOL_SPECS
+    pub(crate) fn specs(&self) -> &'static [ToolSpec] {
+        self.policy.specs()
     }
 
     /// Returns `true` when every named tool can execute in parallel.
     pub(crate) fn supports_parallel(&self, name: &str) -> bool {
-        TOOL_SPECS
+        self.specs()
             .iter()
             .find(|spec| spec.name() == name)
             .is_some_and(|spec| spec.supports_parallel())
@@ -365,6 +460,15 @@ impl ToolRegistry {
 
     /// Executes a model tool call and converts failures into model-visible output.
     pub(crate) async fn execute(&self, call: ModelToolCall) -> ToolExecution {
+        if !self.specs().iter().any(|spec| spec.name() == call.name) {
+            return ToolExecution {
+                call_id: call.call_id,
+                tool_name: call.name,
+                output: "Tool error: tool is not enabled by the current policy".to_string(),
+                success: false,
+            };
+        }
+
         let result = match call.name.as_str() {
             READ_FILE_TOOL => read_file(&self.root, &call.arguments).await,
             LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
@@ -384,6 +488,7 @@ impl ToolRegistry {
                     .context("search_text task failed")
                     .and_then(|result| result)
             }
+            APPLY_PATCH_TOOL => apply_patch(&self.root, &call.arguments).await,
             _ => Err(anyhow::anyhow!("unknown tool {}", call.name)),
         };
 
@@ -443,6 +548,12 @@ struct SearchTextArguments {
     before_context: Option<usize>,
     #[serde(default)]
     after_context: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyPatchArguments {
+    patch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -640,6 +751,89 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
     Ok(names.join("\n"))
 }
 
+async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
+    let args = parse_apply_patch_arguments(arguments)?;
+    anyhow::ensure!(
+        args.patch.len() <= MAX_PATCH_BYTES,
+        "patch exceeds {MAX_PATCH_BYTES} bytes"
+    );
+
+    let patch = ParsedPatch::parse(&args.patch)?;
+    let changes = plan_patch_changes(root, patch).await?;
+    for change in &changes {
+        match change {
+            PlannedChange::Write {
+                path,
+                content,
+                permissions,
+                ..
+            } => write_file_atomically(path, content, permissions.clone()).await?,
+            PlannedChange::Delete { path, .. } => tokio::fs::remove_file(path)
+                .await
+                .with_context(|| format!("failed to delete {}", display_path(root, path)))?,
+        }
+    }
+
+    Ok(format_patch_summary(&changes))
+}
+
+async fn plan_patch_changes(root: &Path, patch: ParsedPatch) -> Result<Vec<PlannedChange>> {
+    anyhow::ensure!(
+        !patch.operations.is_empty(),
+        "patch contains no file operations"
+    );
+    let mut changes = Vec::with_capacity(patch.operations.len());
+    let mut seen = Vec::with_capacity(patch.operations.len());
+
+    for operation in patch.operations {
+        let change = match operation {
+            PatchOperation::Add { path, content } => {
+                let path = resolve_new_workspace_path(root, &path)?;
+                ensure_unique_patch_path(&mut seen, &path)?;
+                ensure_new_file_target(root, &path).await?;
+                ensure_patch_file_size(content.len() as u64)?;
+                PlannedChange::Write {
+                    display_path: display_path(root, &path),
+                    before_bytes: None,
+                    after_bytes: content.len(),
+                    path,
+                    content,
+                    permissions: None,
+                }
+            }
+            PatchOperation::Update { path, hunks } => {
+                let path = resolve_workspace_path(root, &path)?;
+                ensure_unique_patch_path(&mut seen, &path)?;
+                let (content, permissions) = read_patch_target(root, &path).await?;
+                let before_bytes = content.len();
+                let content = apply_hunks(&content, &hunks, &display_path(root, &path))?;
+                ensure_patch_file_size(content.len() as u64)?;
+                PlannedChange::Write {
+                    display_path: display_path(root, &path),
+                    before_bytes: Some(before_bytes),
+                    after_bytes: content.len(),
+                    path,
+                    content,
+                    permissions: Some(permissions),
+                }
+            }
+            PatchOperation::Delete { path } => {
+                let path = resolve_workspace_path(root, &path)?;
+                ensure_unique_patch_path(&mut seen, &path)?;
+                let (content, _permissions) = read_patch_target(root, &path).await?;
+                PlannedChange::Delete {
+                    display_path: display_path(root, &path),
+                    before_bytes: content.len(),
+                    path,
+                }
+            }
+        };
+        changes.push(change);
+    }
+
+    Ok(changes)
+}
+
 fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
     serde_json::from_str(arguments).context("invalid path arguments")
 }
@@ -650,6 +844,10 @@ fn parse_search_files_arguments(arguments: &str) -> Result<SearchFilesArguments>
 
 fn parse_search_text_arguments(arguments: &str) -> Result<SearchTextArguments> {
     serde_json::from_str(arguments).context("invalid search_text arguments")
+}
+
+fn parse_apply_patch_arguments(arguments: &str) -> Result<ApplyPatchArguments> {
+    serde_json::from_str(arguments).context("invalid apply_patch arguments")
 }
 
 fn trimmed_required<'a>(name: &str, value: &'a str) -> Result<&'a str> {
@@ -758,6 +956,404 @@ fn format_text_search_results(
     output
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedPatch {
+    operations: Vec<PatchOperation>,
+}
+
+impl ParsedPatch {
+    fn parse(patch: &str) -> Result<Self> {
+        let lines = patch.split_inclusive('\n').collect::<Vec<_>>();
+        anyhow::ensure!(!lines.is_empty(), "patch is empty");
+        anyhow::ensure!(
+            patch_line_body(lines[0]) == "*** Begin Patch",
+            "patch must start with *** Begin Patch"
+        );
+
+        let mut index = 1;
+        let mut operations = Vec::new();
+        while index < lines.len() {
+            let line = patch_line_body(lines[index]);
+            if line == "*** End Patch" {
+                anyhow::ensure!(
+                    index + 1 == lines.len(),
+                    "patch contains data after *** End Patch"
+                );
+                return Ok(Self { operations });
+            }
+
+            if let Some(path) = line.strip_prefix("*** Add File: ") {
+                index += 1;
+                operations.push(parse_add_file_operation(&lines, &mut index, path)?);
+            } else if let Some(path) = line.strip_prefix("*** Update File: ") {
+                index += 1;
+                operations.push(parse_update_file_operation(&lines, &mut index, path)?);
+            } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
+                index += 1;
+                operations.push(PatchOperation::Delete {
+                    path: parse_patch_path(path)?,
+                });
+            } else {
+                anyhow::bail!("unsupported patch header {line:?}");
+            }
+        }
+
+        anyhow::bail!("patch is missing *** End Patch")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PatchOperation {
+    Add { path: String, content: String },
+    Update { path: String, hunks: Vec<PatchHunk> },
+    Delete { path: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PatchHunk {
+    old: String,
+    new: String,
+}
+
+#[derive(Debug)]
+enum PlannedChange {
+    Write {
+        display_path: String,
+        before_bytes: Option<usize>,
+        after_bytes: usize,
+        path: PathBuf,
+        content: String,
+        permissions: Option<std::fs::Permissions>,
+    },
+    Delete {
+        display_path: String,
+        before_bytes: usize,
+        path: PathBuf,
+    },
+}
+
+fn parse_add_file_operation(
+    lines: &[&str],
+    index: &mut usize,
+    path: &str,
+) -> Result<PatchOperation> {
+    let mut content = String::new();
+    while *index < lines.len() && !is_patch_operation_header(lines[*index]) {
+        let line = lines[*index];
+        anyhow::ensure!(
+            line.starts_with('+'),
+            "add file lines must start with + for {path:?}"
+        );
+        content.push_str(&line[1..]);
+        *index += 1;
+    }
+
+    Ok(PatchOperation::Add {
+        path: parse_patch_path(path)?,
+        content,
+    })
+}
+
+fn parse_update_file_operation(
+    lines: &[&str],
+    index: &mut usize,
+    path: &str,
+) -> Result<PatchOperation> {
+    let mut hunks = Vec::new();
+    while *index < lines.len() && !is_patch_operation_header(lines[*index]) {
+        anyhow::ensure!(
+            is_hunk_header(lines[*index]),
+            "update file sections must contain @@ hunks for {path:?}"
+        );
+        *index += 1;
+        hunks.push(parse_patch_hunk(lines, index, path)?);
+    }
+
+    anyhow::ensure!(!hunks.is_empty(), "update file {path:?} contains no hunks");
+    Ok(PatchOperation::Update {
+        path: parse_patch_path(path)?,
+        hunks,
+    })
+}
+
+fn parse_patch_hunk(lines: &[&str], index: &mut usize, path: &str) -> Result<PatchHunk> {
+    let mut old = String::new();
+    let mut new = String::new();
+    let mut changed = false;
+
+    while *index < lines.len()
+        && !is_patch_operation_header(lines[*index])
+        && !is_hunk_header(lines[*index])
+    {
+        let line = lines[*index];
+        let Some(prefix) = line.as_bytes().first().copied() else {
+            anyhow::bail!("empty hunk line in {path:?}");
+        };
+        let rest = &line[1..];
+        match prefix {
+            b' ' => {
+                old.push_str(rest);
+                new.push_str(rest);
+            }
+            b'-' => {
+                old.push_str(rest);
+                changed = true;
+            }
+            b'+' => {
+                new.push_str(rest);
+                changed = true;
+            }
+            _ => anyhow::bail!("hunk lines must start with space, -, or + in {path:?}"),
+        }
+        *index += 1;
+    }
+
+    anyhow::ensure!(changed, "hunk in {path:?} contains no changes");
+    anyhow::ensure!(
+        !old.is_empty(),
+        "hunk in {path:?} must include context or removed lines"
+    );
+    Ok(PatchHunk { old, new })
+}
+
+fn parse_patch_path(path: &str) -> Result<String> {
+    let path = path.trim();
+    anyhow::ensure!(!path.is_empty(), "patch path cannot be empty");
+    Ok(path.to_string())
+}
+
+fn patch_line_body(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
+fn is_patch_operation_header(line: &str) -> bool {
+    let line = patch_line_body(line);
+    line == "*** End Patch"
+        || line.starts_with("*** Add File: ")
+        || line.starts_with("*** Update File: ")
+        || line.starts_with("*** Delete File: ")
+}
+
+fn is_hunk_header(line: &str) -> bool {
+    patch_line_body(line).starts_with("@@")
+}
+
+fn apply_hunks(content: &str, hunks: &[PatchHunk], path: &str) -> Result<String> {
+    let mut content = content.to_string();
+    for hunk in hunks {
+        let index = unique_match_index(&content, &hunk.old, path)?;
+        content.replace_range(index..index + hunk.old.len(), &hunk.new);
+    }
+    Ok(content)
+}
+
+fn unique_match_index(content: &str, needle: &str, path: &str) -> Result<usize> {
+    let mut matches = content.match_indices(needle);
+    let Some((index, _)) = matches.next() else {
+        anyhow::bail!("patch hunk did not match {path}");
+    };
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "patch hunk matched multiple locations in {path}"
+    );
+    Ok(index)
+}
+
+async fn read_patch_target(root: &Path, path: &Path) -> Result<(String, std::fs::Permissions)> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("failed to inspect {}", display_path(root, path)))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a file",
+        display_path(root, path)
+    );
+    ensure_patch_file_size(metadata.len())?;
+
+    let permissions = metadata.permissions();
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, path)))?;
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("{} is not valid UTF-8", display_path(root, path)))?;
+    Ok((content, permissions))
+}
+
+async fn ensure_new_file_target(root: &Path, path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => anyhow::bail!("{} already exists", display_path(root, path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to inspect {}", display_path(root, path)))
+        }
+    }
+}
+
+fn ensure_patch_file_size(bytes: u64) -> Result<()> {
+    anyhow::ensure!(
+        bytes <= MAX_PATCH_FILE_BYTES,
+        "patch target exceeds {MAX_PATCH_FILE_BYTES} bytes"
+    );
+    Ok(())
+}
+
+fn ensure_unique_patch_path(seen: &mut Vec<PathBuf>, path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !seen.iter().any(|seen_path| seen_path == path),
+        "patch touches {} more than once",
+        path.display()
+    );
+    seen.push(path.to_path_buf());
+    Ok(())
+}
+
+async fn write_file_atomically(
+    path: &Path,
+    content: &str,
+    permissions: Option<std::fs::Permissions>,
+) -> Result<()> {
+    let (temp_path, mut file) = create_temp_sibling(path).await?;
+    if let Err(error) = file.write_all(content.as_bytes()).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error).with_context(|| format!("failed to write {}", temp_path.display()));
+    }
+    if let Err(error) = file.flush().await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error).with_context(|| format!("failed to flush {}", temp_path.display()));
+    }
+    drop(file);
+
+    if let Some(permissions) = permissions {
+        if let Err(error) = tokio::fs::set_permissions(&temp_path, permissions).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error)
+                .with_context(|| format!("failed to set permissions on {}", temp_path.display()));
+        }
+    }
+
+    if let Err(error) = tokio::fs::rename(&temp_path, path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn create_temp_sibling(path: &Path) -> Result<(PathBuf, tokio::fs::File)> {
+    for attempt in 0..16 {
+        let temp_path = temp_sibling_path(path, attempt)?;
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create {}", temp_path.display()));
+            }
+        }
+    }
+    anyhow::bail!("failed to allocate temporary file for {}", path.display())
+}
+
+fn temp_sibling_path(path: &Path, attempt: u8) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(parent.join(format!(
+        ".{name}.rust-agent-{}-{unique}-{attempt}.tmp",
+        std::process::id()
+    )))
+}
+
+fn format_patch_summary(changes: &[PlannedChange]) -> String {
+    let mut output = format!("Applied patch: {} file(s) changed", changes.len());
+    for change in changes {
+        output.push('\n');
+        match change {
+            PlannedChange::Write {
+                display_path,
+                before_bytes: Some(before_bytes),
+                after_bytes,
+                ..
+            } => {
+                output.push_str(&format!(
+                    "updated {display_path} ({before_bytes} -> {after_bytes} bytes)"
+                ));
+            }
+            PlannedChange::Write {
+                display_path,
+                before_bytes: None,
+                after_bytes,
+                ..
+            } => {
+                output.push_str(&format!("added {display_path} ({after_bytes} bytes)"));
+            }
+            PlannedChange::Delete {
+                display_path,
+                before_bytes,
+                ..
+            } => {
+                output.push_str(&format!("deleted {display_path} ({before_bytes} bytes)"));
+            }
+        }
+    }
+    output
+}
+
+fn resolve_new_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
+    let relative = clean_workspace_relative_path(path)?;
+    let full_path = root.join(&relative);
+    let parent = full_path
+        .parent()
+        .with_context(|| format!("path has no parent: {path}"))?;
+    let parent = parent
+        .canonicalize()
+        .with_context(|| format!("failed to resolve parent for path {path}"))?;
+    anyhow::ensure!(parent.starts_with(root), "path escapes workspace: {path}");
+    let file_name = relative
+        .file_name()
+        .with_context(|| format!("path has no file name: {path}"))?;
+    let full_path = parent.join(file_name);
+    anyhow::ensure!(
+        full_path.starts_with(root),
+        "path escapes workspace: {path}"
+    );
+    Ok(full_path)
+}
+
+fn clean_workspace_relative_path(path: &str) -> Result<PathBuf> {
+    let trimmed = path.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "path cannot be empty");
+    let requested = Path::new(trimmed);
+    anyhow::ensure!(
+        !requested.is_absolute(),
+        "absolute paths are not allowed: {trimmed}"
+    );
+
+    let mut clean = PathBuf::new();
+    for component in requested.components() {
+        match component {
+            std::path::Component::Normal(part) => clean.push(part),
+            std::path::Component::CurDir => {}
+            _ => anyhow::bail!("path escapes workspace: {trimmed}"),
+        }
+    }
+    anyhow::ensure!(!clean.as_os_str().is_empty(), "path cannot be empty");
+    Ok(clean)
+}
+
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
     let trimmed = path.trim();
     anyhow::ensure!(!trimmed.is_empty(), "path cannot be empty");
@@ -798,7 +1394,7 @@ mod tests {
     #[test]
     fn serializes_tool_specs_without_allocating_json_values() {
         assert_eq!(
-            serde_json::to_value(TOOL_SPECS).unwrap(),
+            serde_json::to_value(READ_ONLY_TOOL_SPECS).unwrap(),
             json!([
                 {
                     "type": "function",
@@ -908,6 +1504,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_write_policy_exposes_apply_patch() {
+        let specs = ToolPolicy::WorkspaceWrite.specs();
+
+        assert!(specs.iter().any(|spec| spec.name() == APPLY_PATCH_TOOL));
+        assert_eq!(
+            serde_json::to_value(specs.last().unwrap()).unwrap(),
+            json!({
+                "type": "function",
+                "name": "apply_patch",
+                "description": "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patch": {
+                            "type": "string",
+                            "description": "Patch text using *** Begin Patch / *** End Patch blocks.",
+                        },
+                    },
+                    "required": ["patch"],
+                    "additionalProperties": false,
+                },
+            })
+        );
+    }
+
     #[tokio::test]
     async fn executes_read_file_and_list_dir() {
         let temp = std::env::temp_dir().join(format!("rust-agent-tools-{}", std::process::id()));
@@ -939,6 +1561,141 @@ mod tests {
         assert_eq!(list.output, "src/");
 
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applies_workspace_patch_changes() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("src")).unwrap();
+        fs::write(
+            temp.join("src").join("lib.rs"),
+            "pub fn value() -> &'static str {\n    \"old\"\n}\n",
+        )
+        .unwrap();
+        fs::write(temp.join("obsolete.rs"), "delete me\n").unwrap();
+
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: src/lib.rs\n",
+            "@@\n",
+            " pub fn value() -> &'static str {\n",
+            "-    \"old\"\n",
+            "+    \"new\"\n",
+            " }\n",
+            "*** Add File: src/new.rs\n",
+            "+pub fn created() {}\n",
+            "*** Delete File: obsolete.rs\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert!(result.output.contains("updated src/lib.rs"));
+        assert!(result.output.contains("added src/new.rs"));
+        assert!(result.output.contains("deleted obsolete.rs"));
+        assert_eq!(
+            fs::read_to_string(temp.join("src").join("lib.rs")).unwrap(),
+            "pub fn value() -> &'static str {\n    \"new\"\n}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("src").join("new.rs")).unwrap(),
+            "pub fn created() {}\n"
+        );
+        assert!(!temp.join("obsolete.rs").exists());
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_is_disabled_by_default() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-disabled-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("lib.rs"), "fn old() {}\n").unwrap();
+        let registry = ToolRegistry::for_root(&temp);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({
+                    "patch": "*** Begin Patch\n*** Delete File: lib.rs\n*** End Patch\n"
+                })
+                .to_string(),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result.output.contains("tool is not enabled"));
+        assert_eq!(
+            fs::read_to_string(temp.join("lib.rs")).unwrap(),
+            "fn old() {}\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_escaping_paths_before_writing() {
+        let parent = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-escape-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let root = parent.join("workspace");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lib.rs"), "fn value() {}\n").unwrap();
+        fs::write(parent.join("outside.rs"), "missing\n").unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add File: created.rs\n",
+            "+created\n",
+            "*** Update File: ../outside.rs\n",
+            "@@\n",
+            "-missing\n",
+            "+changed\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&root, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result.output.contains("path escapes workspace"));
+        assert!(!root.join("created.rs").exists());
+        assert_eq!(
+            fs::read_to_string(parent.join("outside.rs")).unwrap(),
+            "missing\n"
+        );
+
+        fs::remove_dir_all(&parent).unwrap();
     }
 
     #[tokio::test]
