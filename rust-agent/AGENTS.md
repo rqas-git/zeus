@@ -9,7 +9,7 @@ When implementation changes affect behavior, configuration, architecture, comman
 Write concise, correct code. Follow DRY and YAGNI principles: avoid duplication, avoid speculative abstractions, and keep the implementation as small as the current behavior allows.
 
 Always create concise, atomic commits for changes made.
-Keep commits very small, independent, and informative. Avoid commits that touch many files or combine unrelated behavior, documentation, and cleanup.
+Keep commits very small, independent, and informative. Avoid commits that touch many files or combine unrelated behavior, documentation, and cleanup. Break them up incrementally.
 
 Use [RUST-GUIDELINES.md](RUST-GUIDELINES.md) as the Rust design and style guide for this repository.
 
