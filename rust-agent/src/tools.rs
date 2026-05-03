@@ -3479,6 +3479,70 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "release-mode parallel FFF search benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_fff_parallel_search_current_repo() {
+        const SAMPLES: usize = 5;
+        const SEARCHES: usize = 16;
+
+        let root = std::env::current_dir().unwrap();
+        let registry = ToolRegistry::for_root(root);
+
+        let warm = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "warm_search_files".to_string(),
+                name: SEARCH_FILES_TOOL.to_string(),
+                arguments: r#"{"query":"src tools","limit":20}"#.to_string(),
+            })
+            .await;
+        assert!(warm.success, "{}", warm.output);
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+        for sample in 0..SAMPLES {
+            let started = Instant::now();
+            let executions = futures_util::future::join_all((0..SEARCHES).map(|index| {
+                let registry = registry.clone();
+                let name = if index % 2 == 0 {
+                    SEARCH_FILES_TOOL
+                } else {
+                    SEARCH_TEXT_TOOL
+                };
+                let arguments = if index % 2 == 0 {
+                    r#"{"query":"src tools","limit":20}"#
+                } else {
+                    r#"{"query":"ToolRegistry","limit":20}"#
+                };
+                async move {
+                    registry
+                        .execute(ModelToolCall {
+                            item_id: None,
+                            call_id: format!("parallel_search_{sample}_{index}"),
+                            name: name.to_string(),
+                            arguments: arguments.to_string(),
+                        })
+                        .await
+                }
+            }))
+            .await;
+            samples.push(started.elapsed());
+
+            for execution in executions {
+                assert!(execution.success, "{}", execution.output);
+                output_bytes += execution.output.len();
+            }
+        }
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "fff_parallel_search_current_repo searches_per_sample={SEARCHES} samples={SAMPLES} output_bytes={output_bytes} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
     #[tokio::test]
     #[ignore = "release-mode text search output benchmark; run explicitly with --ignored --nocapture"]
     async fn benchmark_search_text_large_line_output() {

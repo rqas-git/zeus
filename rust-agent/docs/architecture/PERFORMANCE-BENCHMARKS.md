@@ -37,6 +37,9 @@ counter. They assert correctness but do not enforce timing thresholds.
 - `tools::tests::benchmark_fff_search_current_repo`
   Measures cold FFF index initialization plus warm fuzzy path search and content
   search against the current repository.
+- `tools::tests::benchmark_fff_parallel_search_current_repo`
+  Measures concurrently issued warm FFF path and content searches against the
+  current repository.
 - `tools::tests::benchmark_search_text_large_line_output`
   Measures text-search formatting when a matched line is very large.
 - `tools::tests::benchmark_apply_patch_many_large_files`
