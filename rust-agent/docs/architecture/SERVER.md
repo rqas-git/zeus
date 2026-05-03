@@ -5,8 +5,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 ## Flow
 
-1. `rust-agent serve` loads `AppConfig`, auth, `ChatGptClient`, and
-   `AgentService`.
+1. `rust-agent serve` loads `AppConfig`, auth, `ChatGptClient`, configured tool
+   policy, and `AgentService`.
 2. Server startup initializes the FFF scanner on a background blocking worker
    before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
@@ -63,6 +63,8 @@ Important event names include:
 ## Performance Notes
 
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
+- Tool policy is loaded once at startup. The default `read-only` mode exposes no
+  write tools; `workspace-write` exposes `apply_patch`.
 - Server startup initializes the shared FFF search index in the background. If a
   request reaches an FFF-backed tool before scanning completes, that tool is the
   path that waits on a blocking worker and then runs against the ready index.
@@ -80,5 +82,7 @@ Important event names include:
 The server is process-local and unauthenticated on its listening sockets. Bind to
 loopback by default, and put authentication, authorization, persistence,
 cancellation, and multi-process coordination behind explicit product decisions.
-WebSocket endpoints are not implemented because SSE matches the current
-server-to-client event flow with less protocol overhead.
+Use `workspace-write` only for trusted local deployments because any client that
+can reach the server can ask the model to edit workspace files. WebSocket
+endpoints are not implemented because SSE matches the current server-to-client
+event flow with less protocol overhead.

@@ -53,18 +53,20 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         output,
         server: _,
         telemetry,
+        tools: tool_config,
     } = AppConfig::from_env()?;
     let session_id = SessionId::new(1);
 
     match message {
         Some(message) => {
+            let tools = ToolRegistry::with_policy(tool_config.policy());
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
-            let service = AgentService::new(client, context, models);
+            let service = AgentService::with_tools(client, context, models, tools);
             print_agent_response(&service, session_id, output, telemetry, message).await
         }
         None => {
-            let tools = ToolRegistry::default();
+            let tools = ToolRegistry::with_policy(tool_config.policy());
             let _search_index_warmup = tools.spawn_search_index_warmup();
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
@@ -82,8 +84,9 @@ async fn run_server() -> Result<()> {
         output: _,
         server,
         telemetry,
+        tools: tool_config,
     } = AppConfig::from_env()?;
-    let tools = ToolRegistry::default();
+    let tools = ToolRegistry::with_policy(tool_config.policy());
     let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
     let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;

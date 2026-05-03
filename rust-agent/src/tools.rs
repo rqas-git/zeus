@@ -423,6 +423,12 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// Creates a tool registry for the current directory with explicit permissions.
+    pub(crate) fn with_policy(policy: ToolPolicy) -> Self {
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::for_root_with_policy(root, policy)
+    }
+
     /// Creates a tool registry rooted at `root`.
     pub(crate) fn for_root(root: impl Into<PathBuf>) -> Self {
         Self::for_root_with_policy(root, ToolPolicy::ReadOnly)

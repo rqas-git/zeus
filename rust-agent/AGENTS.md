@@ -73,6 +73,18 @@ Server configuration:
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 
+## Tool Mode
+
+Tools are read-only by default. Enable workspace file edits with:
+
+```bash
+cd /Users/ajc/rust-agent
+RUST_AGENT_TOOL_MODE=workspace-write cargo run -- "Update the requested file"
+```
+
+`workspace-write` exposes `apply_patch` for workspace-confined UTF-8 file edits.
+Use it only for trusted local sessions, especially in server mode.
+
 ## Authentication
 
 The application owns its ChatGPT login state at `~/.rust-agent/auth.json` by default.

@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::tools::ToolPolicy;
+
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CODEX_VERSION: &str = "0.128.0";
@@ -25,6 +27,7 @@ const DEFAULT_SERVER_H3_ADDR: &str = "127.0.0.1:4433";
 const DEFAULT_SERVER_EVENT_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS: u32 = 256;
 const DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_TOOL_MODE: &str = "read-only";
 
 /// Configuration for one running rust-agent process.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub(crate) struct AppConfig {
     pub(crate) output: OutputConfig,
     pub(crate) server: ServerConfig,
     pub(crate) telemetry: TelemetryConfig,
+    pub(crate) tools: ToolConfig,
 }
 
 impl AppConfig {
@@ -50,6 +54,7 @@ impl AppConfig {
             output: OutputConfig::from_env()?,
             server: ServerConfig::from_env()?,
             telemetry: TelemetryConfig::from_env()?,
+            tools: ToolConfig::from_env()?,
         })
     }
 }
@@ -507,6 +512,37 @@ impl Default for ServerConfig {
     }
 }
 
+/// Controls which built-in tools are exposed to the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ToolConfig {
+    policy: ToolPolicy,
+}
+
+impl ToolConfig {
+    /// Loads tool configuration from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if `RUST_AGENT_TOOL_MODE` is unsupported.
+    pub(crate) fn from_env() -> Result<Self> {
+        Ok(Self {
+            policy: parse_tool_policy(&env_string("RUST_AGENT_TOOL_MODE", DEFAULT_TOOL_MODE))?,
+        })
+    }
+
+    /// Returns the active tool permission policy.
+    pub(crate) const fn policy(self) -> ToolPolicy {
+        self.policy
+    }
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            policy: ToolPolicy::ReadOnly,
+        }
+    }
+}
+
 /// Controls optional terminal telemetry output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TelemetryConfig {
@@ -614,6 +650,16 @@ fn env_parse_bool(name: &str, default: bool) -> Result<bool> {
     }
 }
 
+fn parse_tool_policy(raw: &str) -> Result<ToolPolicy> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "read-only" | "read_only" | "readonly" => Ok(ToolPolicy::ReadOnly),
+        "workspace-write" | "workspace_write" | "write" => Ok(ToolPolicy::WorkspaceWrite),
+        _ => anyhow::bail!(
+            "failed to parse RUST_AGENT_TOOL_MODE={raw:?}: expected read-only or workspace-write"
+        ),
+    }
+}
+
 fn parse_env<T>(name: &str, default: T) -> Result<T>
 where
     T: std::str::FromStr,
@@ -624,4 +670,22 @@ where
     };
     raw.parse()
         .map_err(|error| anyhow::anyhow!("failed to parse {name}={raw:?}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tool_policy_modes() {
+        assert_eq!(
+            parse_tool_policy("read-only").unwrap(),
+            ToolPolicy::ReadOnly
+        );
+        assert_eq!(
+            parse_tool_policy("workspace-write").unwrap(),
+            ToolPolicy::WorkspaceWrite
+        );
+        assert!(parse_tool_policy("network").is_err());
+    }
 }

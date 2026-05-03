@@ -9,8 +9,9 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 2. `login`, `login status`, and `logout` run directly against `AuthManager`.
 3. Chat and server commands load config and auth, then create one
    `AgentService<ChatGptClient>`.
-4. One-shot mode submits the CLI prompt to session `1` and leaves FFF indexing
-   lazy unless the model actually calls a search tool.
+4. One-shot mode submits the CLI prompt to session `1` with the configured tool
+   policy and leaves FFF indexing lazy unless the model actually calls a search
+   tool.
 5. Interactive mode initializes the FFF scanner in the background, then reuses
    session `1` until the user enters a blank line.
 6. `/model` shows or changes the session model through `AgentService`.
@@ -25,6 +26,8 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 - Interactive commands stay local to the harness and call service methods.
 - `DeltaWriter` batches assistant text deltas.
 - Cache-health telemetry is opt-in and stays off stdout.
+- Tool mode is loaded once at startup; `workspace-write` exposes `apply_patch`
+  to both one-shot and interactive terminal sessions.
 - `AgentService` owns session state and model execution.
 - `ChatGptClient` owns remote model I/O.
 

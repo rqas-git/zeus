@@ -1,7 +1,8 @@
 # Configuration Architecture
 
 `AppConfig` collects runtime settings from environment variables and splits them
-into client, model, context-window, output, server, and telemetry configuration.
+into client, model, context-window, output, server, telemetry, and tool
+configuration.
 
 ## Flow
 
@@ -12,7 +13,8 @@ into client, model, context-window, output, server, and telemetry configuration.
 5. `OutputConfig` configures terminal delta buffering.
 6. `ServerConfig` configures HTTP compatibility and native HTTP/3 listeners.
 7. `TelemetryConfig` configures optional terminal telemetry output.
-8. The resulting values are passed into long-lived services.
+8. `ToolConfig` configures which built-in tools are exposed to the model.
+9. The resulting values are passed into long-lived services.
 
 ## Environment Variables
 
@@ -39,6 +41,7 @@ into client, model, context-window, output, server, and telemetry configuration.
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_CACHE_HEALTH`
+- `RUST_AGENT_TOOL_MODE`
 
 ## Responsibilities
 
@@ -46,6 +49,8 @@ into client, model, context-window, output, server, and telemetry configuration.
 - Model parsing validates defaults and the allowlist before service startup.
 - Defaults keep the CLI usable without extra setup.
 - Sub-config structs keep unrelated knobs separate.
+- Tool mode parsing validates the requested permission set before any model
+  request can run.
 
 ## Performance Notes
 
@@ -56,6 +61,8 @@ into client, model, context-window, output, server, and telemetry configuration.
   loaded once before listeners start.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
+- `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
+  to expose the `apply_patch` file editing tool.
 - `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,
   rust-agent uses `~/.rust-agent/auth.json`.
 
@@ -64,5 +71,5 @@ into client, model, context-window, output, server, and telemetry configuration.
 Configuration is environment-only. Auth tokens are stored separately in
 `auth.json`. HTTP/3 uses a generated self-signed development certificate unless
 `RUST_AGENT_SERVER_TLS_CERT` and `RUST_AGENT_SERVER_TLS_KEY` are set together.
-File config, dynamic reload, and per-request overrides should be added only when
-endpoint behavior requires them.
+Tool permissions are process-wide. File config, dynamic reload, and per-request
+overrides should be added only when endpoint behavior requires them.
