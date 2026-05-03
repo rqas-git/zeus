@@ -8,14 +8,16 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
 
 1. `main` loads `AppConfig`, creates one async `ChatGptClient`, and wraps it in
    an `AgentService`.
-2. `AgentService` keeps a map of warm `AgentLoop`s by `SessionId`.
+2. `AgentService` keeps a map of warm session handles by `SessionId`.
 3. Each user message is submitted to a session. Missing sessions are created
    with the configured context-window bounds and default model.
-4. The loop appends the user message, marks the session `Running`, prunes stored
+4. The service locks the selected session so unrelated sessions can run
+   concurrently while same-session turns remain ordered.
+5. The loop appends the user message, marks the session `Running`, prunes stored
    history, builds a bounded borrowed prompt window, streams the selected model
    response, emits text deltas and cache telemetry, stores the assistant message,
    prunes stored history again, then returns to `Idle`.
-5. Interactive mode reuses the same service and session, so history lasts for
+6. Interactive mode reuses the same service and session, so history lasts for
    the current terminal process.
 
 ## Responsibilities
@@ -26,6 +28,8 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
   message text.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
+- `AgentService` holds only a per-session async lock while a turn streams, so
+  different sessions can progress independently.
 - `ChatGptClient` sends typed async Responses requests to the Codex backend and
   parses SSE output.
 - `main.rs` handles terminal behavior by buffering `TextDelta` events before
@@ -43,6 +47,8 @@ separate so the same core can sit behind future HTTP or streaming endpoints.
   first building a generic JSON value.
 - Streaming uses async HTTP and SSE parsing, so future endpoints do not need to
   block request workers on model I/O.
+- The service-level session locks keep ordered turns local to one session
+  instead of serializing all sessions through one mutable service borrow.
 - Prompt-cache keys are stable per service/session/model namespace.
 
 ## Events
@@ -53,11 +59,12 @@ or SSE frontend a clear boundary without coupling it to terminal output.
 
 ## Error Handling
 
-The loop rejects new submissions while a session is `Running`. If publishing the
-`Running` status fails, the loop rolls back to `Idle` before returning the error
-so the session is not left stuck. Model failures mark the session `Failed` and
-emit an error event. Session model changes are also rejected while a turn is
-running.
+The loop rejects direct submissions while a session is `Running`; the service
+normally prevents this by queuing same-session submissions on the session's async
+lock. If publishing the `Running` status fails, the loop rolls back to `Idle`
+before returning the error so the session is not left stuck. Model failures mark
+the session `Failed` and emit an error event. Session model changes are rejected
+while a turn is running.
 
 ## Current Scope
 

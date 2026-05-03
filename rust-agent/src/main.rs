@@ -36,14 +36,14 @@ async fn main() -> Result<()> {
     } = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
     let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
-    let mut service = AgentService::new(client, context, models);
+    let service = AgentService::new(client, context, models);
     let session_id = SessionId::new(1);
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&mut service, session_id, output, telemetry).await;
+        return run_interactive_loop(&service, session_id, output, telemetry).await;
     };
 
-    print_agent_response(&mut service, session_id, output, telemetry, message).await?;
+    print_agent_response(&service, session_id, output, telemetry, message).await?;
     Ok(())
 }
 
@@ -62,7 +62,7 @@ fn message_from_args() -> Option<String> {
 }
 
 async fn run_interactive_loop(
-    service: &mut AgentService<ChatGptClient>,
+    service: &AgentService<ChatGptClient>,
     session_id: SessionId,
     output: config::OutputConfig,
     telemetry: config::TelemetryConfig,
@@ -77,7 +77,7 @@ async fn run_interactive_loop(
                 print_agent_response(service, session_id, output, telemetry, message).await?;
             }
             InteractiveInput::ShowModel => {
-                println!("Model: {}", service.session_model(session_id));
+                println!("Model: {}", service.session_model(session_id).await?);
             }
             InteractiveInput::SetModel(model) => {
                 match service.set_session_model(session_id, &model) {
@@ -93,7 +93,7 @@ async fn run_interactive_loop(
 }
 
 async fn print_agent_response(
-    service: &mut AgentService<ChatGptClient>,
+    service: &AgentService<ChatGptClient>,
     session_id: SessionId,
     output: config::OutputConfig,
     telemetry: config::TelemetryConfig,

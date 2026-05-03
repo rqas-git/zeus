@@ -9,10 +9,11 @@ can submit work without rebuilding transport state for every request.
 1. Startup creates `ChatGptClient` once and passes it to `AgentService`.
 2. Each request supplies a `SessionId` and user message or session model update.
 3. `AgentService` validates model updates against `ModelConfig`.
-4. `AgentService` finds or creates the matching `AgentLoop`.
-5. The session loop streams the selected model response and emits `AgentEvent`s,
+4. `AgentService` finds or creates the matching session handle.
+5. The service locks only that session while a turn is running.
+6. The session loop streams the selected model response and emits `AgentEvent`s,
    including the completed assistant message.
-6. The caller decides how to translate events into terminal output, SSE, or
+7. The caller decides how to translate events into terminal output, SSE, or
    WebSocket messages.
 
 ## Responsibilities
@@ -20,6 +21,8 @@ can submit work without rebuilding transport state for every request.
 - `AgentService` owns the warm model client.
 - `AgentService` owns in-memory session lookup by `SessionId`.
 - `AgentService` enforces the configured model allowlist.
+- `AgentService` serializes work per session without serializing unrelated
+  sessions.
 - `AgentLoop` still owns per-session ordering and message history.
 - Callers own event delivery and request/response framing.
 
@@ -27,10 +30,25 @@ can submit work without rebuilding transport state for every request.
 
 - The model client is reused across sessions.
 - Session state is reused across turns.
+- The session map lock is held only while finding or creating a session handle.
+- Model streaming holds an async mutex for the selected session only, so
+  different sessions can stream concurrently.
 - Session history is pruned by each session loop according to the configured
   history limits.
 - Session model changes do not rebuild the HTTP client.
 - The service avoids frontend assumptions; event sinks stay caller-provided.
+
+## Concurrency
+
+`submit_user_message` takes `&self`, so callers can wrap one service in `Arc` and
+share it across request handlers. Concurrent submissions for different
+`SessionId`s use separate session locks and can overlap model I/O. Concurrent
+submissions for the same `SessionId` wait on that session's async lock, preserving
+ordered conversation turns and history updates.
+
+Session model updates are intentionally not queued behind an active turn. If the
+target session is busy, `set_session_model` returns an error so a model change
+cannot silently apply after a user message that was already submitted.
 
 ## Current Scope
 
