@@ -1060,7 +1060,7 @@ fn search_text_entries(
         .iter()
         .filter(|entry| {
             !entry.is_dir
-                && path_filter.map_or(true, |filter| filter.is_match(Path::new(&entry.relative)))
+                && path_filter.is_none_or(|filter| filter.is_match(Path::new(&entry.relative)))
         })
         .collect::<Vec<_>>();
     let mut results = TextSearchResults {

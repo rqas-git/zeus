@@ -35,6 +35,7 @@ where
     M: ModelStreamer + Sync,
 {
     /// Creates an empty service around a long-lived model client.
+    #[cfg(test)]
     pub(crate) fn new(
         model: M,
         context_window: ContextWindowConfig,
