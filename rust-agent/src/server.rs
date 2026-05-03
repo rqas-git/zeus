@@ -764,6 +764,7 @@ struct TurnRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use axum::body::to_bytes;
@@ -773,6 +774,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::agent_loop::ModelResponse;
+    use crate::agent_loop::ModelToolCall;
     use crate::bench_support::DurationSummary;
     use crate::client::ConversationMessage;
     use crate::config::ContextWindowConfig;
@@ -886,6 +888,60 @@ mod tests {
             "event: session.error\ndata: {\"type\":\"error\",\"session_id\":7,\"message\":\"model failed\"}\n\n"
         ));
         assert!(!body.contains("event: turn.completed\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_queue_failure_after_tool_call_allows_clean_retry() {
+        let turn = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::new(
+            ToolThenRetryStreamer {
+                turn: Arc::clone(&turn),
+            },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 5, "127.0.0.1:4433".parse().unwrap());
+        let app = router(state);
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"read the manifest"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
+
+        let second_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"continue"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let body = to_bytes(second_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(
+            "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"ok\"}\n\n"
+        ));
+        assert!(body.contains(
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+        ));
+        assert_eq!(turn.load(Ordering::SeqCst), 2);
+        drop(first_response);
     }
 
     #[test]
@@ -1199,6 +1255,53 @@ mod tests {
             _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
             anyhow::bail!("model failed")
+        }
+    }
+
+    struct ToolThenRetryStreamer {
+        turn: Arc<AtomicUsize>,
+    }
+
+    impl ModelStreamer for ToolThenRetryStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => {
+                    assert!(!tools.is_empty());
+                    assert!(parallel_tool_calls);
+                    assert_eq!(messages, &[ConversationMessage::user("read the manifest")]);
+                    on_delta("checking")?;
+                    Ok(ModelResponse::with_tool_calls(
+                        "checking",
+                        [ModelToolCall {
+                            item_id: Some("fc_read".to_string()),
+                            call_id: "call_read".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                        }],
+                    ))
+                }
+                1 => {
+                    assert_eq!(
+                        messages,
+                        &[
+                            ConversationMessage::user("read the manifest"),
+                            ConversationMessage::assistant("checking"),
+                            ConversationMessage::user("continue"),
+                        ]
+                    );
+                    Ok(ModelResponse::new("ok"))
+                }
+                _ => unreachable!("unexpected turn"),
+            }
         }
     }
 }
