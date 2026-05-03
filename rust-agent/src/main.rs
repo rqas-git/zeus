@@ -1,16 +1,19 @@
 //! Minimal terminal harness for chatting through Codex OAuth.
 
+mod agent_loop;
 mod auth;
 mod client;
 
 use std::io;
 use std::io::Write;
 
+use agent_loop::AgentEvent;
+use agent_loop::AgentLoop;
+use agent_loop::SessionId;
 use anyhow::Context;
 use anyhow::Result;
 use auth::CodexAuth;
 use client::ChatGptClient;
-use client::ConversationMessage;
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -19,12 +22,13 @@ static GLOBAL: MiMalloc = MiMalloc;
 fn main() -> Result<()> {
     let auth = CodexAuth::load_default()?;
     let client = ChatGptClient::new(auth)?;
+    let mut agent = AgentLoop::new(SessionId::new(1));
 
     let Some(message) = message_from_args() else {
-        return run_interactive_loop(&client);
+        return run_interactive_loop(&client, &mut agent);
     };
 
-    print_streamed_message(&client, &message)?;
+    print_agent_response(&client, &mut agent, message)?;
     Ok(())
 }
 
@@ -37,44 +41,38 @@ fn message_from_args() -> Option<String> {
     }
 }
 
-fn run_interactive_loop(client: &ChatGptClient) -> Result<()> {
-    let mut conversation = Vec::new();
+fn run_interactive_loop(client: &ChatGptClient, agent: &mut AgentLoop) -> Result<()> {
     loop {
         let Some(message) = read_prompt()? else {
             return Ok(());
         };
 
-        conversation.push(ConversationMessage::user(message));
-        let response = print_streamed_conversation(client, &conversation)?;
-        conversation.push(ConversationMessage::assistant(response));
+        print_agent_response(client, agent, message)?;
     }
 }
 
-fn print_streamed_message(client: &ChatGptClient, message: &str) -> Result<String> {
-    print_streamed_response(|on_delta| client.stream_message(message, on_delta))
-}
-
-fn print_streamed_conversation(
+fn print_agent_response(
     client: &ChatGptClient,
-    conversation: &[ConversationMessage],
-) -> Result<String> {
-    print_streamed_response(|on_delta| client.stream_conversation(conversation, on_delta))
-}
-
-fn print_streamed_response(
-    send: impl FnOnce(&mut dyn FnMut(&str) -> Result<()>) -> Result<String>,
+    agent: &mut AgentLoop,
+    message: String,
 ) -> Result<String> {
     let mut stdout = io::stdout().lock();
     write!(stdout, "Assistant: ").context("failed to write assistant prompt")?;
     stdout.flush().context("failed to flush assistant prompt")?;
 
-    let mut on_delta = |delta: &str| {
-        stdout
-            .write_all(delta.as_bytes())
-            .context("failed to write assistant response")?;
-        stdout.flush().context("failed to flush assistant response")
-    };
-    let response = send(&mut on_delta);
+    let response = agent.submit_user_message(
+        message,
+        |conversation, on_delta| client.stream_conversation(conversation, on_delta),
+        |event| match event {
+            AgentEvent::TextDelta { delta, .. } => {
+                stdout
+                    .write_all(delta.as_bytes())
+                    .context("failed to write assistant response")?;
+                stdout.flush().context("failed to flush assistant response")
+            }
+            _ => Ok(()),
+        },
+    );
     writeln!(stdout).context("failed to finish assistant response")?;
     response
 }

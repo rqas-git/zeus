@@ -71,18 +71,6 @@ impl ChatGptClient {
         Ok(Self { auth, http })
     }
 
-    /// Sends a user message and streams assistant text deltas.
-    ///
-    /// # Errors
-    /// Returns an error for transport failures, backend errors, malformed SSE, or callback failures.
-    pub(crate) fn stream_message(
-        &self,
-        message: &str,
-        on_delta: impl FnMut(&str) -> Result<()>,
-    ) -> Result<String> {
-        self.stream_conversation(&[ConversationMessage::user(message)], on_delta)
-    }
-
     /// Sends a conversation and streams assistant text deltas.
     ///
     /// # Errors
