@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::auth::CodexAuth;
 
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_VERSION: &str = "0.128.0";
 const MODEL: &str = "gpt-5.5";
 
@@ -64,6 +65,7 @@ impl ChatGptClient {
             .post(CODEX_RESPONSES_URL)
             .bearer_auth(self.auth.access_token())
             .header("ChatGPT-Account-ID", self.auth.account_id())
+            .header("originator", CODEX_ORIGINATOR)
             .header("version", CODEX_VERSION)
             .header(header::ACCEPT, "text/event-stream")
             .json(&body)
@@ -90,7 +92,8 @@ fn extract_assistant_text(stream: &str) -> Result<String> {
     let mut fallback_text = String::new();
     let mut completed = false;
 
-    for block in stream.split("\n\n") {
+    let normalized_stream = stream.replace("\r\n", "\n");
+    for block in normalized_stream.split("\n\n") {
         let Some(data) = sse_data(block) else {
             continue;
         };
@@ -225,6 +228,20 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}
 "#;
 
         assert_eq!(extract_assistant_text(stream).unwrap(), "done text");
+    }
+
+    #[test]
+    fn extracts_text_from_crlf_sse_blocks() {
+        let stream = concat!(
+            "event: response.output_text.delta\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\r\n",
+            "\r\n",
+            "event: response.completed\r\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\r\n",
+            "\r\n",
+        );
+
+        assert_eq!(extract_assistant_text(stream).unwrap(), "ok");
     }
 
     #[test]
