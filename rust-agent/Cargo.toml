@@ -9,6 +9,7 @@ async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }
 base64 = "0.22"
 bytes = "1"
+fff-search = { version = "0.6.4", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 h3 = "0.0.8"
 h3-axum = "0.2"
