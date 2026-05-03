@@ -67,11 +67,12 @@ transport, and session state separate.
 - Read-only tool calls are executed concurrently when they are marked safe, and
   their outputs are replayed to the model in one follow-up request. FFF search
   tools run on blocking workers and are marked sequential within a batch to
-  avoid oversubscribing the Tokio and Rayon worker pools. If an FFF tool call
-  arrives while the index is still scanning, that blocking worker waits for the
-  scan to finish before running the search. `read_file` reads only one byte past
-  its output cap before truncating, so large files do not allocate unbounded
-  memory.
+  avoid oversubscribing the Tokio and Rayon worker pools. Cross-session FFF
+  searches also pass through a process-local semaphore configured by
+  `RUST_AGENT_TOOL_SEARCH_CONCURRENCY`. If an FFF tool call arrives while the
+  index is still scanning, that blocking worker waits for the scan to finish
+  before running the search. `read_file` reads only one byte past its output cap
+  before truncating, so large files do not allocate unbounded memory.
 - `apply_patch` is sequential, parses bounded patch input, validates all touched
   paths before writing, caps target file size, and replaces individual files via
   temporary-file rename.

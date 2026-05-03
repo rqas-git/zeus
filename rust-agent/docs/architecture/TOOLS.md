@@ -53,6 +53,8 @@ operations are path-based.
 - `list_dir` keeps only the lexicographically first capped result set in memory
   while scanning large directories.
 - `search_text` output is capped before it is returned to the model.
+- FFF `search_files` and `search_text` calls run on blocking workers behind a
+  process-local concurrency limiter.
 
 ## Current Scope
 

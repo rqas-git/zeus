@@ -38,6 +38,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 use crate::agent_loop::ModelToolCall;
 
@@ -74,6 +75,8 @@ const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
 const MAX_SEARCH_TEXT_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_FFF_SEARCH_CONCURRENCY: usize = 1;
+pub(crate) const MAX_FFF_SEARCH_CONCURRENCY: usize = 16;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -811,6 +814,7 @@ pub(crate) struct ToolRegistry {
     policy: ToolPolicy,
     root: Arc<PathBuf>,
     search: FffSearchIndex,
+    search_permits: Arc<Semaphore>,
 }
 
 impl Default for ToolRegistry {
@@ -821,10 +825,13 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Creates a tool registry for the current directory with explicit permissions.
-    pub(crate) fn with_policy(policy: ToolPolicy) -> Self {
+    /// Creates a tool registry for the current directory with explicit permissions and search concurrency.
+    pub(crate) fn with_policy_and_search_concurrency(
+        policy: ToolPolicy,
+        search_concurrency: usize,
+    ) -> Self {
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::for_root_with_policy(root, policy)
+        Self::for_root_with_policy_and_search_concurrency(root, policy, search_concurrency)
     }
 
     /// Creates a tool registry rooted at `root`.
@@ -834,11 +841,26 @@ impl ToolRegistry {
 
     /// Creates a tool registry rooted at `root` with explicit permissions.
     pub(crate) fn for_root_with_policy(root: impl Into<PathBuf>, policy: ToolPolicy) -> Self {
+        Self::for_root_with_policy_and_search_concurrency(
+            root,
+            policy,
+            DEFAULT_FFF_SEARCH_CONCURRENCY,
+        )
+    }
+
+    /// Creates a tool registry rooted at `root` with explicit permissions and search concurrency.
+    pub(crate) fn for_root_with_policy_and_search_concurrency(
+        root: impl Into<PathBuf>,
+        policy: ToolPolicy,
+        search_concurrency: usize,
+    ) -> Self {
         let root = root.into();
         let root = root.canonicalize().unwrap_or(root);
+        let search_concurrency = search_concurrency.clamp(1, MAX_FFF_SEARCH_CONCURRENCY);
         Self {
             policy,
             search: FffSearchIndex::new(root.clone()),
+            search_permits: Arc::new(Semaphore::new(search_concurrency)),
             root: Arc::new(root),
         }
     }
@@ -929,19 +951,25 @@ impl ToolRegistry {
             LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
             SEARCH_FILES_TOOL => {
                 let search = self.search.clone();
+                let search_permits = self.search_permits.clone();
                 let arguments = call.arguments.clone();
-                tokio::task::spawn_blocking(move || search.search_files(&arguments))
-                    .await
-                    .context("search_files task failed")
-                    .and_then(|result| result)
+                execute_blocking_search(
+                    search_permits,
+                    move || search.search_files(&arguments),
+                    "search_files task failed",
+                )
+                .await
             }
             SEARCH_TEXT_TOOL => {
                 let search = self.search.clone();
+                let search_permits = self.search_permits.clone();
                 let arguments = call.arguments.clone();
-                tokio::task::spawn_blocking(move || search.search_text(&arguments))
-                    .await
-                    .context("search_text task failed")
-                    .and_then(|result| result)
+                execute_blocking_search(
+                    search_permits,
+                    move || search.search_text(&arguments),
+                    "search_text task failed",
+                )
+                .await
             }
             APPLY_PATCH_TOOL => apply_patch(&self.root, &call.arguments).await,
             _ => Err(anyhow::anyhow!("unknown tool {}", call.name)),
@@ -976,6 +1004,24 @@ fn tool_execution(call: &ModelToolCall, output: String, success: bool) -> ToolEx
         output,
         success,
     }
+}
+
+async fn execute_blocking_search<F>(
+    search_permits: Arc<Semaphore>,
+    search: F,
+    task_context: &'static str,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String> + Send + 'static,
+{
+    let _permit = search_permits
+        .acquire_owned()
+        .await
+        .context("search concurrency limiter was closed")?;
+    tokio::task::spawn_blocking(search)
+        .await
+        .context(task_context)
+        .and_then(|result| result)
 }
 
 #[derive(Debug, Deserialize)]

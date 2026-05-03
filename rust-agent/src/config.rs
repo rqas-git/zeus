@@ -7,6 +7,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::tools::ToolPolicy;
+use crate::tools::DEFAULT_FFF_SEARCH_CONCURRENCY;
+use crate::tools::MAX_FFF_SEARCH_CONCURRENCY;
 
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
@@ -553,6 +555,7 @@ impl Default for ServerConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ToolConfig {
     policy: ToolPolicy,
+    search_concurrency: usize,
 }
 
 impl ToolConfig {
@@ -561,8 +564,13 @@ impl ToolConfig {
     /// # Errors
     /// Returns an error if `RUST_AGENT_TOOL_MODE` is unsupported.
     pub(crate) fn from_env() -> Result<Self> {
+        let search_concurrency = env_parse_usize(
+            "RUST_AGENT_TOOL_SEARCH_CONCURRENCY",
+            DEFAULT_FFF_SEARCH_CONCURRENCY,
+        )?;
         Ok(Self {
             policy: parse_tool_policy(&env_string("RUST_AGENT_TOOL_MODE", DEFAULT_TOOL_MODE))?,
+            search_concurrency: validate_tool_search_concurrency(search_concurrency)?,
         })
     }
 
@@ -570,12 +578,18 @@ impl ToolConfig {
     pub(crate) const fn policy(self) -> ToolPolicy {
         self.policy
     }
+
+    /// Returns the maximum number of concurrent FFF searches.
+    pub(crate) const fn search_concurrency(self) -> usize {
+        self.search_concurrency
+    }
 }
 
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
             policy: ToolPolicy::ReadOnly,
+            search_concurrency: DEFAULT_FFF_SEARCH_CONCURRENCY,
         }
     }
 }
@@ -705,6 +719,14 @@ fn parse_tool_policy(raw: &str) -> Result<ToolPolicy> {
     }
 }
 
+fn validate_tool_search_concurrency(value: usize) -> Result<usize> {
+    anyhow::ensure!(
+        (1..=MAX_FFF_SEARCH_CONCURRENCY).contains(&value),
+        "failed to parse RUST_AGENT_TOOL_SEARCH_CONCURRENCY={value}: expected 1..={MAX_FFF_SEARCH_CONCURRENCY}"
+    );
+    Ok(value)
+}
+
 fn parse_env<T>(name: &str, default: T) -> Result<T>
 where
     T: std::str::FromStr,
@@ -736,5 +758,16 @@ mod tests {
             ToolPolicy::WorkspaceExec
         );
         assert!(parse_tool_policy("network").is_err());
+    }
+
+    #[test]
+    fn validates_tool_search_concurrency() {
+        assert_eq!(validate_tool_search_concurrency(1).unwrap(), 1);
+        assert_eq!(
+            validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY).unwrap(),
+            MAX_FFF_SEARCH_CONCURRENCY
+        );
+        assert!(validate_tool_search_concurrency(0).is_err());
+        assert!(validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).is_err());
     }
 }
