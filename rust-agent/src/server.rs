@@ -409,8 +409,7 @@ where
                 let event = ServerEvent::from_agent_event(event);
                 let is_error = matches!(event, ServerEvent::Error { .. });
                 events.publish(event.clone())?;
-                tx.try_send(event)
-                    .context("event stream client is too slow")?;
+                let _ = tx.try_send(event);
                 if is_error {
                     error_forwarded = true;
                 }
@@ -891,10 +890,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_queue_failure_after_tool_call_allows_clean_retry() {
+    async fn stream_queue_backpressure_does_not_fail_turn() {
         let turn = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(AgentService::new(
-            ToolThenRetryStreamer {
+            ToolThenContinueStreamer {
                 turn: Arc::clone(&turn),
             },
             ContextWindowConfig::default(),
@@ -940,7 +939,7 @@ mod tests {
         assert!(body.contains(
             "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
         ));
-        assert_eq!(turn.load(Ordering::SeqCst), 2);
+        assert_eq!(turn.load(Ordering::SeqCst), 3);
         drop(first_response);
     }
 
@@ -1258,11 +1257,11 @@ mod tests {
         }
     }
 
-    struct ToolThenRetryStreamer {
+    struct ToolThenContinueStreamer {
         turn: Arc<AtomicUsize>,
     }
 
-    impl ModelStreamer for ToolThenRetryStreamer {
+    impl ModelStreamer for ToolThenContinueStreamer {
         async fn stream_conversation<'a>(
             &'a self,
             messages: &'a [ConversationMessage<'a>],
@@ -1290,11 +1289,29 @@ mod tests {
                     ))
                 }
                 1 => {
+                    assert_eq!(messages.len(), 4);
+                    assert_eq!(messages[0], ConversationMessage::user("read the manifest"));
+                    assert_eq!(messages[1], ConversationMessage::assistant("checking"));
+                    assert!(matches!(
+                        messages[2],
+                        ConversationMessage::FunctionCall { .. }
+                    ));
+                    assert!(matches!(
+                        messages[3],
+                        ConversationMessage::FunctionOutput { .. }
+                    ));
+                    on_delta("done")?;
+                    Ok(ModelResponse::new("done"))
+                }
+                2 => {
                     assert_eq!(
                         messages,
                         &[
                             ConversationMessage::user("read the manifest"),
                             ConversationMessage::assistant("checking"),
+                            messages[2],
+                            messages[3],
+                            ConversationMessage::assistant("done"),
                             ConversationMessage::user("continue"),
                         ]
                     );

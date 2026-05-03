@@ -748,8 +748,7 @@ impl AgentLoop {
                 return Ok(());
             }
 
-            let executions = self.execute_tool_calls(&tool_calls, emit).await?;
-            self.store.append_tool_transcript(tool_calls, executions);
+            self.execute_tool_calls(&tool_calls, emit).await?;
             self.store.prune_history(self.context_window);
         }
 
@@ -805,10 +804,10 @@ impl AgentLoop {
     }
 
     async fn execute_tool_calls(
-        &self,
+        &mut self,
         tool_calls: &[ModelToolCall],
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
-    ) -> Result<Vec<ToolExecution>> {
+    ) -> Result<()> {
         let session_id = self.session_id();
         for tool_call in tool_calls {
             emit(AgentEvent::ToolCallStarted {
@@ -837,6 +836,8 @@ impl AgentLoop {
             executions
         };
 
+        self.store
+            .append_tool_transcript(tool_calls.iter().cloned(), executions.iter().cloned());
         for execution in &executions {
             emit(AgentEvent::ToolCallCompleted {
                 session_id,
@@ -845,7 +846,7 @@ impl AgentLoop {
                 success: execution.success,
             })?;
         }
-        Ok(executions)
+        Ok(())
     }
 }
 
@@ -1349,10 +1350,14 @@ mod tests {
 
         assert_eq!(error, "sink failed");
         assert_eq!(agent.store.status(), SessionStatus::Failed);
-        assert!(agent
-            .messages()
-            .iter()
-            .all(|message| matches!(message.item, AgentItem::Message { .. })));
+        assert!(matches!(
+            agent.messages()[1].item,
+            AgentItem::FunctionCall { .. }
+        ));
+        assert!(matches!(
+            agent.messages()[2].item,
+            AgentItem::FunctionOutput { .. }
+        ));
 
         agent
             .submit_user_message("continue", &streamer, |_| Ok(()))
@@ -1736,6 +1741,17 @@ mod tests {
                         messages,
                         &[
                             ConversationMessage::user("read the manifest"),
+                            ConversationMessage::function_call(
+                                Some("fc_read"),
+                                "call_read",
+                                "read_file",
+                                r#"{"path":"Cargo.toml"}"#
+                            ),
+                            ConversationMessage::function_output(
+                                "call_read",
+                                include_str!("../Cargo.toml"),
+                                true
+                            ),
                             ConversationMessage::user("continue"),
                         ]
                     );
