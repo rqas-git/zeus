@@ -160,6 +160,16 @@ impl InMemorySessionStore {
         id
     }
 
+    fn remove_last_message(&mut self, message_id: MessageId) {
+        let Some(message) = self.messages.last() else {
+            return;
+        };
+        if message.id == message_id {
+            self.messages.pop();
+            self.next_message_id = message_id;
+        }
+    }
+
     fn conversation_window(&self, config: ContextWindowConfig) -> Vec<ConversationMessage<'_>> {
         let mut retained = Vec::new();
         let mut retained_bytes = 0usize;
@@ -238,7 +248,7 @@ impl AgentLoop {
 
         let user_text = text.into();
         let user_id = self.store.append_message(MessageRole::User, user_text);
-        emit(AgentEvent::MessageCompleted {
+        if let Err(error) = emit(AgentEvent::MessageCompleted {
             session_id: self.session_id(),
             message_id: user_id,
             role: MessageRole::User,
@@ -248,9 +258,15 @@ impl AgentLoop {
                 .last()
                 .map(AgentMessage::text)
                 .unwrap_or_default(),
-        })?;
+        }) {
+            self.store.remove_last_message(user_id);
+            return Err(error);
+        }
 
-        self.begin_running(&mut emit)?;
+        if let Err(error) = self.begin_running(&mut emit) {
+            self.store.remove_last_message(user_id);
+            return Err(error);
+        }
         let result = self.run_once(model, &mut emit).await;
         match result {
             Ok(response) => {
@@ -485,6 +501,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_message_publish_failure_rolls_back_submission() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let model_called = Cell::new(false);
+        let streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                model_called.set(true);
+                Ok("unused".to_string())
+            },
+        );
+
+        let error = agent
+            .submit_user_message("hello", &streamer, |event| {
+                if matches!(
+                    event,
+                    AgentEvent::MessageCompleted {
+                        role: MessageRole::User,
+                        ..
+                    }
+                ) {
+                    anyhow::bail!("sink failed");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "sink failed");
+        assert!(!model_called.get());
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert!(agent.messages().is_empty());
+
+        let ok_streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                assert_eq!(history, &[ConversationMessage::user("retry")]);
+                Ok("ok".to_string())
+            },
+        );
+        let response = agent
+            .submit_user_message("retry", &ok_streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(response, "ok");
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages()[0].text(), "retry");
+        assert_eq!(agent.messages()[1].text(), "ok");
+    }
+
+    #[tokio::test]
     async fn running_status_publish_failure_does_not_stick_session_running() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let model_called = Cell::new(false);
@@ -516,10 +583,13 @@ mod tests {
         assert_eq!(error, "sink failed");
         assert!(!model_called.get());
         assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert!(agent.messages().is_empty());
 
         let ok_streamer = FnStreamer::new(
-            |_history: &[ConversationMessage<'_>],
-             _on_delta: &mut dyn FnMut(&str) -> Result<()>| Ok("ok".to_string()),
+            |history: &[ConversationMessage<'_>], _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                assert_eq!(history, &[ConversationMessage::user("again")]);
+                Ok("ok".to_string())
+            },
         );
         let response = agent
             .submit_user_message("again", &ok_streamer, |_| Ok(()))
@@ -528,6 +598,8 @@ mod tests {
 
         assert_eq!(response, "ok");
         assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert_eq!(agent.messages().len(), 2);
+        assert_eq!(agent.messages()[0].text(), "again");
     }
 
     fn format_event(event: AgentEvent<'_>) -> String {
