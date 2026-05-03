@@ -58,15 +58,18 @@ where
     M: ModelStreamer + Send + Sync + 'static,
 {
     let service = Arc::new(service);
-    let state = ServerState::new(service, config.event_queue_capacity(), config.h3_addr());
+    let h3_endpoint = h3_endpoint(&config)?;
+    let h3_addr = h3_endpoint
+        .local_addr()
+        .context("failed to read H3 listener address")?;
+    let state = ServerState::new(service, config.event_queue_capacity(), h3_addr);
     let app = router(state);
-    let h3_config = config.clone();
     let http_addr = config.http_addr();
     let http_app = app.clone();
     let h3_app = app;
 
     let http_task = tokio::spawn(async move { run_http_listener(http_app, http_addr).await });
-    let h3_task = tokio::spawn(async move { run_h3_listener(h3_app, h3_config).await });
+    let h3_task = tokio::spawn(async move { run_h3_listener(h3_app, h3_endpoint).await });
 
     tokio::select! {
         result = http_task => result.context("HTTP listener task failed")??,
@@ -111,8 +114,7 @@ async fn run_http_listener(app: Router, addr: SocketAddr) -> Result<()> {
         .context("HTTP compatibility listener failed")
 }
 
-async fn run_h3_listener(app: Router, config: ServerConfig) -> Result<()> {
-    let endpoint = h3_endpoint(&config)?;
+async fn run_h3_listener(app: Router, endpoint: quinn::Endpoint) -> Result<()> {
     let local_addr = endpoint
         .local_addr()
         .context("failed to read H3 listener address")?;
@@ -401,12 +403,17 @@ where
     let service = Arc::clone(&state.service);
     let events = state.events.clone();
     tokio::spawn(async move {
+        let mut error_forwarded = false;
         let result = service
             .submit_user_message(session_id, request.message, |event| {
                 let event = ServerEvent::from_agent_event(event);
+                let is_error = matches!(event, ServerEvent::Error { .. });
                 events.publish(event.clone())?;
                 tx.try_send(event)
                     .context("event stream client is too slow")?;
+                if is_error {
+                    error_forwarded = true;
+                }
                 Ok(())
             })
             .await;
@@ -419,7 +426,7 @@ where
                 let _ = events.publish(event.clone());
                 let _ = tx.try_send(event);
             }
-            Err(error) => {
+            Err(error) if !error_forwarded => {
                 let event = ServerEvent::Error {
                     session_id: session_id.get(),
                     message: error.to_string(),
@@ -427,6 +434,7 @@ where
                 let _ = events.publish(event.clone());
                 let _ = tx.try_send(event);
             }
+            Err(_) => {}
         }
     });
 
@@ -846,6 +854,37 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn failed_turn_streams_one_error_event() {
+        let service = Arc::new(AgentService::new(
+            FailingStreamer,
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body.matches("event: session.error\n").count(), 1);
+        assert!(body.contains(
+            "event: session.error\ndata: {\"type\":\"error\",\"session_id\":7,\"message\":\"model failed\"}\n\n"
+        ));
+        assert!(!body.contains("event: turn.completed\n"));
+    }
+
     #[test]
     fn encodes_named_sse_events() {
         let event = ServerEvent::ServerConnected { session_id: 42 };
@@ -867,6 +906,38 @@ mod tests {
 
         assert_eq!(local_addr.ip().to_string(), "127.0.0.1");
         assert_ne!(local_addr.port(), 0);
+        endpoint.close(0u32.into(), b"test complete");
+    }
+
+    #[tokio::test]
+    async fn advertises_bound_h3_port_for_port_zero() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        );
+        let endpoint = h3_endpoint(&config).unwrap();
+        let h3_addr = endpoint.local_addr().unwrap();
+        let state = ServerState::new(service, 16, h3_addr);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(h3_addr.port(), 0);
+        assert_eq!(
+            response.headers().get(header::ALT_SVC).unwrap(),
+            &format!("h3=\":{}\"; ma=86400", h3_addr.port())
+        );
         endpoint.close(0u32.into(), b"test complete");
     }
 
@@ -1036,6 +1107,22 @@ mod tests {
                 on_delta(delta)?;
             }
             Ok(ModelResponse::new(self.text))
+        }
+    }
+
+    struct FailingStreamer;
+
+    impl ModelStreamer for FailingStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            anyhow::bail!("model failed")
         }
     }
 }
