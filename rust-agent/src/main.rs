@@ -28,6 +28,7 @@ use client::ChatGptClient;
 use config::AppConfig;
 use mimalloc::MiMalloc;
 use service::AgentService;
+use tools::ToolRegistry;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -46,38 +47,47 @@ async fn main() -> Result<()> {
 
 async fn run_agent(message: Option<String>) -> Result<()> {
     let AppConfig {
-        client,
+        client: client_config,
         context,
         models,
         output,
         server: _,
         telemetry,
     } = AppConfig::from_env()?;
-    let auth = AuthManager::new_default()?;
-    let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
-    let service = AgentService::new(client, context, models);
     let session_id = SessionId::new(1);
 
     match message {
         Some(message) => {
+            let auth = AuthManager::new_default()?;
+            let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+            let service = AgentService::new(client, context, models);
             print_agent_response(&service, session_id, output, telemetry, message).await
         }
-        None => run_interactive_loop(&service, session_id, output, telemetry).await,
+        None => {
+            let tools = ToolRegistry::default();
+            let _search_index_warmup = tools.spawn_search_index_warmup();
+            let auth = AuthManager::new_default()?;
+            let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+            let service = AgentService::with_tools(client, context, models, tools);
+            run_interactive_loop(&service, session_id, output, telemetry).await
+        }
     }
 }
 
 async fn run_server() -> Result<()> {
     let AppConfig {
-        client,
+        client: client_config,
         context,
         models,
         output: _,
         server,
         telemetry,
     } = AppConfig::from_env()?;
+    let tools = ToolRegistry::default();
+    let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
-    let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
-    let service = AgentService::new(client, context, models);
+    let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+    let service = AgentService::with_tools(client, context, models, tools);
     server::serve(service, server).await
 }
 
