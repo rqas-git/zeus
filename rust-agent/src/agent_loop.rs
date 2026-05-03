@@ -851,12 +851,17 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Instant;
 
+    use serde_json::json;
+
     use super::*;
     use crate::bench_support::DurationSummary;
+    use crate::tools::ToolPolicy;
+    use crate::tools::ToolRegistry;
 
     #[tokio::test]
     async fn stores_one_turn_and_emits_ordered_events() {
@@ -1271,6 +1276,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executes_workspace_patch_tool_calls() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-loop-patch-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("lib.rs"),
+            "pub fn value() -> &'static str {\n    \"old\"\n}\n",
+        )
+        .unwrap();
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+        let mut agent = AgentLoop::with_context_window_and_tools(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            tools,
+        );
+        let streamer = PatchLoopStreamer {
+            turn: AtomicUsize::new(0),
+        };
+        let mut events = Vec::new();
+
+        agent
+            .submit_user_message("patch lib", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.join("lib.rs")).unwrap(),
+            "pub fn value() -> &'static str {\n    \"new\"\n}\n"
+        );
+        assert_eq!(
+            events,
+            [
+                "message:user:patch lib",
+                "status:Running",
+                "tool-start:apply_patch:call_patch",
+                "tool-end:apply_patch:call_patch:true",
+                "delta:patched",
+                "message:assistant:patched",
+                "status:Idle",
+            ]
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
     async fn tool_event_publish_failure_does_not_leave_orphaned_tool_calls() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let streamer = RetryAfterToolEventFailureStreamer {
@@ -1560,6 +1619,13 @@ mod tests {
         }
     }
 
+    fn unique_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    }
+
     struct FnStreamer<F> {
         stream: StdMutex<F>,
     }
@@ -1730,6 +1796,68 @@ mod tests {
                     }
                     on_delta("read ok")?;
                     Ok(ModelResponse::new("read ok"))
+                }
+                _ => unreachable!("unexpected turn"),
+            }
+        }
+    }
+
+    struct PatchLoopStreamer {
+        turn: AtomicUsize,
+    }
+
+    impl ModelStreamer for PatchLoopStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => {
+                    assert!(tools.iter().any(|tool| tool.name() == "apply_patch"));
+                    assert!(parallel_tool_calls);
+                    assert_eq!(messages, &[ConversationMessage::user("patch lib")]);
+                    let patch = concat!(
+                        "*** Begin Patch\n",
+                        "*** Update File: lib.rs\n",
+                        "@@\n",
+                        " pub fn value() -> &'static str {\n",
+                        "-    \"old\"\n",
+                        "+    \"new\"\n",
+                        " }\n",
+                        "*** End Patch\n",
+                    );
+                    Ok(ModelResponse::with_tool_calls(
+                        "",
+                        [ModelToolCall {
+                            item_id: Some("fc_patch".to_string()),
+                            call_id: "call_patch".to_string(),
+                            name: "apply_patch".to_string(),
+                            arguments: json!({ "patch": patch }).to_string(),
+                        }],
+                    ))
+                }
+                1 => {
+                    assert_eq!(messages.len(), 3);
+                    match messages[2] {
+                        ConversationMessage::FunctionOutput {
+                            call_id,
+                            output,
+                            success,
+                        } => {
+                            assert_eq!(call_id, "call_patch");
+                            assert!(output.contains("updated lib.rs"));
+                            assert!(success);
+                        }
+                        _ => panic!("expected function output in prompt"),
+                    }
+                    on_delta("patched")?;
+                    Ok(ModelResponse::new("patched"))
                 }
                 _ => unreachable!("unexpected turn"),
             }
