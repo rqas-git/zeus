@@ -23,6 +23,9 @@ counter. They assert correctness but do not enforce timing thresholds.
 - `tools::tests::benchmark_read_file_capped_large_file`
   Measures `read_file` latency against a large file while enforcing the capped
   read path.
+- `tools::tests::benchmark_fff_search_current_repo`
+  Measures cold FFF index initialization plus warm fuzzy path search and content
+  search against the current repository.
 - `server::tests::benchmark_sse_event_encoding`
   Measures server event JSON plus SSE frame encoding throughput.
 - `tests::benchmark_delta_writer_many_small_deltas`

@@ -31,8 +31,9 @@ transport, and session state separate.
   and function-call outputs, then creates borrowed prompt windows instead of
   cloning transcript text.
 - `ToolRegistry` owns the built-in read-only tools and model-visible tool specs.
-  It executes tool batches in parallel when every requested tool is marked
-  parallel-safe.
+  It keeps exact filesystem tools (`read_file`, `list_dir`) alongside a shared
+  FFF-backed index for fuzzy file/path search and content search. It executes
+  tool batches in parallel when every requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
 - `AgentService` holds only a per-session async lock while a turn streams, so
@@ -58,9 +59,12 @@ transport, and session state separate.
   `serde_json::Value` schemas for each request.
 - Tool arguments are retained as raw JSON until the tool boundary, where they are
   deserialized once into typed argument structs.
-- Read-only tool calls are executed concurrently and their outputs are replayed
-  to the model in one follow-up request. `read_file` reads only one byte past its
-  output cap before truncating, so large files do not allocate unbounded memory.
+- Read-only tool calls are executed concurrently when they are marked safe, and
+  their outputs are replayed to the model in one follow-up request. FFF search
+  tools run on blocking workers and are marked sequential within a batch to
+  avoid oversubscribing the Tokio and Rayon worker pools. `read_file` reads only
+  one byte past its output cap before truncating, so large files do not allocate
+  unbounded memory.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session
@@ -86,9 +90,10 @@ while a turn is running.
 ## Current Scope
 
 Conversation history is recent and in memory only. The built-in tool set is
-read-only (`read_file` and `list_dir`) until write or shell tools have an
-explicit permission model. Persistence, cancellation, and semantic context
-compaction are intentionally out of scope until product behavior requires them.
+read-only (`read_file`, `list_dir`, `search_files`, and `search_text`) until
+write or shell tools have an explicit permission model. Persistence,
+cancellation, and semantic context compaction are intentionally out of scope
+until product behavior requires them.
 
 ## Related Docs
 
