@@ -808,8 +808,10 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
+    use crate::bench_support::DurationSummary;
     use crate::test_http::TestResponse;
     use crate::test_http::TestServer;
+    use crate::tools::ToolRegistry;
 
     #[test]
     fn serializes_conversation_history() {
@@ -1127,18 +1129,68 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
             samples.push(elapsed);
         }
 
-        samples.sort_unstable();
-        let min = samples[0];
-        let median = samples[SAMPLES / 2];
-        let max = samples[SAMPLES - 1];
-        let throughput_mib_s = stream.len() as f64 / median.as_secs_f64() / 1024.0 / 1024.0;
+        let summary = DurationSummary::from_samples(&mut samples);
+        let throughput_mib_s = stream.len() as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
 
         println!(
             "sse_parser_large_stream events={EVENTS} bytes={} samples={SAMPLES} chunk_bytes={CHUNK_BYTES} min_ms={:.3} median_ms={:.3} max_ms={:.3} throughput_mib_s={:.1}",
             stream.len(),
-            duration_ms(min),
-            duration_ms(median),
-            duration_ms(max),
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+            throughput_mib_s,
+        );
+    }
+
+    #[test]
+    #[ignore = "release-mode Responses request serialization benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_responses_request_serialization_large_history() {
+        const GROUPS: usize = 1_200;
+        const SAMPLES: usize = 15;
+
+        let owned = large_request_history(GROUPS);
+        let messages = owned
+            .iter()
+            .map(BenchMessage::as_conversation_message)
+            .collect::<Vec<_>>();
+        let tools = ToolRegistry::default();
+        let prompt_cache_key = "bench-serialization-7-gpt-bench";
+        let request = ResponsesRequest {
+            model: "gpt-bench",
+            instructions: "You are a concise assistant for benchmark serialization.",
+            input: responses_input(&messages),
+            tools: tools.specs(),
+            tool_choice: "auto",
+            parallel_tool_calls: true,
+            store: false,
+            stream: true,
+            prompt_cache_key,
+        };
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut serialized_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let serialized =
+                serde_json::to_vec(&request).expect("benchmark request should serialize");
+            let elapsed = started.elapsed();
+
+            serialized_bytes = serialized.len();
+            std::hint::black_box(&serialized);
+            assert!(serialized_bytes > 1_000_000);
+            samples.push(elapsed);
+        }
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        let throughput_mib_s =
+            serialized_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+
+        println!(
+            "responses_request_serialization_large_history groups={GROUPS} messages={} bytes={serialized_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} throughput_mib_s={:.1}",
+            messages.len(),
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
             throughput_mib_s,
         );
     }
@@ -1171,10 +1223,6 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
              data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bench\"}}\n\n",
         );
         stream
-    }
-
-    fn duration_ms(duration: Duration) -> f64 {
-        duration.as_secs_f64() * 1_000.0
     }
 
     fn now_unix() -> u64 {
@@ -1234,5 +1282,63 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         if let Some(parent) = path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    enum BenchMessage {
+        User(String),
+        Assistant(String),
+        FunctionCall {
+            item_id: String,
+            call_id: String,
+            arguments: String,
+        },
+        FunctionOutput {
+            call_id: String,
+            output: String,
+        },
+    }
+
+    impl BenchMessage {
+        fn as_conversation_message(&self) -> ConversationMessage<'_> {
+            match self {
+                Self::User(text) => ConversationMessage::user(text),
+                Self::Assistant(text) => ConversationMessage::assistant(text),
+                Self::FunctionCall {
+                    item_id,
+                    call_id,
+                    arguments,
+                } => ConversationMessage::function_call(
+                    Some(item_id.as_str()),
+                    call_id,
+                    "read_file",
+                    arguments,
+                ),
+                Self::FunctionOutput { call_id, output } => {
+                    ConversationMessage::function_output(call_id, output, true)
+                }
+            }
+        }
+    }
+
+    fn large_request_history(groups: usize) -> Vec<BenchMessage> {
+        let mut messages = Vec::with_capacity(groups * 4);
+        for index in 0..groups {
+            messages.push(BenchMessage::User(format!(
+                "Inspect file group {index} and summarize the relevant implementation details."
+            )));
+            messages.push(BenchMessage::FunctionCall {
+                item_id: format!("fc_{index}"),
+                call_id: format!("call_{index}"),
+                arguments: format!(r#"{{"path":"src/generated/bench_{index}.rs"}}"#),
+            });
+            messages.push(BenchMessage::FunctionOutput {
+                call_id: format!("call_{index}"),
+                output: "fn bench_target() { println!(\"benchmark payload\"); }\n".repeat(12),
+            });
+            messages.push(BenchMessage::Assistant(format!(
+                "Group {index} contains a small benchmark target function."
+            )));
+        }
+        messages
     }
 }
