@@ -3,6 +3,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use futures_util::StreamExt;
+use memchr::memchr;
 use reqwest::header;
 use reqwest::Client;
 use serde::ser::SerializeSeq;
@@ -349,26 +350,34 @@ fn read_assistant_completion(
     state.finish(&mut on_delta)
 }
 
-#[derive(Default)]
 struct SseDataParser {
     line: Vec<u8>,
     event_data: String,
     has_event_data: bool,
 }
 
+impl Default for SseDataParser {
+    fn default() -> Self {
+        Self {
+            line: Vec::with_capacity(512),
+            event_data: String::with_capacity(512),
+            has_event_data: false,
+        }
+    }
+}
+
 impl SseDataParser {
     fn push_bytes(
         &mut self,
-        bytes: &[u8],
+        mut bytes: &[u8],
         on_data: &mut impl FnMut(&str) -> Result<()>,
     ) -> Result<()> {
-        for byte in bytes {
-            if *byte == b'\n' {
-                self.handle_line(on_data)?;
-            } else {
-                self.line.push(*byte);
-            }
+        while let Some(line_end) = memchr(b'\n', bytes) {
+            self.line.extend_from_slice(&bytes[..line_end]);
+            self.handle_line(on_data)?;
+            bytes = &bytes[line_end + 1..];
         }
+        self.line.extend_from_slice(bytes);
         Ok(())
     }
 
@@ -646,6 +655,8 @@ struct StreamEvent<'a> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn serializes_conversation_history() {
@@ -791,5 +802,78 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
         assert_eq!(first.bytes, "You are concise.".len());
         assert_ne!(first.hash, second.hash);
+    }
+
+    #[test]
+    #[ignore = "release-mode SSE parser benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_sse_parser_large_stream() {
+        const EVENTS: usize = 20_000;
+        const SAMPLES: usize = 15;
+        const CHUNK_BYTES: usize = 8 * 1024;
+
+        let stream = large_delta_stream(EVENTS);
+        let expected_text_bytes = "hello world".len() * EVENTS;
+        let mut samples = Vec::with_capacity(SAMPLES);
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let completion = parse_assistant_completion_from_chunks(stream.as_bytes(), CHUNK_BYTES)
+                .expect("benchmark stream should parse");
+            let elapsed = started.elapsed();
+
+            std::hint::black_box(&completion.text);
+            assert_eq!(completion.text.len(), expected_text_bytes);
+            assert_eq!(completion.response_id.as_deref(), Some("resp_bench"));
+            samples.push(elapsed);
+        }
+
+        samples.sort_unstable();
+        let min = samples[0];
+        let median = samples[SAMPLES / 2];
+        let max = samples[SAMPLES - 1];
+        let throughput_mib_s = stream.len() as f64 / median.as_secs_f64() / 1024.0 / 1024.0;
+
+        println!(
+            "sse_parser_large_stream events={EVENTS} bytes={} samples={SAMPLES} chunk_bytes={CHUNK_BYTES} min_ms={:.3} median_ms={:.3} max_ms={:.3} throughput_mib_s={:.1}",
+            stream.len(),
+            duration_ms(min),
+            duration_ms(median),
+            duration_ms(max),
+            throughput_mib_s,
+        );
+    }
+
+    fn parse_assistant_completion_from_chunks(
+        bytes: &[u8],
+        chunk_bytes: usize,
+    ) -> Result<StreamCompletion> {
+        let mut state = AssistantText::new(true);
+        let mut parser = SseDataParser::default();
+
+        for chunk in bytes.chunks(chunk_bytes) {
+            parser.push_bytes(chunk, &mut |data| state.handle_data(data, &mut |_| Ok(())))?;
+        }
+
+        parser.finish(&mut |data| state.handle_data(data, &mut |_| Ok(())))?;
+        state.finish(&mut |_| Ok(()))
+    }
+
+    fn large_delta_stream(events: usize) -> String {
+        let mut stream = String::with_capacity(events * 72 + 90);
+        for _ in 0..events {
+            stream.push_str(
+                "event: response.output_text.delta\n\
+                 data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello world\"}\n\n",
+            );
+        }
+        stream.push_str(
+            "event: response.completed\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bench\"}}\n\n",
+        );
+        stream
+    }
+
+    fn duration_ms(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1_000.0
     }
 }

@@ -673,6 +673,7 @@ dependencies = [
  "anyhow",
  "base64",
  "futures-util",
+ "memchr",
  "mimalloc",
  "reqwest",
  "serde",

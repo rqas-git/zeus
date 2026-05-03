@@ -29,12 +29,25 @@ specific backend provider.
 
 - Async HTTP avoids blocking backend request workers.
 - Typed request serialization avoids constructing a generic JSON tree first.
-- SSE parsing is local and chunk-based, avoiding an extra parser dependency.
+- SSE parsing is local and chunk-based. The line splitter uses `memchr` to find
+  newlines across received byte chunks instead of checking every byte in a Rust
+  loop.
 - SSE event JSON parsing borrows event fields and raw nested payloads where
   possible.
 - Prompt-cache keys are stable per configured namespace, session, and model.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained-message shape, response id, and provider token counters.
+
+## Benchmark
+
+Run the ignored release benchmark for the SSE parser with:
+
+```bash
+cargo test --release client::tests::benchmark_sse_parser_large_stream -- --ignored --nocapture
+```
+
+The benchmark parses a synthetic 20,000-event stream in 8 KiB chunks and prints
+min, median, max, and throughput statistics.
 
 ## Current Scope
 
