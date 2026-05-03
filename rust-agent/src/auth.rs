@@ -43,7 +43,10 @@ impl CodexAuth {
             .account_id
             .context("Codex auth file does not contain a ChatGPT account id")?;
 
-        anyhow::ensure!(!tokens.access_token.trim().is_empty(), "access token is empty");
+        anyhow::ensure!(
+            !tokens.access_token.trim().is_empty(),
+            "access token is empty"
+        );
         anyhow::ensure!(!account_id.trim().is_empty(), "account id is empty");
 
         Ok(Self {

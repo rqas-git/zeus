@@ -108,10 +108,8 @@ fn extract_assistant_text(stream: &str) -> Result<String> {
                     text.push_str(&delta);
                 }
             }
-            "response.output_item.done" => {
-                if text.is_empty() {
-                    fallback_text.push_str(&assistant_text_from_item(event.item.as_ref()));
-                }
+            "response.output_item.done" if text.is_empty() => {
+                fallback_text.push_str(&assistant_text_from_item(event.item.as_ref()));
             }
             "response.failed" => {
                 let message = response_error_message(event.response.as_ref())
