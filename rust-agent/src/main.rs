@@ -374,8 +374,10 @@ fn parse_interactive_input(input: &str) -> Option<InteractiveInput> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+    use std::time::Instant;
 
     use super::*;
+    use crate::bench_support::DurationSummary;
 
     #[test]
     fn delta_writer_batches_until_threshold_or_finish() {
@@ -395,6 +397,44 @@ mod tests {
         writer.finish_line().unwrap();
 
         assert_eq!(String::from_utf8(writer.writer).unwrap(), "hello world!\n");
+    }
+
+    #[test]
+    #[ignore = "release-mode delta writer benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_delta_writer_many_small_deltas() {
+        const DELTAS: usize = 200_000;
+        const SAMPLES: usize = 15;
+
+        let output = config::OutputConfig::new(Duration::from_secs(60), 4096);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let mut writer = DeltaWriter::new(Vec::with_capacity(DELTAS + 1), output);
+            let started = Instant::now();
+            for _ in 0..DELTAS {
+                writer.write_delta("x").unwrap();
+            }
+            writer.finish_line().unwrap();
+            let elapsed = started.elapsed();
+
+            output_bytes = writer.writer.len();
+            std::hint::black_box(&writer.writer);
+            assert_eq!(output_bytes, DELTAS + 1);
+            samples.push(elapsed);
+        }
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        let deltas_per_s = DELTAS as f64 / summary.median.as_secs_f64();
+        let throughput_mib_s = output_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        println!(
+            "delta_writer_many_small_deltas deltas={DELTAS} bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} deltas_per_s={:.0} throughput_mib_s={:.1}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+            deltas_per_s,
+            throughput_mib_s,
+        );
     }
 
     #[test]
