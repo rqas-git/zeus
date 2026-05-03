@@ -9,8 +9,10 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 2. `login`, `login status`, and `logout` run directly against `AuthManager`.
 3. Chat and server commands load config and auth, then create one
    `AgentService<ChatGptClient>`.
-4. One-shot mode submits the CLI prompt to session `1`.
-5. Interactive mode reuses session `1` until the user enters a blank line.
+4. One-shot mode submits the CLI prompt to session `1` and leaves FFF indexing
+   lazy unless the model actually calls a search tool.
+5. Interactive mode starts FFF indexing in the background, then reuses session
+   `1` until the user enters a blank line.
 6. `/model` shows or changes the session model through `AgentService`.
 7. `/models` lists the backend allowlist.
 8. `TextDelta` events are buffered and written to stdout.
@@ -30,6 +32,11 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 
 - Terminal flushing is byte and interval bounded.
 - The interactive prompt keeps one warm service and session.
+- Interactive startup begins FFF indexing on a blocking worker without waiting
+  before showing the prompt. A search tool call waits for that indexing work if
+  it is still running.
+- One-shot prompt mode does not prewarm FFF, so prompts that do not need search
+  avoid the index initialization cost.
 - Model changes reuse the same service and transport client.
 - The binary uses Tokio's multi-threaded runtime so server mode can run
   concurrent listeners and request tasks.

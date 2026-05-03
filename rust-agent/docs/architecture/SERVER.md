@@ -7,14 +7,16 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 1. `rust-agent serve` loads `AppConfig`, auth, `ChatGptClient`, and
    `AgentService`.
-2. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
+2. Server startup begins FFF indexing on a background blocking worker before
+   binding listeners, without waiting for the scan to finish.
+3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
    identity, event queue capacity, QUIC stream limits, and idle timeout.
-3. One Axum router is built with shared `ServerState`.
-4. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
-5. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
-6. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
+4. One Axum router is built with shared `ServerState`.
+5. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
+6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
+7. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
-7. Turn requests submit work to `AgentService` and stream named SSE frames.
+8. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
@@ -61,6 +63,9 @@ Important event names include:
 ## Performance Notes
 
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
+- Server startup prewarms the shared FFF search index in the background. If a
+  request reaches an FFF-backed tool before scanning completes, that tool waits
+  on the blocking worker and then runs against the ready index.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
 - The event queue capacity is configurable and applies to direct turn streams
   and session broadcast streams.

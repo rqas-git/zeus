@@ -32,8 +32,10 @@ transport, and session state separate.
   cloning transcript text.
 - `ToolRegistry` owns the built-in read-only tools and model-visible tool specs.
   It keeps exact filesystem tools (`read_file`, `list_dir`) alongside a shared
-  FFF-backed index for fuzzy file/path search and content search. It executes
-  tool batches in parallel when every requested tool is marked parallel-safe.
+  FFF-backed index for fuzzy file/path search and content search. FFF indexing
+  is lazy by default, but callers can start it on a background blocking worker
+  before any tool request. It executes tool batches in parallel when every
+  requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
 - `AgentService` holds only a per-session async lock while a turn streams, so
@@ -62,9 +64,11 @@ transport, and session state separate.
 - Read-only tool calls are executed concurrently when they are marked safe, and
   their outputs are replayed to the model in one follow-up request. FFF search
   tools run on blocking workers and are marked sequential within a batch to
-  avoid oversubscribing the Tokio and Rayon worker pools. `read_file` reads only
-  one byte past its output cap before truncating, so large files do not allocate
-  unbounded memory.
+  avoid oversubscribing the Tokio and Rayon worker pools. If an FFF tool call
+  arrives while the index is still scanning, that blocking worker waits for the
+  scan to finish before running the search. `read_file` reads only one byte past
+  its output cap before truncating, so large files do not allocate unbounded
+  memory.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session
