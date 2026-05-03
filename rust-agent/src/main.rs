@@ -48,7 +48,12 @@ async fn main() -> Result<()> {
 }
 
 fn message_from_args() -> Option<String> {
-    let message = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let mut args = std::env::args().skip(1);
+    let mut message = args.next()?;
+    for arg in args {
+        message.push(' ');
+        message.push_str(&arg);
+    }
     if !message.trim().is_empty() {
         Some(message)
     } else {
@@ -178,7 +183,7 @@ where
     fn new(writer: W, config: config::OutputConfig) -> Self {
         Self {
             writer,
-            pending: String::new(),
+            pending: String::with_capacity(config.delta_flush_bytes().min(64 * 1024)),
             flush_interval: config.delta_flush_interval(),
             flush_bytes: config.delta_flush_bytes(),
             last_flush: Instant::now(),

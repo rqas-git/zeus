@@ -309,7 +309,7 @@ impl InMemorySessionStore {
     }
 
     fn conversation_window(&self, config: ContextWindowConfig) -> Vec<ConversationMessage<'_>> {
-        let mut retained = Vec::new();
+        let mut retained = Vec::with_capacity(config.max_messages().min(self.messages.len()));
         let mut retained_bytes = 0usize;
 
         for message in self.messages.iter().rev() {
