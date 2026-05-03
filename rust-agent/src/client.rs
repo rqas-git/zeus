@@ -1,5 +1,7 @@
 //! Minimal ChatGPT Codex Responses client.
 
+use std::io::BufRead;
+use std::io::BufReader;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -69,19 +71,27 @@ impl ChatGptClient {
         Ok(Self { auth, http })
     }
 
-    /// Sends a user message and returns the assistant text.
+    /// Sends a user message and streams assistant text deltas.
     ///
     /// # Errors
-    /// Returns an error for transport failures, backend errors, or malformed SSE.
-    pub(crate) fn send_message(&self, message: &str) -> Result<String> {
-        self.send_conversation(&[ConversationMessage::user(message)])
+    /// Returns an error for transport failures, backend errors, malformed SSE, or callback failures.
+    pub(crate) fn stream_message(
+        &self,
+        message: &str,
+        on_delta: impl FnMut(&str) -> Result<()>,
+    ) -> Result<String> {
+        self.stream_conversation(&[ConversationMessage::user(message)], on_delta)
     }
 
-    /// Sends a conversation and returns the assistant text.
+    /// Sends a conversation and streams assistant text deltas.
     ///
     /// # Errors
-    /// Returns an error for transport failures, backend errors, or malformed SSE.
-    pub(crate) fn send_conversation(&self, messages: &[ConversationMessage]) -> Result<String> {
+    /// Returns an error for transport failures, backend errors, malformed SSE, or callback failures.
+    pub(crate) fn stream_conversation(
+        &self,
+        messages: &[ConversationMessage],
+        on_delta: impl FnMut(&str) -> Result<()>,
+    ) -> Result<String> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let body = json!({
@@ -108,17 +118,17 @@ impl ChatGptClient {
             .context("failed to send request to ChatGPT Codex backend")?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .context("failed to read ChatGPT Codex response")?;
+        if !status.is_success() {
+            let response_text = response
+                .text()
+                .context("failed to read ChatGPT Codex error response")?;
+            anyhow::bail!(
+                "ChatGPT Codex backend returned {status}: {}",
+                truncate_for_error(&response_text)
+            );
+        }
 
-        anyhow::ensure!(
-            status.is_success(),
-            "ChatGPT Codex backend returned {status}: {}",
-            truncate_for_error(&response_text)
-        );
-
-        extract_assistant_text(&response_text)
+        read_assistant_text(BufReader::new(response), on_delta)
     }
 }
 
@@ -170,32 +180,88 @@ struct ResponsesContent<'a> {
     text: &'a str,
 }
 
+#[cfg(test)]
 fn extract_assistant_text(stream: &str) -> Result<String> {
-    let mut text = String::new();
-    let mut fallback_text = String::new();
-    let mut completed = false;
+    read_assistant_text(std::io::Cursor::new(stream.as_bytes()), |_| Ok(()))
+}
 
-    let normalized_stream = stream.replace("\r\n", "\n");
-    for block in normalized_stream.split("\n\n") {
-        let Some(data) = sse_data(block) else {
-            continue;
-        };
-        if data == "[DONE]" {
-            completed = true;
+fn read_assistant_text(
+    mut reader: impl BufRead,
+    mut on_delta: impl FnMut(&str) -> Result<()>,
+) -> Result<String> {
+    let mut state = AssistantText::default();
+    let mut event_data = String::new();
+    let mut has_event_data = false;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .context("failed to read ChatGPT Codex response stream")?;
+        if bytes == 0 {
+            break;
+        }
+
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+        if line.is_empty() {
+            if has_event_data {
+                state.handle_data(&event_data, &mut on_delta)?;
+                event_data.clear();
+                has_event_data = false;
+            }
             continue;
         }
 
-        let event: StreamEvent = serde_json::from_str(&data)
-            .with_context(|| format!("failed to parse SSE data: {}", truncate_for_error(&data)))?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.strip_prefix(' ').unwrap_or(data);
+        if has_event_data {
+            event_data.push('\n');
+        }
+        event_data.push_str(data);
+        has_event_data = true;
+    }
+
+    if has_event_data {
+        state.handle_data(&event_data, &mut on_delta)?;
+    }
+
+    state.finish(&mut on_delta)
+}
+
+#[derive(Default)]
+struct AssistantText {
+    text: String,
+    fallback_text: String,
+    completed: bool,
+}
+
+impl AssistantText {
+    fn handle_data(
+        &mut self,
+        data: &str,
+        on_delta: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
+        if data == "[DONE]" {
+            self.completed = true;
+            return Ok(());
+        }
+
+        let event: StreamEvent = serde_json::from_str(data)
+            .with_context(|| format!("failed to parse SSE data: {}", truncate_for_error(data)))?;
 
         match event.kind.as_str() {
             "response.output_text.delta" => {
                 if let Some(delta) = event.delta {
-                    text.push_str(&delta);
+                    on_delta(&delta)?;
+                    self.text.push_str(&delta);
                 }
             }
-            "response.output_item.done" if text.is_empty() => {
-                fallback_text.push_str(&assistant_text_from_item(event.item.as_ref()));
+            "response.output_item.done" if self.text.is_empty() => {
+                self.fallback_text
+                    .push_str(&assistant_text_from_item(event.item.as_ref()));
             }
             "response.failed" => {
                 let message = response_error_message(event.response.as_ref())
@@ -203,30 +269,24 @@ fn extract_assistant_text(stream: &str) -> Result<String> {
                 anyhow::bail!("{message}");
             }
             "response.completed" => {
-                completed = true;
+                self.completed = true;
             }
             _ => {}
         }
+
+        Ok(())
     }
 
-    anyhow::ensure!(completed, "response stream ended before completion");
-    if text.is_empty() {
-        text = fallback_text;
-    }
-    anyhow::ensure!(!text.trim().is_empty(), "assistant response was empty");
-    Ok(text)
-}
-
-fn sse_data(block: &str) -> Option<String> {
-    let lines = block
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .collect::<Vec<_>>();
-
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
+    fn finish(mut self, on_delta: &mut impl FnMut(&str) -> Result<()>) -> Result<String> {
+        anyhow::ensure!(self.completed, "response stream ended before completion");
+        if self.text.is_empty() {
+            self.text = self.fallback_text;
+            if !self.text.is_empty() {
+                on_delta(&self.text)?;
+            }
+        }
+        anyhow::ensure!(!self.text.trim().is_empty(), "assistant response was empty");
+        Ok(self.text)
     }
 }
 
@@ -324,6 +384,30 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}
 "#;
 
         assert_eq!(extract_assistant_text(stream).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn streams_text_deltas_to_callback() {
+        let stream = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":" world"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1"}}
+
+"#;
+        let mut deltas = Vec::new();
+
+        let text = read_assistant_text(std::io::Cursor::new(stream.as_bytes()), |delta| {
+            deltas.push(delta.to_string());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(text, "hello world");
+        assert_eq!(deltas, ["hello", " world"]);
     }
 
     #[test]

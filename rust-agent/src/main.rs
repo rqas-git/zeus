@@ -24,9 +24,7 @@ fn main() -> Result<()> {
         return run_interactive_loop(&client);
     };
 
-    let response = client.send_message(&message)?;
-
-    println!("Assistant: {response}");
+    print_streamed_message(&client, &message)?;
     Ok(())
 }
 
@@ -47,10 +45,38 @@ fn run_interactive_loop(client: &ChatGptClient) -> Result<()> {
         };
 
         conversation.push(ConversationMessage::user(message));
-        let response = client.send_conversation(&conversation)?;
-        println!("Assistant: {response}");
+        let response = print_streamed_conversation(client, &conversation)?;
         conversation.push(ConversationMessage::assistant(response));
     }
+}
+
+fn print_streamed_message(client: &ChatGptClient, message: &str) -> Result<String> {
+    print_streamed_response(|on_delta| client.stream_message(message, on_delta))
+}
+
+fn print_streamed_conversation(
+    client: &ChatGptClient,
+    conversation: &[ConversationMessage],
+) -> Result<String> {
+    print_streamed_response(|on_delta| client.stream_conversation(conversation, on_delta))
+}
+
+fn print_streamed_response(
+    send: impl FnOnce(&mut dyn FnMut(&str) -> Result<()>) -> Result<String>,
+) -> Result<String> {
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Assistant: ").context("failed to write assistant prompt")?;
+    stdout.flush().context("failed to flush assistant prompt")?;
+
+    let mut on_delta = |delta: &str| {
+        stdout
+            .write_all(delta.as_bytes())
+            .context("failed to write assistant response")?;
+        stdout.flush().context("failed to flush assistant response")
+    };
+    let response = send(&mut on_delta);
+    writeln!(stdout).context("failed to finish assistant response")?;
+    response
 }
 
 fn read_prompt() -> Result<Option<String>> {
