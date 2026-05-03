@@ -4,6 +4,8 @@
 
 When making changes, always validate all implemented functionality before finishing. Run the relevant automated checks and any live or end-to-end validation needed to prove the changed behavior works.
 
+When implementation changes affect behavior, configuration, architecture, commands, or operational expectations, update all relevant documentation before finishing.
+
 Write concise, correct code. Follow DRY and YAGNI principles: avoid duplication, avoid speculative abstractions, and keep the implementation as small as the current behavior allows.
 
 Always create concise, atomic commits for changes made.
