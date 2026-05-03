@@ -6,6 +6,8 @@ When making changes, always validate all implemented functionality before finish
 
 Write concise, correct code. Follow DRY and YAGNI principles: avoid duplication, avoid speculative abstractions, and keep the implementation as small as the current behavior allows.
 
+Always create concise, atomic commits for changes made.
+
 Use [RUST-GUIDELINES.md](RUST-GUIDELINES.md) as the Rust design and style guide for this repository.
 
 Run the application from the repository root:
