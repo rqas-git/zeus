@@ -9,22 +9,29 @@ specific backend provider.
 1. `ChatGptClient::new` builds one reusable async `reqwest::Client`.
 2. `stream_conversation` receives a borrowed prompt window, model-visible tool
    specs, `SessionId`, and selected model.
-3. The request is serialized from typed borrowed structs, including prior
+3. `AuthManager` returns fresh ChatGPT credentials, refreshing stored tokens
+   when the access token is expired, near expiry, or due for rotation.
+4. The request is serialized from typed borrowed structs, including prior
    `function_call` and `function_call_output` items.
-4. The response body is parsed as SSE with a small chunk parser.
-5. Assistant text deltas are forwarded immediately through the callback.
-6. Completed `function_call` output items are captured as raw-argument tool
+5. If the backend returns `401 Unauthorized`, the client refreshes credentials
+   once and rebuilds the same typed request for a single retry.
+6. The response body is parsed as SSE with a small chunk parser.
+7. Assistant text deltas are forwarded immediately through the callback.
+8. Completed `function_call` output items are captured as raw-argument tool
    calls for the session loop to execute.
-7. Completed response metadata is parsed from the terminal SSE event only when
+9. Completed response metadata is parsed from the terminal SSE event only when
    cache telemetry is enabled for the client.
-8. Assistant text, tool calls, and cache-health telemetry are returned to the
+10. Assistant text, tool calls, and cache-health telemetry are returned to the
    session loop.
 
 ## Responsibilities
 
 - `ClientConfig` supplies endpoint, instructions, headers, and timeout.
 - `AgentService` supplies the selected model for each request.
-- `ChatGptClient` authenticates with Codex OAuth credentials.
+- `AuthManager` owns rust-agent auth storage, device-code login, refresh, logout,
+  and short-lived credentials for model calls.
+- `ChatGptClient` adds bearer and `ChatGPT-Account-ID` headers from fresh
+  credentials for each backend request.
 - The typed request structs shape Responses API payloads.
 - `AssistantText` accumulates streamed text, handles fallback completed items,
   captures completed function calls, and captures response id plus token usage
@@ -33,6 +40,10 @@ specific backend provider.
 ## Performance Notes
 
 - Async HTTP avoids blocking backend request workers.
+- The long-lived model HTTP client is reused; auth has a separate long-lived
+  HTTP client so token requests do not rebuild transport state.
+- Access tokens are read fresh per request, while refresh is serialized by a
+  small async mutex to avoid concurrent token file rewrites.
 - Typed request serialization avoids constructing a generic JSON tree first.
 - Tool specs and structured transcript items serialize directly from typed
   borrowed data.
@@ -60,6 +71,7 @@ min, median, max, and throughput statistics.
 
 ## Current Scope
 
-The client does not yet support request cancellation, retries, websocket
+The client does not yet support request cancellation, general retries, websocket
 transport, provider failover, remote compaction, or provider-specific tool
-repair.
+repair. The only transport retry is the targeted one-shot auth refresh after a
+`401 Unauthorized` response.

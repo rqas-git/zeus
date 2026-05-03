@@ -37,18 +37,25 @@ Then type messages after the `You:` prompt. The interactive session keeps recent
 
 ## Authentication
 
-The application expects a valid Codex login at `~/.codex/auth.json`.
+The application owns its ChatGPT login state at `~/.rust-agent/auth.json` by default.
+Set `RUST_AGENT_HOME` to use a different auth directory.
 
 Check login status with:
 
 ```bash
-codex login status
+cargo run -- login status
 ```
 
 If authentication is missing or expired, run:
 
 ```bash
-codex login
+cargo run -- login --device-code
+```
+
+To remove local auth and revoke the refresh token when possible, run:
+
+```bash
+cargo run -- logout
 ```
 
 ## Release Binary

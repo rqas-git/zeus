@@ -6,7 +6,8 @@ can submit work without rebuilding transport state for every request.
 
 ## Flow
 
-1. Startup creates `ChatGptClient` once and passes it to `AgentService`.
+1. Startup creates `AuthManager` and `ChatGptClient` once, then passes the
+   client to `AgentService`.
 2. Each request supplies a `SessionId` and user message or session model update.
 3. `AgentService` validates model updates against `ModelConfig`.
 4. `AgentService` finds or creates the matching session handle.
@@ -20,6 +21,7 @@ can submit work without rebuilding transport state for every request.
 ## Responsibilities
 
 - `AgentService` owns the warm model client.
+- Auth is handled inside the model client and stays outside session state.
 - `AgentService` owns in-memory session lookup by `SessionId`.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` serializes work per session without serializing unrelated

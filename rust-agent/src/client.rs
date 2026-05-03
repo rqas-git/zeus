@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use memchr::memchr;
 use reqwest::header;
 use reqwest::Client;
+use reqwest::StatusCode;
 use serde::ser::SerializeSeq;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -22,7 +23,8 @@ use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::ModelToolCall;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
-use crate::auth::CodexAuth;
+use crate::auth::AuthCredentials;
+use crate::auth::AuthManager;
 use crate::config::ClientConfig;
 use crate::tools::ToolSpec;
 
@@ -109,9 +111,9 @@ pub(crate) enum ConversationRole {
     Assistant,
 }
 
-/// Async client for ChatGPT requests through Codex OAuth.
+/// Async client for ChatGPT requests through rust-agent auth.
 pub(crate) struct ChatGptClient {
-    auth: CodexAuth,
+    auth: AuthManager,
     config: ClientConfig,
     http: Client,
     collect_cache_telemetry: bool,
@@ -123,7 +125,7 @@ impl ChatGptClient {
     /// # Errors
     /// Returns an error if the HTTP client cannot be constructed.
     pub(crate) fn new(
-        auth: CodexAuth,
+        auth: AuthManager,
         config: ClientConfig,
         collect_cache_telemetry: bool,
     ) -> Result<Self> {
@@ -138,6 +140,24 @@ impl ChatGptClient {
             http,
             collect_cache_telemetry,
         })
+    }
+
+    async fn send_responses_request<'a>(
+        &'a self,
+        body: &'a ResponsesRequest<'a>,
+        credentials: &AuthCredentials,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(self.config.responses_url())
+            .bearer_auth(credentials.access_token())
+            .header("ChatGPT-Account-ID", credentials.account_id())
+            .header("originator", self.config.originator())
+            .header("version", self.config.version())
+            .header(header::ACCEPT, "text/event-stream")
+            .json(body)
+            .send()
+            .await
+            .context("failed to send request to ChatGPT Codex backend")
     }
 }
 
@@ -157,31 +177,24 @@ impl ModelStreamer for ChatGptClient {
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
         let stable_prefix = stable_prefix_stats(self.config.instructions(), tools);
         let input_bytes = conversation_input_bytes(messages);
-        let response = {
-            let body = ResponsesRequest {
-                model,
-                instructions: self.config.instructions(),
-                input: responses_input(messages),
-                tools,
-                tool_choice: "auto",
-                parallel_tool_calls,
-                store: false,
-                stream: true,
-                prompt_cache_key: &prompt_cache_key,
-            };
-
-            self.http
-                .post(self.config.responses_url())
-                .bearer_auth(self.auth.access_token())
-                .header("ChatGPT-Account-ID", self.auth.account_id())
-                .header("originator", self.config.originator())
-                .header("version", self.config.version())
-                .header(header::ACCEPT, "text/event-stream")
-                .json(&body)
-                .send()
-                .await
-                .context("failed to send request to ChatGPT Codex backend")?
+        let body = ResponsesRequest {
+            model,
+            instructions: self.config.instructions(),
+            input: responses_input(messages),
+            tools,
+            tool_choice: "auto",
+            parallel_tool_calls,
+            store: false,
+            stream: true,
+            prompt_cache_key: &prompt_cache_key,
         };
+        let credentials = self.auth.credentials().await?;
+        let mut response = self.send_responses_request(&body, &credentials).await?;
+
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let credentials = self.auth.refresh().await?;
+            response = self.send_responses_request(&body, &credentials).await?;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -786,9 +799,17 @@ struct StreamEvent<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use serde_json::json;
+    use std::path::Path;
+    use std::path::PathBuf;
     use std::time::Duration;
     use std::time::Instant;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    use crate::test_http::TestResponse;
+    use crate::test_http::TestServer;
 
     #[test]
     fn serializes_conversation_history() {
@@ -999,6 +1020,90 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         assert_ne!(first.hash, second.hash);
     }
 
+    #[tokio::test]
+    async fn retries_once_with_refreshed_credentials_after_unauthorized() {
+        let auth_path = temp_auth_file("client-retry");
+        let old_access = access_token(now_unix() + 600);
+        let new_access = access_token(now_unix() + 900);
+        write_auth_file(&auth_path, "account-old", &old_access, "refresh-old");
+        let auth_server = TestServer::new(vec![TestResponse::json(
+            200,
+            serde_json::json!({
+                "id_token": id_token("account-new"),
+                "access_token": new_access,
+                "refresh_token": "refresh-new"
+            })
+            .to_string(),
+        )]);
+        let model_server = TestServer::new(vec![
+            TestResponse::json(401, r#"{"error":"expired"}"#),
+            TestResponse::sse(
+                200,
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+                 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            ),
+        ]);
+        let auth = AuthManager::for_test(auth_path.clone(), auth_server.url()).unwrap();
+        let client = ChatGptClient::new(
+            auth,
+            ClientConfig::new(
+                "instructions",
+                format!("{}/responses", model_server.url()),
+                "originator",
+                "version",
+                Duration::from_secs(5),
+                "retry-test",
+            ),
+            false,
+        )
+        .unwrap();
+        let messages = [ConversationMessage::user("hello")];
+        let mut deltas = String::new();
+
+        let response = client
+            .stream_conversation(
+                &messages,
+                &[],
+                true,
+                SessionId::new(7),
+                "gpt-test",
+                &mut |delta| {
+                    deltas.push_str(delta);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "ok");
+        assert_eq!(deltas, "ok");
+        let model_requests = model_server.requests();
+        assert_eq!(model_requests.len(), 2);
+        assert_eq!(model_requests[0].path, "/responses");
+        assert_eq!(model_requests[1].path, "/responses");
+        assert!(model_requests[0]
+            .headers
+            .contains(&format!("Bearer {old_access}")));
+        assert!(model_requests[0]
+            .headers
+            .to_ascii_lowercase()
+            .contains("chatgpt-account-id: account-old"));
+        assert!(model_requests[1]
+            .headers
+            .contains(&format!("Bearer {new_access}")));
+        assert!(model_requests[1]
+            .headers
+            .to_ascii_lowercase()
+            .contains("chatgpt-account-id: account-new"));
+        let auth_requests = auth_server.requests();
+        assert_eq!(auth_requests[0].path, "/oauth/token");
+        assert!(auth_requests[0]
+            .body
+            .contains(r#""refresh_token":"refresh-old""#));
+
+        remove_parent(&auth_path);
+    }
+
     #[test]
     #[ignore = "release-mode SSE parser benchmark; run explicitly with --ignored --nocapture"]
     fn benchmark_sse_parser_large_stream() {
@@ -1070,5 +1175,64 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
     fn duration_ms(duration: Duration) -> f64 {
         duration.as_secs_f64() * 1_000.0
+    }
+
+    fn now_unix() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn write_auth_file(path: &Path, account_id: &str, access_token: &str, refresh_token: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let auth_file = serde_json::json!({
+            "tokens": {
+                "id_token": id_token(account_id),
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id
+            },
+            "last_refresh_unix": now_unix()
+        });
+        std::fs::write(path, serde_json::to_vec(&auth_file).unwrap()).unwrap();
+    }
+
+    fn id_token(account_id: &str) -> String {
+        jwt(&serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id
+            }
+        }))
+    }
+
+    fn access_token(exp: u64) -> String {
+        jwt(&serde_json::json!({ "exp": exp }))
+    }
+
+    fn jwt(payload: &serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).unwrap());
+        format!("{header}.{payload}.signature")
+    }
+
+    fn temp_auth_file(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "rust-agent-client-{name}-{}-{unique}",
+                std::process::id()
+            ))
+            .join("auth.json")
+    }
+
+    fn remove_parent(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }

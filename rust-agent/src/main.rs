@@ -1,10 +1,12 @@
-//! Minimal terminal harness for chatting through Codex OAuth.
+//! Minimal terminal harness for chatting through rust-agent auth.
 
 mod agent_loop;
 mod auth;
 mod client;
 mod config;
 mod service;
+#[cfg(test)]
+mod test_http;
 mod tools;
 
 use std::io;
@@ -17,7 +19,8 @@ use agent_loop::SessionId;
 use agent_loop::TokenUsage;
 use anyhow::Context;
 use anyhow::Result;
-use auth::CodexAuth;
+use auth::AuthManager;
+use auth::AuthStatus;
 use client::ChatGptClient;
 use config::AppConfig;
 use mimalloc::MiMalloc;
@@ -28,6 +31,16 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    match parse_cli_command(std::env::args().skip(1).collect())? {
+        CliCommand::Interactive => run_agent(None).await,
+        CliCommand::Prompt(message) => run_agent(Some(message)).await,
+        CliCommand::LoginDeviceCode => run_device_code_login().await,
+        CliCommand::LoginStatus => run_login_status().await,
+        CliCommand::Logout => run_logout().await,
+    }
+}
+
+async fn run_agent(message: Option<String>) -> Result<()> {
     let AppConfig {
         client,
         context,
@@ -35,30 +48,99 @@ async fn main() -> Result<()> {
         output,
         telemetry,
     } = AppConfig::from_env()?;
-    let auth = CodexAuth::load_default()?;
+    let auth = AuthManager::new_default()?;
     let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
     let service = AgentService::new(client, context, models);
     let session_id = SessionId::new(1);
 
-    let Some(message) = message_from_args() else {
-        return run_interactive_loop(&service, session_id, output, telemetry).await;
-    };
+    match message {
+        Some(message) => {
+            print_agent_response(&service, session_id, output, telemetry, message).await
+        }
+        None => run_interactive_loop(&service, session_id, output, telemetry).await,
+    }
+}
 
-    print_agent_response(&service, session_id, output, telemetry, message).await?;
+async fn run_device_code_login() -> Result<()> {
+    let auth = AuthManager::new_default()?;
+    let login = auth.start_device_login().await?;
+    println!("Open this URL and enter this code:");
+    println!("{}", login.verification_url());
+    println!("{}", login.user_code());
+    println!("Waiting for authorization...");
+    let credentials = auth.complete_device_login(login).await?;
+    println!("Logged in. account_id={}", credentials.account_id());
     Ok(())
 }
 
-fn message_from_args() -> Option<String> {
-    let mut args = std::env::args().skip(1);
-    let mut message = args.next()?;
-    for arg in args {
-        message.push(' ');
-        message.push_str(&arg);
+async fn run_login_status() -> Result<()> {
+    let auth = AuthManager::new_default()?;
+    match auth.status().await? {
+        AuthStatus::LoggedOut => {
+            println!("Not logged in. Run: rust-agent login --device-code");
+        }
+        AuthStatus::LoggedIn {
+            account_id,
+            expires_at_unix,
+        } => {
+            println!("Logged in. account_id={account_id} expires_at_unix={expires_at_unix}");
+        }
     }
-    if !message.trim().is_empty() {
-        Some(message)
+    Ok(())
+}
+
+async fn run_logout() -> Result<()> {
+    let auth = AuthManager::new_default()?;
+    let result = auth.logout().await?;
+    if let Some(error) = result.revoke_error() {
+        println!("Logged out locally. Token revoke failed: {error}");
+    } else if result.removed() {
+        println!("Logged out.");
     } else {
-        None
+        println!("Not logged in.");
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CliCommand {
+    Interactive,
+    Prompt(String),
+    LoginDeviceCode,
+    LoginStatus,
+    Logout,
+}
+
+fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
+    let Some(first) = args.first() else {
+        return Ok(CliCommand::Interactive);
+    };
+
+    match first.as_str() {
+        "login" => parse_login_command(&args[1..]),
+        "logout" => {
+            anyhow::ensure!(args.len() == 1, "usage: rust-agent logout");
+            Ok(CliCommand::Logout)
+        }
+        _ => {
+            let message = args.join(" ");
+            if message.trim().is_empty() {
+                Ok(CliCommand::Interactive)
+            } else {
+                Ok(CliCommand::Prompt(message))
+            }
+        }
+    }
+}
+
+fn parse_login_command(args: &[String]) -> Result<CliCommand> {
+    match args {
+        [] => Ok(CliCommand::LoginDeviceCode),
+        [device_code] if device_code == "--device-code" => Ok(CliCommand::LoginDeviceCode),
+        [status] if status == "status" || status == "--status" => Ok(CliCommand::LoginStatus),
+        _ => {
+            anyhow::bail!("usage: rust-agent login [--device-code|status]");
+        }
     }
 }
 
@@ -309,5 +391,36 @@ mod tests {
             parse_interactive_input("/help"),
             Some(InteractiveInput::Message("/help".to_string()))
         );
+    }
+
+    #[test]
+    fn parses_cli_commands() {
+        assert_eq!(parse_cli_command(vec![]).unwrap(), CliCommand::Interactive);
+        assert_eq!(
+            parse_cli_command(vec!["hello".to_string(), "world".to_string()]).unwrap(),
+            CliCommand::Prompt("hello world".to_string())
+        );
+        assert_eq!(
+            parse_cli_command(vec!["login".to_string()]).unwrap(),
+            CliCommand::LoginDeviceCode
+        );
+        assert_eq!(
+            parse_cli_command(vec!["login".to_string(), "--device-code".to_string()]).unwrap(),
+            CliCommand::LoginDeviceCode
+        );
+        assert_eq!(
+            parse_cli_command(vec!["login".to_string(), "status".to_string()]).unwrap(),
+            CliCommand::LoginStatus
+        );
+        assert_eq!(
+            parse_cli_command(vec!["login".to_string(), "--status".to_string()]).unwrap(),
+            CliCommand::LoginStatus
+        );
+        assert_eq!(
+            parse_cli_command(vec!["logout".to_string()]).unwrap(),
+            CliCommand::Logout
+        );
+        assert!(parse_cli_command(vec!["logout".to_string(), "now".to_string()]).is_err());
+        assert!(parse_cli_command(vec!["login".to_string(), "bad".to_string()]).is_err());
     }
 }

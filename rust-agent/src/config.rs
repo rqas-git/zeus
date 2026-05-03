@@ -77,6 +77,26 @@ impl ClientConfig {
         })
     }
 
+    /// Creates client configuration with explicit values.
+    #[cfg(test)]
+    pub(crate) fn new(
+        instructions: impl Into<String>,
+        responses_url: impl Into<String>,
+        originator: impl Into<String>,
+        version: impl Into<String>,
+        request_timeout: Duration,
+        prompt_cache_namespace: impl Into<String>,
+    ) -> Self {
+        Self {
+            instructions: instructions.into(),
+            responses_url: responses_url.into(),
+            originator: originator.into(),
+            version: version.into(),
+            request_timeout,
+            prompt_cache_namespace: prompt_cache_namespace.into(),
+        }
+    }
+
     /// Returns the configured assistant instructions.
     pub(crate) fn instructions(&self) -> &str {
         &self.instructions

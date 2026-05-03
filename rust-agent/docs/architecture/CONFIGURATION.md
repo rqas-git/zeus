@@ -21,6 +21,7 @@ into client, model, context-window, output, and telemetry configuration.
 - `RUST_AGENT_RESPONSES_URL`
 - `RUST_AGENT_ORIGINATOR`
 - `RUST_AGENT_VERSION`
+- `RUST_AGENT_HOME`
 - `RUST_AGENT_REQUEST_TIMEOUT_SECS`
 - `RUST_AGENT_PROMPT_CACHE_NAMESPACE`
 - `RUST_AGENT_CONTEXT_MAX_MESSAGES`
@@ -45,8 +46,11 @@ into client, model, context-window, output, and telemetry configuration.
 - Prompt, history, and output limits are plain copyable values.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
+- `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,
+  rust-agent uses `~/.rust-agent/auth.json`.
 
 ## Current Scope
 
-Configuration is environment-only. File config, dynamic reload, and per-request
-overrides should be added only when endpoint behavior requires them.
+Configuration is environment-only. Auth tokens are stored separately in
+`auth.json`. File config, dynamic reload, and per-request overrides should be
+added only when endpoint behavior requires them.
