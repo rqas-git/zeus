@@ -81,161 +81,107 @@ const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+const READ_FILE_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: READ_FILE_TOOL,
+    description: "Read a UTF-8 text file from the current workspace.",
+    parameters: ToolParameters::Path {
+        description: "Workspace-relative path to the file to read.",
+    },
+    supports_parallel: true,
+};
+const READ_FILE_RANGE_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: READ_FILE_RANGE_TOOL,
+    description: "Read a byte range from a UTF-8 text file in the current workspace.",
+    parameters: ToolParameters::ReadFileRange,
+    supports_parallel: true,
+};
+const LIST_DIR_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: LIST_DIR_TOOL,
+    description: "List files and directories under a workspace directory.",
+    parameters: ToolParameters::Path {
+        description: "Workspace-relative directory path. Use . for the workspace root.",
+    },
+    supports_parallel: true,
+};
+const SEARCH_FILES_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: SEARCH_FILES_TOOL,
+    description: "Fuzzy-search indexed workspace files and directories by path.",
+    parameters: ToolParameters::SearchFiles,
+    supports_parallel: false,
+};
+const SEARCH_TEXT_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: SEARCH_TEXT_TOOL,
+    description: "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
+    parameters: ToolParameters::SearchText,
+    supports_parallel: false,
+};
+const APPLY_PATCH_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: APPLY_PATCH_TOOL,
+    description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
+    parameters: ToolParameters::ApplyPatch,
+    supports_parallel: false,
+};
+const EXEC_COMMAND_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: EXEC_COMMAND_TOOL,
+    description:
+        "Execute a non-git shell command from the workspace root and return bounded output.",
+    parameters: ToolParameters::ExecCommand,
+    supports_parallel: false,
+};
+const GIT_STATUS_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_STATUS_TOOL,
+    description: "Show concise git worktree status for the workspace repository.",
+    parameters: ToolParameters::NoArgs,
+    supports_parallel: false,
+};
+const GIT_DIFF_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_DIFF_TOOL,
+    description: "Show bounded git diff output for unstaged or staged workspace changes.",
+    parameters: ToolParameters::GitDiff,
+    supports_parallel: false,
+};
+const GIT_LOG_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_LOG_TOOL,
+    description: "Show recent git commits for the workspace repository.",
+    parameters: ToolParameters::GitLog,
+    supports_parallel: false,
+};
+const GIT_COMMIT_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_COMMIT_TOOL,
+    description: "Create an atomic git commit for explicit workspace-relative paths.",
+    parameters: ToolParameters::GitCommit,
+    supports_parallel: false,
+};
+
 const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
-    ToolSpec {
-        name: READ_FILE_TOOL,
-        description: "Read a UTF-8 text file from the current workspace.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative path to the file to read.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: READ_FILE_RANGE_TOOL,
-        description: "Read a byte range from a UTF-8 text file in the current workspace.",
-        parameters: ToolParameters::ReadFileRange,
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: LIST_DIR_TOOL,
-        description: "List files and directories under a workspace directory.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative directory path. Use . for the workspace root.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: SEARCH_FILES_TOOL,
-        description: "Fuzzy-search indexed workspace files and directories by path.",
-        parameters: ToolParameters::SearchFiles,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: SEARCH_TEXT_TOOL,
-        description:
-            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
-        parameters: ToolParameters::SearchText,
-        supports_parallel: false,
-    },
+    READ_FILE_TOOL_SPEC,
+    READ_FILE_RANGE_TOOL_SPEC,
+    LIST_DIR_TOOL_SPEC,
+    SEARCH_FILES_TOOL_SPEC,
+    SEARCH_TEXT_TOOL_SPEC,
 ];
 
 const WORKSPACE_WRITE_TOOL_SPECS: &[ToolSpec] = &[
-    ToolSpec {
-        name: READ_FILE_TOOL,
-        description: "Read a UTF-8 text file from the current workspace.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative path to the file to read.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: READ_FILE_RANGE_TOOL,
-        description: "Read a byte range from a UTF-8 text file in the current workspace.",
-        parameters: ToolParameters::ReadFileRange,
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: LIST_DIR_TOOL,
-        description: "List files and directories under a workspace directory.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative directory path. Use . for the workspace root.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: SEARCH_FILES_TOOL,
-        description: "Fuzzy-search indexed workspace files and directories by path.",
-        parameters: ToolParameters::SearchFiles,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: SEARCH_TEXT_TOOL,
-        description:
-            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
-        parameters: ToolParameters::SearchText,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: APPLY_PATCH_TOOL,
-        description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
-        parameters: ToolParameters::ApplyPatch,
-        supports_parallel: false,
-    },
+    READ_FILE_TOOL_SPEC,
+    READ_FILE_RANGE_TOOL_SPEC,
+    LIST_DIR_TOOL_SPEC,
+    SEARCH_FILES_TOOL_SPEC,
+    SEARCH_TEXT_TOOL_SPEC,
+    APPLY_PATCH_TOOL_SPEC,
 ];
 
 const WORKSPACE_EXEC_TOOL_SPECS: &[ToolSpec] = &[
-    ToolSpec {
-        name: READ_FILE_TOOL,
-        description: "Read a UTF-8 text file from the current workspace.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative path to the file to read.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: READ_FILE_RANGE_TOOL,
-        description: "Read a byte range from a UTF-8 text file in the current workspace.",
-        parameters: ToolParameters::ReadFileRange,
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: LIST_DIR_TOOL,
-        description: "List files and directories under a workspace directory.",
-        parameters: ToolParameters::Path {
-            description: "Workspace-relative directory path. Use . for the workspace root.",
-        },
-        supports_parallel: true,
-    },
-    ToolSpec {
-        name: SEARCH_FILES_TOOL,
-        description: "Fuzzy-search indexed workspace files and directories by path.",
-        parameters: ToolParameters::SearchFiles,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: SEARCH_TEXT_TOOL,
-        description:
-            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
-        parameters: ToolParameters::SearchText,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: APPLY_PATCH_TOOL,
-        description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
-        parameters: ToolParameters::ApplyPatch,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: EXEC_COMMAND_TOOL,
-        description:
-            "Execute a non-git shell command from the workspace root and return bounded output.",
-        parameters: ToolParameters::ExecCommand,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: GIT_STATUS_TOOL,
-        description: "Show concise git worktree status for the workspace repository.",
-        parameters: ToolParameters::NoArgs,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: GIT_DIFF_TOOL,
-        description: "Show bounded git diff output for unstaged or staged workspace changes.",
-        parameters: ToolParameters::GitDiff,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: GIT_LOG_TOOL,
-        description: "Show recent git commits for the workspace repository.",
-        parameters: ToolParameters::GitLog,
-        supports_parallel: false,
-    },
-    ToolSpec {
-        name: GIT_COMMIT_TOOL,
-        description: "Create an atomic git commit for explicit workspace-relative paths.",
-        parameters: ToolParameters::GitCommit,
-        supports_parallel: false,
-    },
+    READ_FILE_TOOL_SPEC,
+    READ_FILE_RANGE_TOOL_SPEC,
+    LIST_DIR_TOOL_SPEC,
+    SEARCH_FILES_TOOL_SPEC,
+    SEARCH_TEXT_TOOL_SPEC,
+    APPLY_PATCH_TOOL_SPEC,
+    EXEC_COMMAND_TOOL_SPEC,
+    GIT_STATUS_TOOL_SPEC,
+    GIT_DIFF_TOOL_SPEC,
+    GIT_LOG_TOOL_SPEC,
+    GIT_COMMIT_TOOL_SPEC,
 ];
 
 /// Permission set controlling which built-in tools are exposed and executable.
