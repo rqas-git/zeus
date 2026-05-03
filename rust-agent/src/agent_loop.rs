@@ -1205,6 +1205,69 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "release-mode large tool round benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_tool_round_large_outputs() {
+        const TOOL_CALLS: usize = 24;
+        const FILE_BYTES: usize = 64 * 1024;
+        const SAMPLES: usize = 10;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-loop-large-tools-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("large.txt"), "x".repeat(FILE_BYTES)).unwrap();
+
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::ReadOnly);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut stored_messages = 0usize;
+        let mut stored_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let mut agent = AgentLoop::with_context_window_and_tools(
+                SessionId::new(7),
+                ContextWindowConfig::with_history_limits(
+                    200,
+                    4 * 1024 * 1024,
+                    200,
+                    4 * 1024 * 1024,
+                ),
+                SessionConfig::new("test-model"),
+                tools.clone(),
+            );
+            let streamer = LargeReadToolStreamer {
+                turn: AtomicUsize::new(0),
+                calls: TOOL_CALLS,
+            };
+
+            let started = Instant::now();
+            agent
+                .submit_user_message("read large files", &streamer, |_| Ok(()))
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+
+            stored_messages = agent.messages().len();
+            stored_bytes = agent.messages().iter().map(AgentMessage::input_bytes).sum();
+            std::hint::black_box(agent.messages());
+            samples.push(elapsed);
+        }
+
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        let tool_output_bytes = TOOL_CALLS * FILE_BYTES;
+        println!(
+            "tool_round_large_outputs calls={TOOL_CALLS} file_bytes={FILE_BYTES} tool_output_bytes={tool_output_bytes} stored_messages={stored_messages} stored_bytes={stored_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
     async fn emits_cache_health_status_for_model_responses() {
         let mut agent = AgentLoop::new(SessionId::new(7));
         let streamer = CacheStreamer {
@@ -1764,6 +1827,44 @@ mod tests {
 
     struct ToolLoopStreamer {
         turn: AtomicUsize,
+    }
+
+    struct LargeReadToolStreamer {
+        turn: AtomicUsize,
+        calls: usize,
+    }
+
+    impl ModelStreamer for LargeReadToolStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => {
+                    assert!(!tools.is_empty());
+                    assert!(parallel_tool_calls);
+                    assert_eq!(messages, &[ConversationMessage::user("read large files")]);
+                    let tool_calls = (0..self.calls).map(|index| ModelToolCall {
+                        item_id: Some(format!("fc_read_{index}")),
+                        call_id: format!("call_read_{index}"),
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"large.txt"}"#.to_string(),
+                    });
+                    Ok(ModelResponse::with_tool_calls("", tool_calls))
+                }
+                1 => {
+                    assert_eq!(messages.len(), 1 + self.calls * 2);
+                    Ok(ModelResponse::new("done"))
+                }
+                _ => unreachable!("unexpected turn"),
+            }
+        }
     }
 
     impl ModelStreamer for ToolLoopStreamer {

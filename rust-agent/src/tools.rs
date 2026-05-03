@@ -2804,6 +2804,111 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "release-mode large directory benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_list_dir_large_directory() {
+        const FILES: usize = 10_000;
+        const SAMPLES: usize = 10;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-list-bench-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        for index in 0..FILES {
+            fs::write(temp.join(format!("file-{index:05}.txt")), "").unwrap();
+        }
+        let registry = ToolRegistry::for_root(&temp);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let list = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_list".to_string(),
+                    name: LIST_DIR_TOOL.to_string(),
+                    arguments: r#"{"path":"."}"#.to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(list.success, "{}", list.output);
+            assert!(list.output.contains("[truncated"), "{}", list.output);
+            output_bytes = list.output.len();
+            std::hint::black_box(&list.output);
+            samples.push(elapsed);
+        }
+
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "list_dir_large_directory files={FILES} output_bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "release-mode command output benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_exec_command_large_output() {
+        const COMMAND_BYTES: usize = 8 * 1024 * 1024;
+        const SAMPLES: usize = 10;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-command-bench-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+        let mut successes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let command = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_exec".to_string(),
+                    name: EXEC_COMMAND_TOOL.to_string(),
+                    arguments: json!({
+                        "command": format!("yes x | head -c {COMMAND_BYTES}"),
+                        "timeout_ms": 30_000,
+                        "max_output_bytes": DEFAULT_COMMAND_OUTPUT_BYTES,
+                    })
+                    .to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            if command.success {
+                successes += 1;
+            }
+            assert!(command.output.contains("stdout"), "{}", command.output);
+            output_bytes = command.output.len();
+            std::hint::black_box(&command.output);
+            samples.push(elapsed);
+        }
+
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "exec_command_large_output command_bytes={COMMAND_BYTES} retained_output_bytes={output_bytes} successes={successes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "release-mode FFF search benchmark; run explicitly with --ignored --nocapture"]
     async fn benchmark_fff_search_current_repo() {
         const SAMPLES: usize = 15;
@@ -2882,6 +2987,115 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "release-mode text search output benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_search_text_large_line_output() {
+        const LINE_BYTES: usize = 1024 * 1024;
+        const SAMPLES: usize = 10;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-search-output-bench-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("large-line.txt"),
+            format!("needle {}\n", "x".repeat(LINE_BYTES)),
+        )
+        .unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        registry
+            .spawn_search_index_warmup()
+            .await
+            .expect("index warmup task should not panic")
+            .expect("index warmup should succeed");
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let search = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_search_text".to_string(),
+                    name: SEARCH_TEXT_TOOL.to_string(),
+                    arguments: r#"{"query":"needle","limit":1}"#.to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(search.success, "{}", search.output);
+            assert!(search.output.contains("needle"), "{}", search.output);
+            output_bytes = search.output.len();
+            std::hint::black_box(&search.output);
+            samples.push(elapsed);
+        }
+
+        drop(registry);
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "search_text_large_line_output line_bytes={LINE_BYTES} output_bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "release-mode patch planning benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_apply_patch_many_large_files() {
+        const FILES: usize = 24;
+        const FILE_BYTES: usize = 128 * 1024;
+        const SAMPLES: usize = 8;
+
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let changed_bytes = FILES * FILE_BYTES;
+        for sample in 0..SAMPLES {
+            let temp = std::env::temp_dir().join(format!(
+                "rust-agent-tools-patch-bench-{}-{}-{sample}",
+                std::process::id(),
+                unique_nanos()
+            ));
+            let _ = fs::remove_dir_all(&temp);
+            fs::create_dir_all(&temp).unwrap();
+            for index in 0..FILES {
+                let content = format!("old-{index}\n{}", "x".repeat(FILE_BYTES - 16));
+                fs::write(temp.join(format!("file-{index:02}.txt")), content).unwrap();
+            }
+
+            let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+            let patch = patch_many_large_files(FILES);
+            let started = Instant::now();
+            let result = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_patch".to_string(),
+                    name: APPLY_PATCH_TOOL.to_string(),
+                    arguments: json!({ "patch": patch }).to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(result.success, "{}", result.output);
+            std::hint::black_box(&result.output);
+            samples.push(elapsed);
+            fs::remove_dir_all(&temp).unwrap();
+        }
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "apply_patch_many_large_files files={FILES} file_bytes={FILE_BYTES} changed_bytes={changed_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_paths_that_escape_workspace() {
         let parent =
             std::env::temp_dir().join(format!("rust-agent-tools-parent-{}", std::process::id()));
@@ -2910,6 +3124,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+
+    fn patch_many_large_files(files: usize) -> String {
+        let mut patch = String::from("*** Begin Patch\n");
+        for index in 0..files {
+            patch.push_str(&format!("*** Update File: file-{index:02}.txt\n"));
+            patch.push_str("@@\n");
+            patch.push_str(&format!("-old-{index}\n"));
+            patch.push_str(&format!("+new-{index}\n"));
+        }
+        patch.push_str("*** End Patch\n");
+        patch
     }
 
     fn run_test_git<const N: usize>(cwd: &Path, args: [&str; N]) {
