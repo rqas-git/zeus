@@ -764,6 +764,8 @@ struct TurnRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use axum::body::to_bytes;
     use axum::http::Method;
     use axum::http::Request;
@@ -771,6 +773,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::agent_loop::ModelResponse;
+    use crate::bench_support::DurationSummary;
     use crate::client::ConversationMessage;
     use crate::config::ContextWindowConfig;
     use crate::config::ModelConfig;
@@ -892,6 +895,45 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&bytes).unwrap(),
             "event: server.connected\ndata: {\"type\":\"server_connected\",\"session_id\":42}\n\n"
+        );
+    }
+
+    #[test]
+    #[ignore = "release-mode SSE event encoding benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_sse_event_encoding() {
+        const EVENTS: usize = 100_000;
+        const SAMPLES: usize = 15;
+
+        let events = sample_server_events(EVENTS);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut encoded_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let mut bytes = 0usize;
+            for event in &events {
+                let encoded = encode_sse_bytes(event).expect("event should encode");
+                bytes = bytes.saturating_add(encoded.len());
+                std::hint::black_box(&encoded);
+            }
+            let elapsed = started.elapsed();
+
+            assert!(bytes > EVENTS * 32);
+            encoded_bytes = bytes;
+            samples.push(elapsed);
+        }
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        let events_per_s = EVENTS as f64 / summary.median.as_secs_f64();
+        let throughput_mib_s =
+            encoded_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        println!(
+            "sse_event_encoding events={EVENTS} bytes={encoded_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} events_per_s={:.0} throughput_mib_s={:.1}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+            events_per_s,
+            throughput_mib_s,
         );
     }
 
@@ -1080,6 +1122,40 @@ mod tests {
         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
             self.0.signature_verification_algorithms.supported_schemes()
         }
+    }
+
+    fn sample_server_events(count: usize) -> Vec<ServerEvent> {
+        let mut events = Vec::with_capacity(count);
+        for index in 0..count {
+            let session_id = (index % 32) as u64;
+            match index % 5 {
+                0 => events.push(ServerEvent::TextDelta {
+                    session_id,
+                    delta: "streamed benchmark token ".repeat(2),
+                }),
+                1 => events.push(ServerEvent::StatusChanged {
+                    session_id,
+                    status: "running",
+                }),
+                2 => events.push(ServerEvent::ToolCallStarted {
+                    session_id,
+                    tool_call_id: format!("call_{index}"),
+                    tool_name: "read_file".to_string(),
+                }),
+                3 => events.push(ServerEvent::ToolCallCompleted {
+                    session_id,
+                    tool_call_id: format!("call_{index}"),
+                    tool_name: "read_file".to_string(),
+                    success: true,
+                }),
+                _ => events.push(ServerEvent::MessageCompleted {
+                    session_id,
+                    role: "assistant",
+                    text: format!("Benchmark message {index} completed."),
+                }),
+            }
+        }
+        events
     }
 
     struct StaticStreamer<const N: usize> {
