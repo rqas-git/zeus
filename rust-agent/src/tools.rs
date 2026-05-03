@@ -1,19 +1,27 @@
 //! Built-in tool registry and execution.
 
-use std::fs as sync_fs;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use globset::Glob;
-use globset::GlobSet;
-use globset::GlobSetBuilder;
-use ignore::WalkBuilder;
-use regex::Regex;
+use fff_search::file_picker::FilePicker;
+use fff_search::grep::parse_grep_query;
+use fff_search::grep::GrepMode;
+use fff_search::grep::GrepSearchOptions;
+use fff_search::FFFMode;
+use fff_search::FilePickerOptions;
+use fff_search::FuzzySearchOptions;
+use fff_search::MixedItemRef;
+use fff_search::PaginationArgs;
+use fff_search::QueryParser;
+use fff_search::SharedFrecency;
+use fff_search::SharedPicker;
+use fff_search::SharedQueryTracker;
 use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -36,8 +44,9 @@ const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
+const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
-const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
@@ -58,13 +67,14 @@ const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: SEARCH_FILES_TOOL,
-        description: "Fuzzy-search workspace files and directories by path.",
+        description: "Fuzzy-search indexed workspace files and directories by path.",
         parameters: ToolParameters::SearchFiles,
         supports_parallel: false,
     },
     ToolSpec {
         name: SEARCH_TEXT_TOOL,
-        description: "Search workspace file contents with literal, regex, or fuzzy matching.",
+        description:
+            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
         parameters: ToolParameters::SearchText,
         supports_parallel: false,
     },
@@ -89,13 +99,14 @@ const WORKSPACE_WRITE_TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: SEARCH_FILES_TOOL,
-        description: "Fuzzy-search workspace files and directories by path.",
+        description: "Fuzzy-search indexed workspace files and directories by path.",
         parameters: ToolParameters::SearchFiles,
         supports_parallel: false,
     },
     ToolSpec {
         name: SEARCH_TEXT_TOOL,
-        description: "Search workspace file contents with literal, regex, or fuzzy matching.",
+        description:
+            "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
         parameters: ToolParameters::SearchText,
         supports_parallel: false,
     },
@@ -333,7 +344,7 @@ impl Serialize for SearchTextProperties {
         map.serialize_entry(
             "query",
             &StringProperty {
-                description: "Text query. Glob path constraints like src/*.rs may be included.",
+                description: "Text query. Path constraints like src/*.rs may be included.",
             },
         )?;
         map.serialize_entry(
@@ -401,7 +412,7 @@ impl Serialize for ApplyPatchProperties {
 pub(crate) struct ToolRegistry {
     policy: ToolPolicy,
     root: Arc<PathBuf>,
-    search: WorkspaceSearchIndex,
+    search: FffSearchIndex,
 }
 
 impl Default for ToolRegistry {
@@ -429,12 +440,12 @@ impl ToolRegistry {
         let root = root.canonicalize().unwrap_or(root);
         Self {
             policy,
-            search: WorkspaceSearchIndex::new(root.clone()),
+            search: FffSearchIndex::new(root.clone()),
             root: Arc::new(root),
         }
     }
 
-    /// Initializes the workspace search snapshot on a blocking worker.
+    /// Initializes the FFF search index on a blocking worker.
     pub(crate) fn spawn_search_index_warmup(&self) -> tokio::task::JoinHandle<Result<()>> {
         let search = self.search.clone();
         tokio::task::spawn_blocking(move || search.warm())
@@ -552,12 +563,12 @@ struct ApplyPatchArguments {
 }
 
 #[derive(Clone, Debug)]
-struct WorkspaceSearchIndex {
+struct FffSearchIndex {
     root: Arc<PathBuf>,
-    state: Arc<Mutex<Option<WorkspaceSearchState>>>,
+    state: Arc<Mutex<Option<FffSearchState>>>,
 }
 
-impl WorkspaceSearchIndex {
+impl FffSearchIndex {
     fn new(root: PathBuf) -> Self {
         Self {
             root: Arc::new(root),
@@ -576,69 +587,62 @@ impl WorkspaceSearchIndex {
         let limit = bounded_limit(args.limit, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
         let offset = args.offset.unwrap_or(0).min(MAX_SEARCH_OFFSET);
         let state = self.ready_state()?;
-        let mut matches = state
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                Some(SearchFileMatch {
-                    relative: entry.relative.clone(),
-                    is_dir: entry.is_dir,
-                    score: score_path(query, entry)?,
-                })
-            })
-            .collect::<Vec<_>>();
-        let total_matched = matches.len();
-        matches.sort_by(|left, right| {
-            right
-                .score
-                .cmp(&left.score)
-                .then_with(|| left.relative.cmp(&right.relative))
-        });
-        let items = matches
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
+        let picker_guard = state.picker.read()?;
+        let picker = picker_guard
+            .as_ref()
+            .context("search index is not initialized")?;
+        let tracker_guard = state.query_tracker.read()?;
+        let parser = QueryParser::default();
+        let query = parser.parse(query);
+        let results = picker.fuzzy_search_mixed(
+            &query,
+            tracker_guard.as_ref(),
+            FuzzySearchOptions {
+                max_threads: 0,
+                current_file: None,
+                project_path: Some(&self.root),
+                pagination: PaginationArgs { offset, limit },
+                ..Default::default()
+            },
+        );
 
-        Ok(format_file_search_results(
-            &items,
-            &state,
-            total_matched,
-            offset,
-            limit,
-        ))
+        Ok(format_file_search_results(picker, &results, offset, limit))
     }
 
     fn search_text(&self, arguments: &str) -> Result<String> {
         let args = parse_search_text_arguments(arguments)?;
         let query = trimmed_required("query", &args.query)?;
         let limit = bounded_limit(args.limit, DEFAULT_SEARCH_RESULTS, MAX_SEARCH_RESULTS);
-        let file_offset = args.file_offset.unwrap_or(0).min(MAX_SEARCH_OFFSET);
-        let before_context = args.before_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES);
-        let after_context = args.after_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES);
         let state = self.ready_state()?;
-        let query = TextSearchQuery::parse(query)?;
-        let matcher = TextMatcher::new(parse_search_text_mode(args.mode.as_deref())?, &query.text)?;
-        let results = search_text_entries(
-            &state,
-            query.path_filter.as_ref(),
-            &matcher,
-            TextSearchOptions {
-                limit,
-                file_offset,
-                before_context,
-                after_context,
+        let picker_guard = state.picker.read()?;
+        let picker = picker_guard
+            .as_ref()
+            .context("search index is not initialized")?;
+        let query = parse_grep_query(query);
+        let results = picker.grep(
+            &query,
+            &GrepSearchOptions {
+                mode: parse_grep_mode(args.mode.as_deref())?,
+                page_limit: limit,
+                file_offset: args.file_offset.unwrap_or(0).min(MAX_SEARCH_OFFSET),
+                before_context: args.before_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES),
+                after_context: args.after_context.unwrap_or(0).min(MAX_TEXT_CONTEXT_LINES),
+                time_budget_ms: DEFAULT_TEXT_SEARCH_TIMEOUT_MS,
+                trim_whitespace: false,
+                ..Default::default()
             },
         );
 
-        Ok(format_text_search_results(&results))
+        Ok(format_text_search_results(picker, &results))
     }
 
-    fn ready_state(&self) -> Result<WorkspaceSearchState> {
-        self.state()
+    fn ready_state(&self) -> Result<FffSearchState> {
+        let state = self.state()?;
+        state.wait_until_scanned();
+        Ok(state)
     }
 
-    fn state(&self) -> Result<WorkspaceSearchState> {
+    fn state(&self) -> Result<FffSearchState> {
         let mut state = self
             .state
             .lock()
@@ -647,192 +651,45 @@ impl WorkspaceSearchIndex {
             return Ok(state.clone());
         }
 
-        let initialized = WorkspaceSearchState::new(&self.root)?;
+        let initialized = FffSearchState::new(&self.root)?;
         *state = Some(initialized.clone());
         Ok(initialized)
     }
 }
 
 #[derive(Clone, Debug)]
-struct WorkspaceSearchState {
-    entries: Arc<Vec<SearchEntry>>,
-    total_files: usize,
-    total_dirs: usize,
+struct FffSearchState {
+    picker: SharedPicker,
+    query_tracker: SharedQueryTracker,
+    _frecency: SharedFrecency,
 }
 
-impl WorkspaceSearchState {
+impl FffSearchState {
     fn new(root: &Path) -> Result<Self> {
-        let mut entries = Vec::new();
-        let mut total_files = 0usize;
-        let mut total_dirs = 0usize;
-
-        for entry in WalkBuilder::new(root)
-            .standard_filters(true)
-            .follow_links(false)
-            .build()
-            .filter_map(std::result::Result::ok)
-        {
-            let path = entry.path();
-            if path == root {
-                continue;
-            }
-            let Some(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_file() && !file_type.is_dir() {
-                continue;
-            }
-
-            let relative = normalized_relative_path(root, path)?;
-            let is_dir = file_type.is_dir();
-            let size = if is_dir {
-                total_dirs += 1;
-                0
-            } else {
-                total_files += 1;
-                entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
-            };
-            entries.push(SearchEntry {
-                relative,
-                full_path: path.to_path_buf(),
-                is_dir,
-                size,
-            });
-        }
-
-        entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+        let picker = SharedPicker::default();
+        let frecency = SharedFrecency::noop();
+        let query_tracker = SharedQueryTracker::noop();
+        FilePicker::new_with_shared_state(
+            picker.clone(),
+            frecency.clone(),
+            FilePickerOptions {
+                base_path: root.to_string_lossy().into_owned(),
+                mode: FFFMode::Ai,
+                watch: true,
+                ..Default::default()
+            },
+        )
+        .context("failed to initialize FFF search index")?;
         Ok(Self {
-            entries: Arc::new(entries),
-            total_files,
-            total_dirs,
+            picker,
+            query_tracker,
+            _frecency: frecency,
         })
     }
-}
 
-#[derive(Clone, Debug)]
-struct SearchEntry {
-    relative: String,
-    full_path: PathBuf,
-    is_dir: bool,
-    size: u64,
-}
-
-#[derive(Debug)]
-struct SearchFileMatch {
-    relative: String,
-    is_dir: bool,
-    score: i64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SearchTextMode {
-    Plain,
-    Regex,
-    Fuzzy,
-}
-
-struct TextSearchQuery {
-    text: String,
-    path_filter: Option<GlobSet>,
-}
-
-impl TextSearchQuery {
-    fn parse(query: &str) -> Result<Self> {
-        let mut text_parts = Vec::new();
-        let mut path_globs = Vec::new();
-        let parts = query.split_whitespace().collect::<Vec<_>>();
-
-        if parts.len() > 1 {
-            for part in parts {
-                if looks_like_path_glob(part) {
-                    path_globs.push(part);
-                } else {
-                    text_parts.push(part);
-                }
-            }
-        }
-
-        if text_parts.is_empty() {
-            return Ok(Self {
-                text: query.to_string(),
-                path_filter: None,
-            });
-        }
-
-        let has_path_globs = !path_globs.is_empty();
-        let mut builder = GlobSetBuilder::new();
-        for glob in path_globs {
-            builder.add(Glob::new(glob).with_context(|| format!("invalid path glob {glob:?}"))?);
-        }
-        let path_filter = if has_path_globs {
-            Some(
-                builder
-                    .build()
-                    .context("failed to build path glob filter")?,
-            )
-        } else {
-            None
-        };
-
-        Ok(Self {
-            text: text_parts.join(" "),
-            path_filter,
-        })
+    fn wait_until_scanned(&self) {
+        while !self.picker.wait_for_scan(FFF_SCAN_WAIT_POLL_INTERVAL) {}
     }
-}
-
-enum TextMatcher {
-    Plain(String),
-    Regex(Regex),
-    Fuzzy(String),
-}
-
-impl TextMatcher {
-    fn new(mode: SearchTextMode, query: &str) -> Result<Self> {
-        match mode {
-            SearchTextMode::Plain => Ok(Self::Plain(query.to_ascii_lowercase())),
-            SearchTextMode::Regex => Regex::new(query)
-                .map(Self::Regex)
-                .with_context(|| format!("invalid regex search query {query:?}")),
-            SearchTextMode::Fuzzy => Ok(Self::Fuzzy(query.to_ascii_lowercase())),
-        }
-    }
-
-    fn find_in_line(&self, line: &str) -> Option<usize> {
-        match self {
-            Self::Plain(query) => line.to_ascii_lowercase().find(query),
-            Self::Regex(regex) => regex.find(line).map(|matched| matched.start()),
-            Self::Fuzzy(query) => fuzzy_match_start(query, &line.to_ascii_lowercase()),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct TextSearchOptions {
-    limit: usize,
-    file_offset: usize,
-    before_context: usize,
-    after_context: usize,
-}
-
-#[derive(Debug)]
-struct TextSearchResults {
-    matches: Vec<TextSearchMatch>,
-    files_with_matches: usize,
-    searched_files: usize,
-    searchable_files: usize,
-    total_files: usize,
-    next_file_offset: usize,
-}
-
-#[derive(Debug)]
-struct TextSearchMatch {
-    relative: String,
-    line_number: usize,
-    col: usize,
-    line: String,
-    context_before: Vec<String>,
-    context_after: Vec<String>,
 }
 
 async fn read_file(root: &Path, arguments: &str) -> Result<String> {
@@ -1009,138 +866,79 @@ fn bounded_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
     limit.unwrap_or(default).clamp(1, max)
 }
 
-fn parse_search_text_mode(mode: Option<&str>) -> Result<SearchTextMode> {
+fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
     let mode = mode.map(str::trim).filter(|mode| !mode.is_empty());
     let mode = mode.map(str::to_ascii_lowercase);
     match mode.as_deref() {
-        None | Some("plain") | Some("literal") => Ok(SearchTextMode::Plain),
-        Some("regex") => Ok(SearchTextMode::Regex),
-        Some("fuzzy") => Ok(SearchTextMode::Fuzzy),
+        None | Some("plain") | Some("literal") => Ok(GrepMode::PlainText),
+        Some("regex") => Ok(GrepMode::Regex),
+        Some("fuzzy") => Ok(GrepMode::Fuzzy),
         Some(mode) => anyhow::bail!("unsupported search_text mode {mode:?}"),
     }
 }
 
 fn format_file_search_results(
-    items: &[SearchFileMatch],
-    state: &WorkspaceSearchState,
-    total_matched: usize,
+    picker: &FilePicker,
+    results: &fff_search::MixedSearchResult<'_>,
     offset: usize,
     limit: usize,
 ) -> String {
-    if items.is_empty() {
+    if results.items.is_empty() {
         return format!(
             "No files or directories matched. total_files={} total_dirs={}",
-            state.total_files, state.total_dirs
+            results.total_files, results.total_dirs
         );
     }
 
     let mut output = String::new();
-    for item in items {
-        output.push_str(&item.relative);
-        if item.is_dir && !item.relative.ends_with('/') {
-            output.push('/');
+    for item in &results.items {
+        match item {
+            MixedItemRef::File(file) => {
+                output.push_str(&file.relative_path(picker));
+            }
+            MixedItemRef::Dir(dir) => {
+                output.push_str(&dir.relative_path(picker));
+                if !output.ends_with(std::path::MAIN_SEPARATOR) {
+                    output.push(std::path::MAIN_SEPARATOR);
+                }
+            }
         }
         output.push('\n');
     }
     output.push_str(&format!(
         "[matched={} total_files={} total_dirs={} offset={} limit={}]",
-        total_matched, state.total_files, state.total_dirs, offset, limit
+        results.total_matched, results.total_files, results.total_dirs, offset, limit
     ));
     output
 }
 
-fn search_text_entries(
-    state: &WorkspaceSearchState,
-    path_filter: Option<&GlobSet>,
-    matcher: &TextMatcher,
-    options: TextSearchOptions,
-) -> TextSearchResults {
-    let candidates = state
-        .entries
-        .iter()
-        .filter(|entry| {
-            !entry.is_dir
-                && path_filter.is_none_or(|filter| filter.is_match(Path::new(&entry.relative)))
-        })
-        .collect::<Vec<_>>();
-    let mut results = TextSearchResults {
-        matches: Vec::new(),
-        files_with_matches: 0,
-        searched_files: 0,
-        searchable_files: candidates.len(),
-        total_files: state.total_files,
-        next_file_offset: 0,
-    };
-
-    for (candidate_index, entry) in candidates.iter().enumerate().skip(options.file_offset) {
-        if results.matches.len() >= options.limit {
-            results.next_file_offset = candidate_index;
-            break;
-        }
-        results.searched_files += 1;
-        if entry.size > MAX_SEARCH_FILE_BYTES {
-            continue;
-        }
-
-        let Ok(text) = sync_fs::read_to_string(&entry.full_path) else {
-            continue;
-        };
-        let lines = text.lines().collect::<Vec<_>>();
-        let mut file_had_match = false;
-
-        for (line_index, line) in lines.iter().enumerate() {
-            let Some(col) = matcher.find_in_line(line) else {
-                continue;
-            };
-
-            file_had_match = true;
-            let before_start = line_index.saturating_sub(options.before_context);
-            let after_end = (line_index + options.after_context + 1).min(lines.len());
-            results.matches.push(TextSearchMatch {
-                relative: entry.relative.clone(),
-                line_number: line_index + 1,
-                col: col + 1,
-                line: (*line).to_string(),
-                context_before: lines[before_start..line_index]
-                    .iter()
-                    .map(|line| (*line).to_string())
-                    .collect(),
-                context_after: lines[line_index + 1..after_end]
-                    .iter()
-                    .map(|line| (*line).to_string())
-                    .collect(),
-            });
-
-            if results.matches.len() >= options.limit {
-                break;
-            }
-        }
-
-        if file_had_match {
-            results.files_with_matches += 1;
-        }
-        if results.matches.len() >= options.limit {
-            results.next_file_offset = candidate_index.saturating_add(1);
-            break;
-        }
-    }
-
-    results
-}
-
-fn format_text_search_results(results: &TextSearchResults) -> String {
+fn format_text_search_results(
+    picker: &FilePicker,
+    results: &fff_search::grep::GrepResult<'_>,
+) -> String {
     if results.matches.is_empty() {
         return format!(
             "No text matched. searched_files={} searchable_files={} total_files={}",
-            results.searched_files, results.searchable_files, results.total_files
+            results.total_files_searched, results.filtered_file_count, results.total_files
         );
     }
 
     let mut output = String::new();
+    if let Some(error) = &results.regex_fallback_error {
+        output.push_str("Regex fallback: ");
+        output.push_str(error);
+        output.push('\n');
+    }
     for search_match in &results.matches {
+        let Some(file) = results.files.get(search_match.file_index) else {
+            continue;
+        };
         output.push_str(&format!(
             "{}:{}:{}: {}\n",
-            search_match.relative, search_match.line_number, search_match.col, search_match.line
+            file.relative_path(picker),
+            search_match.line_number,
+            search_match.col.saturating_add(1),
+            search_match.line_content
         ));
         for line in &search_match.context_before {
             output.push_str("  before: ");
@@ -1157,64 +955,11 @@ fn format_text_search_results(results: &TextSearchResults) -> String {
         "[matches={} files_with_matches={} searched_files={} searchable_files={} next_file_offset={}]",
         results.matches.len(),
         results.files_with_matches,
-        results.searched_files,
-        results.searchable_files,
+        results.total_files_searched,
+        results.filtered_file_count,
         results.next_file_offset,
     ));
     output
-}
-
-fn score_path(query: &str, entry: &SearchEntry) -> Option<i64> {
-    let candidate = entry.relative.to_ascii_lowercase();
-    let mut score = if entry.is_dir { 0 } else { 25 };
-    for term in query.split_whitespace() {
-        let term = term.to_ascii_lowercase();
-        if let Some(index) = candidate.find(&term) {
-            score += 10_000 - index.min(10_000) as i64 + term.len() as i64 * 100;
-        } else if let Some(index) = fuzzy_match_start(&term, &candidate) {
-            score += 1_000 - index.min(1_000) as i64;
-        } else {
-            return None;
-        }
-    }
-    Some(score)
-}
-
-fn fuzzy_match_start(query: &str, candidate: &str) -> Option<usize> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let mut first = None;
-    let mut chars = candidate.char_indices();
-    for needle in query.chars() {
-        let mut found = None;
-        for (index, candidate) in chars.by_ref() {
-            if candidate == needle {
-                found = Some(index);
-                break;
-            }
-        }
-        let found = found?;
-        first.get_or_insert(found);
-    }
-    first
-}
-
-fn looks_like_path_glob(part: &str) -> bool {
-    part.contains('/') && (part.contains('*') || part.contains('?') || part.contains('['))
-}
-
-fn normalized_relative_path(root: &Path, path: &Path) -> Result<String> {
-    let relative = path
-        .strip_prefix(root)
-        .with_context(|| format!("path escaped workspace: {}", path.display()))?;
-    let parts = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>();
-    anyhow::ensure!(!parts.is_empty(), "search path cannot be empty");
-    Ok(parts.join("/"))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1687,7 +1432,7 @@ mod tests {
                 {
                     "type": "function",
                     "name": "search_files",
-                    "description": "Fuzzy-search workspace files and directories by path.",
+                    "description": "Fuzzy-search indexed workspace files and directories by path.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1715,13 +1460,13 @@ mod tests {
                 {
                     "type": "function",
                     "name": "search_text",
-                    "description": "Search workspace file contents with literal, regex, or fuzzy matching.",
+                    "description": "Search indexed workspace file contents with literal, regex, or fuzzy matching.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "Text query. Glob path constraints like src/*.rs may be included.",
+                                "description": "Text query. Path constraints like src/*.rs may be included.",
                             },
                             "mode": {
                                 "type": "string",
@@ -1993,7 +1738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executes_workspace_search_tools() {
+    async fn executes_fff_search_tools() {
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-search-{}-{}",
             std::process::id(),
@@ -2025,34 +1770,19 @@ mod tests {
                 arguments: r#"{"query":"special_needle","limit":5}"#.to_string(),
             })
             .await;
-        let regex_text = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_search_text_regex".to_string(),
-                name: SEARCH_TEXT_TOOL.to_string(),
-                arguments: r#"{"query":"src/*.rs special_[a-z]+","mode":"regex","limit":5}"#
-                    .to_string(),
-            })
-            .await;
 
         assert!(files.success, "{}", files.output);
         assert!(files.output.contains("src/main.rs"), "{}", files.output);
         assert!(text.success, "{}", text.output);
         assert!(text.output.contains("src/main.rs:2:"), "{}", text.output);
         assert!(text.output.contains("special_needle"), "{}", text.output);
-        assert!(regex_text.success, "{}", regex_text.output);
-        assert!(
-            regex_text.output.contains("src/main.rs:2:"),
-            "{}",
-            regex_text.output
-        );
 
         drop(registry);
         fs::remove_dir_all(&temp).unwrap();
     }
 
     #[tokio::test]
-    async fn initializes_workspace_search_snapshot_before_first_search() {
+    async fn initializes_fff_search_index_before_first_search() {
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-warmup-{}-{}",
             std::process::id(),
@@ -2168,8 +1898,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "release-mode workspace search benchmark; run explicitly with --ignored --nocapture"]
-    async fn benchmark_workspace_search_current_repo() {
+    #[ignore = "release-mode FFF search benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_fff_search_current_repo() {
         const SAMPLES: usize = 15;
 
         let root = std::env::current_dir().unwrap();
@@ -2234,7 +1964,7 @@ mod tests {
         let file = DurationSummary::from_samples(&mut file_samples);
         let text = DurationSummary::from_samples(&mut text_samples);
         println!(
-            "workspace_search_current_repo samples={SAMPLES} cold_file_search_ms={:.3} warm_file_min_ms={:.3} warm_file_median_ms={:.3} warm_file_max_ms={:.3} warm_file_output_bytes={file_output_bytes} warm_text_min_ms={:.3} warm_text_median_ms={:.3} warm_text_max_ms={:.3} warm_text_output_bytes={text_output_bytes}",
+            "fff_search_current_repo samples={SAMPLES} cold_file_search_ms={:.3} warm_file_min_ms={:.3} warm_file_median_ms={:.3} warm_file_max_ms={:.3} warm_file_output_bytes={file_output_bytes} warm_text_min_ms={:.3} warm_text_median_ms={:.3} warm_text_max_ms={:.3} warm_text_output_bytes={text_output_bytes}",
             cold_elapsed.as_secs_f64() * 1000.0,
             file.min_ms(),
             file.median_ms(),

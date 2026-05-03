@@ -7,8 +7,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 1. `rust-agent serve` loads `AppConfig`, auth, `ChatGptClient`, configured tool
    policy, and `AgentService`.
-2. Server startup initializes the workspace search snapshot on a background
-   blocking worker before binding listeners, without waiting for it to finish.
+2. Server startup initializes the FFF scanner on a background blocking worker
+   before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
    identity, bearer token, session bounds, event queue capacity, QUIC stream
    limits, and idle timeout.
@@ -73,10 +73,9 @@ Important event names include:
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
 - Tool policy is loaded once at startup. The default `read-only` mode exposes no
   write tools; `workspace-write` exposes `apply_patch`.
-- Server startup initializes the shared workspace search snapshot in the
-  background. If a request reaches a search tool before snapshot creation
-  completes, that tool waits on a blocking worker and then runs against the
-  ready snapshot.
+- Server startup initializes the shared FFF search index in the background. If a
+  request reaches an FFF-backed tool before scanning completes, that tool is the
+  path that waits on a blocking worker and then runs against the ready index.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
 - The event queue capacity is configurable and applies to direct turn streams
   and session broadcast streams.
