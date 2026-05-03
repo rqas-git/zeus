@@ -1092,24 +1092,19 @@ fn parse_patch_hunk(lines: &[&str], index: &mut usize, path: &str) -> Result<Pat
         && !is_hunk_header(lines[*index])
     {
         let line = lines[*index];
-        let Some(prefix) = line.as_bytes().first().copied() else {
+        if let Some(rest) = line.strip_prefix(' ') {
+            old.push_str(rest);
+            new.push_str(rest);
+        } else if let Some(rest) = line.strip_prefix('-') {
+            old.push_str(rest);
+            changed = true;
+        } else if let Some(rest) = line.strip_prefix('+') {
+            new.push_str(rest);
+            changed = true;
+        } else if line.is_empty() {
             anyhow::bail!("empty hunk line in {path:?}");
-        };
-        let rest = &line[1..];
-        match prefix {
-            b' ' => {
-                old.push_str(rest);
-                new.push_str(rest);
-            }
-            b'-' => {
-                old.push_str(rest);
-                changed = true;
-            }
-            b'+' => {
-                new.push_str(rest);
-                changed = true;
-            }
-            _ => anyhow::bail!("hunk lines must start with space, -, or + in {path:?}"),
+        } else {
+            anyhow::bail!("hunk lines must start with space, -, or + in {path:?}");
         }
         *index += 1;
     }
@@ -1702,6 +1697,44 @@ mod tests {
         );
 
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_non_ascii_hunk_line_without_panic() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-hunk-prefix-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("lib.rs"), "fn value() {}\n").unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: lib.rs\n",
+            "@@\n",
+            "é malformed\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(!result.success);
+        assert!(result.output.contains("hunk lines must start"));
+        assert_eq!(
+            fs::read_to_string(temp.join("lib.rs")).unwrap(),
+            "fn value() {}\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
     }
 
     #[tokio::test]
