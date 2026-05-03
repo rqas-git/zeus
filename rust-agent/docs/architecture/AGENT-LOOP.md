@@ -32,10 +32,10 @@ transport, and session state separate.
   cloning transcript text.
 - `ToolRegistry` owns the built-in read-only tools and model-visible tool specs.
   It keeps exact filesystem tools (`read_file`, `list_dir`) alongside a shared
-  FFF-backed index for fuzzy file/path search and content search. FFF indexing
-  is lazy by default, but callers can start it on a background blocking worker
-  before any tool request. It executes tool batches in parallel when every
-  requested tool is marked parallel-safe.
+  FFF-backed index for fuzzy file/path search and content search. FFF index
+  initialization is lazy by default, but callers can start the shared scanner on
+  a background blocking worker before any tool request. It executes tool batches
+  in parallel when every requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It also validates model changes before updating a session.
 - `AgentService` holds only a per-session async lock while a turn streams, so

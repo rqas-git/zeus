@@ -344,7 +344,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Starts FFF search indexing on a blocking worker.
+    /// Initializes the FFF search index on a blocking worker.
     pub(crate) fn spawn_search_index_warmup(&self) -> tokio::task::JoinHandle<Result<()>> {
         let search = self.search.clone();
         tokio::task::spawn_blocking(move || search.warm())
@@ -460,7 +460,7 @@ impl FffSearchIndex {
     }
 
     fn warm(&self) -> Result<()> {
-        let _state = self.ready_state()?;
+        let _state = self.state()?;
         Ok(())
     }
 
@@ -986,7 +986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn warms_fff_search_index_before_first_search() {
+    async fn initializes_fff_search_index_before_first_search() {
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-warmup-{}-{}",
             std::process::id(),
@@ -1002,8 +1002,8 @@ mod tests {
         registry
             .spawn_search_index_warmup()
             .await
-            .expect("warmup task should not panic")
-            .expect("warmup should finish");
+            .expect("index initialization task should not panic")
+            .expect("index initialization should finish");
 
         assert!(registry.search.state.lock().unwrap().is_some());
         let files = registry

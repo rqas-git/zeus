@@ -7,8 +7,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 1. `rust-agent serve` loads `AppConfig`, auth, `ChatGptClient`, and
    `AgentService`.
-2. Server startup begins FFF indexing on a background blocking worker before
-   binding listeners, without waiting for the scan to finish.
+2. Server startup initializes the FFF scanner on a background blocking worker
+   before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
    identity, event queue capacity, QUIC stream limits, and idle timeout.
 4. One Axum router is built with shared `ServerState`.
@@ -63,9 +63,9 @@ Important event names include:
 ## Performance Notes
 
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
-- Server startup prewarms the shared FFF search index in the background. If a
-  request reaches an FFF-backed tool before scanning completes, that tool waits
-  on the blocking worker and then runs against the ready index.
+- Server startup initializes the shared FFF search index in the background. If a
+  request reaches an FFF-backed tool before scanning completes, that tool is the
+  path that waits on a blocking worker and then runs against the ready index.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
 - The event queue capacity is configurable and applies to direct turn streams
   and session broadcast streams.
