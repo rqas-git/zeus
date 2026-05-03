@@ -1052,6 +1052,84 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "release-mode FFF search benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_fff_search_current_repo() {
+        const SAMPLES: usize = 15;
+
+        let root = std::env::current_dir().unwrap();
+        let registry = ToolRegistry::for_root(root);
+
+        let cold_started = Instant::now();
+        let cold = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "cold_search_files".to_string(),
+                name: SEARCH_FILES_TOOL.to_string(),
+                arguments: r#"{"query":"tools","limit":20}"#.to_string(),
+            })
+            .await;
+        let cold_elapsed = cold_started.elapsed();
+        assert!(cold.success, "{}", cold.output);
+        assert!(cold.output.contains("src/tools.rs"), "{}", cold.output);
+
+        let mut file_samples = Vec::with_capacity(SAMPLES);
+        let mut text_samples = Vec::with_capacity(SAMPLES);
+        let mut file_output_bytes = 0usize;
+        let mut text_output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let search = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "warm_search_files".to_string(),
+                    name: SEARCH_FILES_TOOL.to_string(),
+                    arguments: r#"{"query":"tools","limit":20}"#.to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(search.success, "{}", search.output);
+            assert!(search.output.contains("src/tools.rs"), "{}", search.output);
+            file_output_bytes = search.output.len();
+            std::hint::black_box(&search.output);
+            file_samples.push(elapsed);
+        }
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let search = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "warm_search_text".to_string(),
+                    name: SEARCH_TEXT_TOOL.to_string(),
+                    arguments: r#"{"query":"ToolRegistry","limit":20}"#.to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(search.success, "{}", search.output);
+            assert!(search.output.contains("ToolRegistry"), "{}", search.output);
+            text_output_bytes = search.output.len();
+            std::hint::black_box(&search.output);
+            text_samples.push(elapsed);
+        }
+
+        let file = DurationSummary::from_samples(&mut file_samples);
+        let text = DurationSummary::from_samples(&mut text_samples);
+        println!(
+            "fff_search_current_repo samples={SAMPLES} cold_file_search_ms={:.3} warm_file_min_ms={:.3} warm_file_median_ms={:.3} warm_file_max_ms={:.3} warm_file_output_bytes={file_output_bytes} warm_text_min_ms={:.3} warm_text_median_ms={:.3} warm_text_max_ms={:.3} warm_text_output_bytes={text_output_bytes}",
+            cold_elapsed.as_secs_f64() * 1000.0,
+            file.min_ms(),
+            file.median_ms(),
+            file.max_ms(),
+            text.min_ms(),
+            text.median_ms(),
+            text.max_ms(),
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_paths_that_escape_workspace() {
         let parent =
             std::env::temp_dir().join(format!("rust-agent-tools-parent-{}", std::process::id()));
