@@ -584,10 +584,25 @@ impl AgentLoop {
         context_window: ContextWindowConfig,
         config: SessionConfig,
     ) -> Self {
+        Self::with_context_window_and_tools(
+            session_id,
+            context_window,
+            config,
+            ToolRegistry::default(),
+        )
+    }
+
+    /// Creates an agent loop with explicit context bounds and tool registry.
+    pub(crate) fn with_context_window_and_tools(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+        config: SessionConfig,
+        tools: ToolRegistry,
+    ) -> Self {
         Self {
             store: InMemorySessionStore::new(session_id, config),
             context_window,
-            tools: ToolRegistry::default(),
+            tools,
         }
     }
 

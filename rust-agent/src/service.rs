@@ -15,6 +15,7 @@ use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
+use crate::tools::ToolRegistry;
 
 /// Reuses a model client and keeps conversation state by session.
 #[derive(Debug)]
@@ -22,6 +23,7 @@ pub(crate) struct AgentService<M> {
     model: M,
     context_window: ContextWindowConfig,
     model_config: ModelConfig,
+    tools: ToolRegistry,
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
 }
 
@@ -37,10 +39,21 @@ where
         context_window: ContextWindowConfig,
         model_config: ModelConfig,
     ) -> Self {
+        Self::with_tools(model, context_window, model_config, ToolRegistry::default())
+    }
+
+    /// Creates an empty service with an explicit shared tool registry.
+    pub(crate) fn with_tools(
+        model: M,
+        context_window: ContextWindowConfig,
+        model_config: ModelConfig,
+        tools: ToolRegistry,
+    ) -> Self {
         Self {
             model,
             context_window,
             model_config,
+            tools,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -79,6 +92,7 @@ where
                         session_id,
                         self.context_window,
                         SessionConfig::new(model.clone()),
+                        self.tools.clone(),
                     ));
                     return Ok(model);
                 }
@@ -119,6 +133,7 @@ where
                     session_id,
                     self.context_window,
                     SessionConfig::new(self.model_config.default_model()),
+                    self.tools.clone(),
                 )
             },
         )))
@@ -128,11 +143,13 @@ where
         session_id: SessionId,
         context_window: ContextWindowConfig,
         config: SessionConfig,
+        tools: ToolRegistry,
     ) -> SharedSession {
-        Arc::new(AsyncMutex::new(AgentLoop::with_context_window(
+        Arc::new(AsyncMutex::new(AgentLoop::with_context_window_and_tools(
             session_id,
             context_window,
             config,
+            tools,
         )))
     }
 
