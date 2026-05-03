@@ -58,16 +58,17 @@ specific backend provider.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained-message shape, response id, and provider token counters.
 
-## Benchmark
+## Benchmarks
 
-Run the ignored release benchmark for the SSE parser with:
+The client has ignored release benchmarks for SSE parsing and typed Responses
+request serialization. Run all performance benchmarks with:
 
 ```bash
-cargo test --release client::tests::benchmark_sse_parser_large_stream -- --ignored --nocapture
+cargo test --release -- --ignored --nocapture
 ```
 
-The benchmark parses a synthetic 20,000-event stream in 8 KiB chunks and prints
-min, median, max, and throughput statistics.
+See [Performance Benchmarks](PERFORMANCE-BENCHMARKS.md) for the full benchmark
+list and individual commands.
 
 ## Current Scope
 

@@ -98,3 +98,4 @@ compaction are intentionally out of scope until product behavior requires them.
 - [Context Window](CONTEXT-WINDOW.md)
 - [Terminal Harness](TERMINAL-HARNESS.md)
 - [Server](SERVER.md)
+- [Performance Benchmarks](PERFORMANCE-BENCHMARKS.md)
