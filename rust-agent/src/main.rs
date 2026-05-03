@@ -2,6 +2,8 @@
 
 mod agent_loop;
 mod auth;
+#[cfg(test)]
+mod bench_support;
 mod client;
 mod config;
 mod server;

@@ -829,8 +829,10 @@ impl AgentLoop {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::time::Instant;
 
     use super::*;
+    use crate::bench_support::DurationSummary;
 
     #[tokio::test]
     async fn stores_one_turn_and_emits_ordered_events() {
@@ -1021,6 +1023,58 @@ mod tests {
             store.messages()[1].item,
             AgentItem::FunctionOutput { .. }
         ));
+    }
+
+    #[test]
+    #[ignore = "release-mode context-window benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_context_window_large_tool_history() {
+        const GROUPS: usize = 3_000;
+        const SAMPLES: usize = 15;
+
+        let config = ContextWindowConfig::with_history_limits(512, 512 * 1024, 512, 512 * 1024);
+        let store = large_tool_history_store(GROUPS);
+        let stored_messages = store.messages().len();
+        let mut window_samples = Vec::with_capacity(SAMPLES);
+        let mut retained_messages = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let history = store.conversation_window(config);
+            let elapsed = started.elapsed();
+
+            retained_messages = history.len();
+            std::hint::black_box(&history);
+            assert!(!history.is_empty());
+            assert_tool_outputs_have_calls(&history);
+            window_samples.push(elapsed);
+        }
+
+        let mut prune_samples = Vec::with_capacity(SAMPLES);
+        let mut pruned_messages = 0usize;
+        for _ in 0..SAMPLES {
+            let mut store = large_tool_history_store(GROUPS);
+            let started = Instant::now();
+            store.prune_history(config);
+            let elapsed = started.elapsed();
+
+            pruned_messages = store.messages().len();
+            std::hint::black_box(store.messages());
+            assert!(!store.messages().is_empty());
+            assert_tool_items_are_balanced(store.messages());
+            prune_samples.push(elapsed);
+        }
+
+        let window = DurationSummary::from_samples(&mut window_samples);
+        let prune = DurationSummary::from_samples(&mut prune_samples);
+        println!(
+            "context_window_large_tool_history groups={GROUPS} stored_messages={stored_messages} retained_messages={retained_messages} pruned_messages={pruned_messages} samples={SAMPLES} window_min_ms={:.3} window_median_ms={:.3} window_max_ms={:.3} prune_min_ms={:.3} prune_median_ms={:.3} prune_max_ms={:.3}",
+            window.min_ms(),
+            window.median_ms(),
+            window.max_ms(),
+            prune.min_ms(),
+            prune.median_ms(),
+            prune.max_ms(),
+        );
     }
 
     #[tokio::test]
@@ -1357,6 +1411,61 @@ mod tests {
             tool_name: "read_file".to_string(),
             output: output.into(),
             success: true,
+        }
+    }
+
+    fn large_tool_history_store(groups: usize) -> InMemorySessionStore {
+        let mut store =
+            InMemorySessionStore::new(SessionId::new(7), SessionConfig::new("test-model"));
+        for index in 0..groups {
+            let call_id = format!("call_{index}");
+            store.append_message(
+                MessageRole::User,
+                format!("Read and summarize benchmark file {index}."),
+            );
+            store.append_tool_call(model_tool_call(&call_id));
+            store.append_tool_output(tool_execution(
+                &call_id,
+                "benchmark output line with enough text to make byte budgeting meaningful\n"
+                    .repeat(8),
+            ));
+            store.append_message(
+                MessageRole::Assistant,
+                format!("Benchmark file {index} was summarized."),
+            );
+        }
+        store
+    }
+
+    fn assert_tool_outputs_have_calls(history: &[ConversationMessage<'_>]) {
+        let mut call_ids = Vec::new();
+        for message in history {
+            match message {
+                ConversationMessage::FunctionCall { call_id, .. } => call_ids.push(*call_id),
+                ConversationMessage::FunctionOutput { call_id, .. } => {
+                    assert!(
+                        call_ids.iter().any(|seen| seen == call_id),
+                        "tool output {call_id} did not have a retained function call"
+                    );
+                }
+                ConversationMessage::Message { .. } => call_ids.clear(),
+            }
+        }
+    }
+
+    fn assert_tool_items_are_balanced(messages: &[AgentMessage]) {
+        let mut call_ids = Vec::new();
+        for message in messages {
+            match &message.item {
+                AgentItem::FunctionCall { call_id, .. } => call_ids.push(call_id.as_str()),
+                AgentItem::FunctionOutput { call_id, .. } => {
+                    assert!(
+                        call_ids.iter().any(|seen| seen == call_id),
+                        "tool output {call_id} did not have a retained function call"
+                    );
+                }
+                AgentItem::Message { .. } => call_ids.clear(),
+            }
         }
     }
 
