@@ -326,10 +326,12 @@ fn display_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Instant;
 
     use serde_json::json;
 
     use super::*;
+    use crate::bench_support::DurationSummary;
 
     #[test]
     fn serializes_tool_specs_without_allocating_json_values() {
@@ -428,13 +430,60 @@ mod tests {
             read.output.len(),
             MAX_FILE_BYTES + FILE_TRUNCATION_MARKER.len()
         );
-        assert!(read.output[..MAX_FILE_BYTES]
-            .as_bytes()
+        assert!(read.output.as_bytes()[..MAX_FILE_BYTES]
             .iter()
             .all(|byte| *byte == b'a'));
         assert!(read.output.ends_with(FILE_TRUNCATION_MARKER));
 
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "release-mode capped read_file benchmark; run explicitly with --ignored --nocapture"]
+    async fn benchmark_read_file_capped_large_file() {
+        const FILE_BYTES: u64 = 128 * 1024 * 1024;
+        const SAMPLES: usize = 15;
+
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-bench-large-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let file = fs::File::create(temp.join("large.log")).unwrap();
+        file.set_len(FILE_BYTES).unwrap();
+        let registry = ToolRegistry::for_root(&temp);
+        let mut samples = Vec::with_capacity(SAMPLES);
+        let mut output_bytes = 0usize;
+
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let read = registry
+                .execute(ModelToolCall {
+                    item_id: None,
+                    call_id: "call_read".to_string(),
+                    name: READ_FILE_TOOL.to_string(),
+                    arguments: r#"{"path":"large.log"}"#.to_string(),
+                })
+                .await;
+            let elapsed = started.elapsed();
+
+            assert!(read.success);
+            assert!(read.output.ends_with(FILE_TRUNCATION_MARKER));
+            output_bytes = read.output.len();
+            std::hint::black_box(&read.output);
+            samples.push(elapsed);
+        }
+
+        fs::remove_dir_all(&temp).unwrap();
+
+        let summary = DurationSummary::from_samples(&mut samples);
+        println!(
+            "read_file_capped_large_file file_bytes={FILE_BYTES} output_bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3}",
+            summary.min_ms(),
+            summary.median_ms(),
+            summary.max_ms(),
+        );
     }
 
     #[tokio::test]
