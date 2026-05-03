@@ -206,7 +206,7 @@ impl AgentLoop {
                 .unwrap_or_default(),
         })?;
 
-        self.set_status(SessionStatus::Running, &mut emit)?;
+        self.begin_running(&mut emit)?;
         let result = self.run_once(stream_model, &mut emit);
         match result {
             Ok(response) => {
@@ -227,6 +227,18 @@ impl AgentLoop {
                 Err(error)
             }
         }
+    }
+
+    fn begin_running(&mut self, emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>) -> Result<()> {
+        self.store.set_status(SessionStatus::Running);
+        if let Err(error) = emit(AgentEvent::StatusChanged {
+            session_id: self.session_id(),
+            status: SessionStatus::Running,
+        }) {
+            self.store.set_status(SessionStatus::Idle);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn set_status(
@@ -368,6 +380,46 @@ mod tests {
                 "error:backend failed",
             ]
         );
+    }
+
+    #[test]
+    fn running_status_publish_failure_does_not_stick_session_running() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let mut model_called = false;
+
+        let error = agent
+            .submit_user_message(
+                "hello",
+                |_history, _| {
+                    model_called = true;
+                    Ok("unused".to_string())
+                },
+                |event| {
+                    if matches!(
+                        event,
+                        AgentEvent::StatusChanged {
+                            status: SessionStatus::Running,
+                            ..
+                        }
+                    ) {
+                        anyhow::bail!("sink failed");
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "sink failed");
+        assert!(!model_called);
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+
+        let response = agent
+            .submit_user_message("again", |_history, _| Ok("ok".to_string()), |_| Ok(()))
+            .unwrap();
+
+        assert_eq!(response, "ok");
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
     }
 
     fn format_event(event: AgentEvent<'_>) -> String {
