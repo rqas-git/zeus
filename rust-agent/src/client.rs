@@ -10,6 +10,7 @@ use serde::ser::SerializeSeq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::value::RawValue;
+use std::borrow::Cow;
 use std::future::Future;
 #[cfg(test)]
 use std::io::BufRead;
@@ -307,11 +308,11 @@ impl AssistantText {
         let event: StreamEvent = serde_json::from_str(data)
             .with_context(|| format!("failed to parse SSE data: {}", truncate_for_error(data)))?;
 
-        match event.kind {
+        match event.kind.as_ref() {
             "response.output_text.delta" => {
-                if let Some(delta) = event.delta {
-                    on_delta(&delta)?;
-                    self.text.push_str(&delta);
+                if let Some(delta) = event.delta.as_deref() {
+                    on_delta(delta)?;
+                    self.text.push_str(delta);
                 }
             }
             "response.output_item.done" if self.text.is_empty() => {
@@ -353,35 +354,38 @@ fn assistant_text_from_item(item: Option<&RawValue>) -> String {
     let Ok(item) = serde_json::from_str::<OutputItem>(item.get()) else {
         return String::new();
     };
-    if item.role != Some("assistant") {
+    if item.role.as_deref() != Some("assistant") {
         return String::new();
     }
 
     item.content
         .into_iter()
-        .filter(|content| content.kind == "output_text")
+        .filter(|content| content.kind.as_ref() == "output_text")
         .filter_map(|content| content.text)
+        .map(Cow::into_owned)
         .collect::<String>()
 }
 
 #[derive(Debug, Deserialize)]
 struct OutputItem<'a> {
-    role: Option<&'a str>,
+    #[serde(borrow)]
+    role: Option<Cow<'a, str>>,
     #[serde(default, borrow)]
     content: Vec<OutputContent<'a>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OutputContent<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-    text: Option<&'a str>,
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    text: Option<Cow<'a, str>>,
 }
 
 fn response_error_message(response: Option<&RawValue>) -> Option<String> {
     let response = response?;
     let response = serde_json::from_str::<FailedResponse>(response.get()).ok()?;
-    response.error?.message.map(ToOwned::to_owned)
+    response.error?.message.map(Cow::into_owned)
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,7 +396,8 @@ struct FailedResponse<'a> {
 
 #[derive(Debug, Deserialize)]
 struct ResponseError<'a> {
-    message: Option<&'a str>,
+    #[serde(borrow)]
+    message: Option<Cow<'a, str>>,
 }
 
 fn truncate_for_error(value: &str) -> String {
@@ -413,9 +418,10 @@ fn truncate_for_error(value: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 struct StreamEvent<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-    delta: Option<&'a str>,
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+    #[serde(borrow)]
+    delta: Option<Cow<'a, str>>,
     #[serde(borrow)]
     response: Option<&'a RawValue>,
     #[serde(borrow)]
@@ -466,6 +472,19 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}
 "#;
 
         assert_eq!(extract_assistant_text(stream).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn extracts_escaped_text_deltas() {
+        let stream = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":":\n\n","item_id":"msg_1","logprobs":[],"output_index":0,"sequence_number":10}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1"}}
+
+"#;
+
+        assert_eq!(extract_assistant_text(stream).unwrap(), ":\n\n");
     }
 
     #[test]
