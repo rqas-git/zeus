@@ -93,7 +93,7 @@ async fn print_agent_response(
     output: config::OutputConfig,
     telemetry: config::TelemetryConfig,
     message: String,
-) -> Result<String> {
+) -> Result<()> {
     let mut stdout = io::stdout().lock();
     write!(stdout, "Assistant: ").context("failed to write assistant prompt")?;
     stdout.flush().context("failed to flush assistant prompt")?;

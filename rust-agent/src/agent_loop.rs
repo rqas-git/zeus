@@ -332,6 +332,32 @@ impl InMemorySessionStore {
         retained
     }
 
+    fn prune_history(&mut self, config: ContextWindowConfig) {
+        let mut retained_bytes = 0usize;
+        let mut first_retained = self.messages.len();
+
+        for (retained_count, (index, message)) in self.messages.iter().enumerate().rev().enumerate()
+        {
+            if retained_count >= config.history_max_messages() {
+                break;
+            }
+
+            let message_bytes = message.text().len();
+            let would_exceed_budget =
+                retained_bytes.saturating_add(message_bytes) > config.history_max_bytes();
+            if would_exceed_budget && retained_count > 0 {
+                break;
+            }
+
+            retained_bytes = retained_bytes.saturating_add(message_bytes);
+            first_retained = index;
+        }
+
+        if first_retained > 0 {
+            self.messages.drain(0..first_retained);
+        }
+    }
+
     fn cache_status(&self, cache_health: &CacheHealth) -> CacheStatus {
         let Some(previous) = &self.last_cache_observation else {
             return CacheStatus::FirstRequest;
@@ -427,7 +453,7 @@ impl AgentLoop {
         text: impl Into<String>,
         model: &impl ModelStreamer,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<()> {
         anyhow::ensure!(
             self.store.status() != SessionStatus::Running,
             "session is already running"
@@ -454,13 +480,15 @@ impl AgentLoop {
             self.store.remove_last_message(user_id);
             return Err(error);
         }
+        self.store.prune_history(self.context_window);
         let result = self.run_once(model, &mut emit).await;
         match result {
-            Ok(response) => {
+            Ok(()) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
-                Ok(response)
+                Ok(())
             }
             Err(error) => {
+                self.store.prune_history(self.context_window);
                 self.store.set_status(SessionStatus::Failed);
                 let message = error.to_string();
                 emit(AgentEvent::StatusChanged {
@@ -504,7 +532,7 @@ impl AgentLoop {
         &mut self,
         model: &impl ModelStreamer,
         emit: &mut impl FnMut(AgentEvent<'_>) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<()> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
         let selected_model = self.store.model();
@@ -523,14 +551,21 @@ impl AgentLoop {
         let assistant_text = model_response.text;
         let assistant_id = self
             .store
-            .append_message(MessageRole::Assistant, assistant_text.clone());
+            .append_message(MessageRole::Assistant, assistant_text);
+        let assistant_text = self
+            .store
+            .messages()
+            .last()
+            .map(AgentMessage::text)
+            .unwrap_or_default();
         emit(AgentEvent::MessageCompleted {
             session_id,
             message_id: assistant_id,
             role: MessageRole::Assistant,
-            text: &assistant_text,
+            text: assistant_text,
         })?;
-        Ok(assistant_text)
+        self.store.prune_history(self.context_window);
+        Ok(())
     }
 }
 
@@ -555,7 +590,7 @@ mod tests {
             },
         );
 
-        let response = agent
+        agent
             .submit_user_message("hello", &streamer, |event| {
                 events.push(format_event(event));
                 Ok(())
@@ -563,7 +598,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response, "hi");
         assert_eq!(agent.store.status(), SessionStatus::Idle);
         assert_eq!(agent.messages().len(), 2);
         assert_eq!(agent.messages()[0].role(), MessageRole::User);
@@ -612,12 +646,11 @@ mod tests {
             .await
             .unwrap();
 
-        let response = agent
+        agent
             .submit_user_message("what did I ask you to remember?", &streamer, |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(response, "rust-agent");
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[3].text(), "rust-agent");
     }
@@ -664,13 +697,65 @@ mod tests {
             .await
             .unwrap();
 
-        let response = agent
+        agent
             .submit_user_message("third user", &streamer, |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(response, "third answer");
         assert_eq!(agent.messages().len(), 6);
+        assert_eq!(agent.messages()[5].text(), "third answer");
+    }
+
+    #[tokio::test]
+    async fn prunes_retained_session_history() {
+        let mut agent = AgentLoop::with_context_window(
+            SessionId::new(7),
+            ContextWindowConfig::with_history_limits(10, 1024, 3, 1024),
+            SessionConfig::new("test-model"),
+        );
+        let turn = Cell::new(0);
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>],
+             _model: &str,
+             _on_delta: &mut dyn FnMut(&str) -> Result<()>| {
+                let answer = match turn.get() {
+                    0 => "first answer",
+                    1 => "second answer",
+                    2 => {
+                        assert_eq!(
+                            history,
+                            [
+                                ConversationMessage::user("second user"),
+                                ConversationMessage::assistant("second answer"),
+                                ConversationMessage::user("third user"),
+                            ]
+                        );
+                        "third answer"
+                    }
+                    _ => unreachable!("unexpected turn"),
+                };
+                turn.set(turn.get() + 1);
+                Ok(answer.to_string())
+            },
+        );
+
+        agent
+            .submit_user_message("first user", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+        agent
+            .submit_user_message("second user", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+        agent
+            .submit_user_message("third user", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(agent.messages().len(), 3);
+        assert_eq!(agent.messages()[0].text(), "second answer");
+        assert_eq!(agent.messages()[1].text(), "third user");
+        assert_eq!(agent.messages()[2].text(), "third answer");
     }
 
     #[tokio::test]
@@ -700,18 +785,18 @@ mod tests {
             },
         );
 
-        let first = agent
+        agent
             .submit_user_message("hello", &streamer, |_| Ok(()))
             .await
             .unwrap();
         agent.set_model("second-model").unwrap();
-        let second = agent
+        agent
             .submit_user_message("again", &streamer, |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(first, "first-model");
-        assert_eq!(second, "second-model");
+        assert_eq!(agent.messages()[1].text(), "first-model");
+        assert_eq!(agent.messages()[3].text(), "second-model");
         assert_eq!(turn.get(), 2);
     }
 
@@ -830,12 +915,11 @@ mod tests {
                 Ok("ok".to_string())
             },
         );
-        let response = agent
+        agent
             .submit_user_message("retry", &ok_streamer, |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(response, "ok");
         assert_eq!(agent.messages().len(), 2);
         assert_eq!(agent.messages()[0].text(), "retry");
         assert_eq!(agent.messages()[1].text(), "ok");
@@ -884,12 +968,11 @@ mod tests {
                 Ok("ok".to_string())
             },
         );
-        let response = agent
+        agent
             .submit_user_message("again", &ok_streamer, |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(response, "ok");
         assert_eq!(agent.store.status(), SessionStatus::Idle);
         assert_eq!(agent.messages().len(), 2);
         assert_eq!(agent.messages()[0].text(), "again");

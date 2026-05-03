@@ -13,6 +13,8 @@ const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
 const DEFAULT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_HISTORY_MAX_MESSAGES: usize = 200;
+const DEFAULT_HISTORY_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
@@ -220,6 +222,8 @@ impl Default for ModelConfig {
 pub(crate) struct ContextWindowConfig {
     max_messages: usize,
     max_bytes: usize,
+    history_max_messages: usize,
+    history_max_bytes: usize,
 }
 
 impl ContextWindowConfig {
@@ -236,6 +240,16 @@ impl ContextWindowConfig {
             .max(1),
             max_bytes: env_parse_usize("RUST_AGENT_CONTEXT_MAX_BYTES", DEFAULT_CONTEXT_MAX_BYTES)?
                 .max(1),
+            history_max_messages: env_parse_usize(
+                "RUST_AGENT_HISTORY_MAX_MESSAGES",
+                DEFAULT_HISTORY_MAX_MESSAGES,
+            )?
+            .max(1),
+            history_max_bytes: env_parse_usize(
+                "RUST_AGENT_HISTORY_MAX_BYTES",
+                DEFAULT_HISTORY_MAX_BYTES,
+            )?
+            .max(1),
         })
     }
 
@@ -245,6 +259,24 @@ impl ContextWindowConfig {
         Self {
             max_messages,
             max_bytes,
+            history_max_messages: DEFAULT_HISTORY_MAX_MESSAGES,
+            history_max_bytes: DEFAULT_HISTORY_MAX_BYTES,
+        }
+    }
+
+    /// Creates context-window and history-retention bounds.
+    #[cfg(test)]
+    pub(crate) const fn with_history_limits(
+        max_messages: usize,
+        max_bytes: usize,
+        history_max_messages: usize,
+        history_max_bytes: usize,
+    ) -> Self {
+        Self {
+            max_messages,
+            max_bytes,
+            history_max_messages,
+            history_max_bytes,
         }
     }
 
@@ -257,6 +289,16 @@ impl ContextWindowConfig {
     pub(crate) const fn max_bytes(self) -> usize {
         self.max_bytes
     }
+
+    /// Returns the maximum number of messages retained in session memory.
+    pub(crate) const fn history_max_messages(self) -> usize {
+        self.history_max_messages
+    }
+
+    /// Returns the approximate text byte budget retained in session memory.
+    pub(crate) const fn history_max_bytes(self) -> usize {
+        self.history_max_bytes
+    }
 }
 
 impl Default for ContextWindowConfig {
@@ -264,6 +306,8 @@ impl Default for ContextWindowConfig {
         Self {
             max_messages: DEFAULT_CONTEXT_MAX_MESSAGES,
             max_bytes: DEFAULT_CONTEXT_MAX_BYTES,
+            history_max_messages: DEFAULT_HISTORY_MAX_MESSAGES,
+            history_max_bytes: DEFAULT_HISTORY_MAX_BYTES,
         }
     }
 }

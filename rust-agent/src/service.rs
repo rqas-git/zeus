@@ -83,7 +83,7 @@ where
         session_id: SessionId,
         message: impl Into<String>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()>,
-    ) -> Result<String> {
+    ) -> Result<()> {
         let model = &self.model;
         let default_model = self.model_config.default_model();
         let agent = self.sessions.entry(session_id).or_insert_with(|| {
@@ -144,22 +144,19 @@ mod tests {
         let mut service =
             AgentService::new(model, ContextWindowConfig::default(), test_model_config());
 
-        let first = service
+        service
             .submit_user_message(SessionId::new(1), "hello", |_| Ok(()))
             .await
             .unwrap();
-        let second = service
+        service
             .submit_user_message(SessionId::new(1), "again", |_| Ok(()))
             .await
             .unwrap();
-        let other = service
+        service
             .submit_user_message(SessionId::new(2), "fresh", |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(first, "one");
-        assert_eq!(second, "two");
-        assert_eq!(other, "other");
         assert_eq!(service.session_count(), 2);
     }
 
@@ -187,7 +184,7 @@ mod tests {
         let mut service =
             AgentService::new(model, ContextWindowConfig::default(), test_model_config());
 
-        let first = service
+        service
             .submit_user_message(SessionId::new(1), "hello", |_| Ok(()))
             .await
             .unwrap();
@@ -195,14 +192,12 @@ mod tests {
             .set_session_model(SessionId::new(1), "test-fast")
             .unwrap()
             .to_string();
-        let second = service
+        service
             .submit_user_message(SessionId::new(1), "again", |_| Ok(()))
             .await
             .unwrap();
 
-        assert_eq!(first, "test-default");
         assert_eq!(selected, "test-fast");
-        assert_eq!(second, "test-fast");
         assert_eq!(turn.get(), 2);
     }
 
