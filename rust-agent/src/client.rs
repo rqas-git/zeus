@@ -2,7 +2,6 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::header;
 use reqwest::Client;
@@ -12,7 +11,7 @@ use serde::Serialize;
 use serde_json::value::RawValue;
 use std::borrow::Cow;
 #[cfg(test)]
-use std::io::BufRead;
+use std::io::Read;
 
 use crate::agent_loop::CacheHealth;
 use crate::agent_loop::CacheStatus;
@@ -59,6 +58,7 @@ pub(crate) struct ChatGptClient {
     auth: CodexAuth,
     config: ClientConfig,
     http: Client,
+    collect_cache_telemetry: bool,
 }
 
 impl ChatGptClient {
@@ -66,13 +66,22 @@ impl ChatGptClient {
     ///
     /// # Errors
     /// Returns an error if the HTTP client cannot be constructed.
-    pub(crate) fn new(auth: CodexAuth, config: ClientConfig) -> Result<Self> {
+    pub(crate) fn new(
+        auth: CodexAuth,
+        config: ClientConfig,
+        collect_cache_telemetry: bool,
+    ) -> Result<Self> {
         let http = Client::builder()
             .timeout(config.request_timeout())
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self { auth, config, http })
+        Ok(Self {
+            auth,
+            config,
+            http,
+            collect_cache_telemetry,
+        })
     }
 }
 
@@ -128,7 +137,8 @@ impl ModelStreamer for ChatGptClient {
             );
         }
 
-        let completion = read_assistant_text_stream(response, on_delta).await?;
+        let completion =
+            read_assistant_text_stream(response, on_delta, self.collect_cache_telemetry).await?;
         let cache_health = CacheHealth {
             model: model.to_string(),
             prompt_cache_key,
@@ -150,16 +160,17 @@ impl ModelStreamer for ChatGptClient {
 async fn read_assistant_text_stream(
     response: reqwest::Response,
     mut on_delta: impl FnMut(&str) -> Result<()>,
+    collect_metadata: bool,
 ) -> Result<StreamCompletion> {
-    let mut state = AssistantText::default();
-    let mut stream = response.bytes_stream().eventsource();
+    let mut state = AssistantText::new(collect_metadata);
+    let mut parser = SseDataParser::default();
+    let mut stream = response.bytes_stream();
 
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|error| {
-            anyhow::anyhow!("failed to read ChatGPT Codex response stream: {error}")
-        })?;
-        state.handle_data(&event.data, &mut on_delta)?;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("failed to read ChatGPT Codex response stream")?;
+        parser.push_bytes(&chunk, &mut |data| state.handle_data(data, &mut on_delta))?;
     }
+    parser.finish(&mut |data| state.handle_data(data, &mut on_delta))?;
 
     state.finish(&mut on_delta)
 }
@@ -306,7 +317,7 @@ fn extract_assistant_text(stream: &str) -> Result<String> {
 
 #[cfg(test)]
 fn read_assistant_text(
-    mut reader: impl BufRead,
+    mut reader: impl Read,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<String> {
     read_assistant_completion(&mut reader, &mut on_delta).map(|completion| completion.text)
@@ -314,49 +325,92 @@ fn read_assistant_text(
 
 #[cfg(test)]
 fn read_assistant_completion(
-    mut reader: impl BufRead,
+    mut reader: impl Read,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<StreamCompletion> {
-    let mut state = AssistantText::default();
-    let mut event_data = String::new();
-    let mut has_event_data = false;
-    let mut line = String::new();
+    let mut state = AssistantText::new(true);
+    let mut parser = SseDataParser::default();
+    let mut chunk = [0; 7];
 
     loop {
-        line.clear();
         let bytes = reader
-            .read_line(&mut line)
+            .read(&mut chunk)
             .context("failed to read ChatGPT Codex response stream")?;
         if bytes == 0 {
             break;
         }
-
-        let line = line.trim_end_matches('\n').trim_end_matches('\r');
-        if line.is_empty() {
-            if has_event_data {
-                state.handle_data(&event_data, &mut on_delta)?;
-                event_data.clear();
-                has_event_data = false;
-            }
-            continue;
-        }
-
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let data = data.strip_prefix(' ').unwrap_or(data);
-        if has_event_data {
-            event_data.push('\n');
-        }
-        event_data.push_str(data);
-        has_event_data = true;
+        parser.push_bytes(&chunk[..bytes], &mut |data| {
+            state.handle_data(data, &mut on_delta)
+        })?;
     }
 
-    if has_event_data {
-        state.handle_data(&event_data, &mut on_delta)?;
-    }
+    parser.finish(&mut |data| state.handle_data(data, &mut on_delta))?;
 
     state.finish(&mut on_delta)
+}
+
+#[derive(Default)]
+struct SseDataParser {
+    line: Vec<u8>,
+    event_data: String,
+    has_event_data: bool,
+}
+
+impl SseDataParser {
+    fn push_bytes(
+        &mut self,
+        bytes: &[u8],
+        on_data: &mut impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
+        for byte in bytes {
+            if *byte == b'\n' {
+                self.handle_line(on_data)?;
+            } else {
+                self.line.push(*byte);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, on_data: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        if !self.line.is_empty() {
+            self.handle_line(on_data)?;
+        }
+        self.flush_event(on_data)
+    }
+
+    fn handle_line(&mut self, on_data: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        if self.line.last() == Some(&b'\r') {
+            self.line.pop();
+        }
+
+        if self.line.is_empty() {
+            self.flush_event(on_data)?;
+        } else if let Some(data) = self.line.strip_prefix(b"data:") {
+            let data = data.strip_prefix(b" ").unwrap_or(data);
+            let data = std::str::from_utf8(data)
+                .context("failed to decode ChatGPT Codex response stream as UTF-8")?;
+            if self.has_event_data {
+                self.event_data.push('\n');
+            }
+            self.event_data.push_str(data);
+            self.has_event_data = true;
+        }
+
+        self.line.clear();
+        Ok(())
+    }
+
+    fn flush_event(&mut self, on_data: &mut impl FnMut(&str) -> Result<()>) -> Result<()> {
+        if !self.has_event_data {
+            return Ok(());
+        }
+
+        on_data(&self.event_data)?;
+        self.event_data.clear();
+        self.has_event_data = false;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -366,9 +420,17 @@ struct AssistantText {
     response_id: Option<String>,
     usage: Option<TokenUsage>,
     completed: bool,
+    collect_metadata: bool,
 }
 
 impl AssistantText {
+    fn new(collect_metadata: bool) -> Self {
+        Self {
+            collect_metadata,
+            ..Self::default()
+        }
+    }
+
     fn handle_data(
         &mut self,
         data: &str,
@@ -398,10 +460,13 @@ impl AssistantText {
                     .unwrap_or_else(|| "response failed".to_string());
                 anyhow::bail!("{message}");
             }
-            "response.completed" => {
+            "response.completed" if self.collect_metadata => {
                 let metadata = response_metadata(event.response);
                 self.response_id = metadata.response_id.or_else(|| self.response_id.take());
                 self.usage = metadata.usage.or(self.usage);
+                self.completed = true;
+            }
+            "response.completed" => {
                 self.completed = true;
             }
             _ => {}

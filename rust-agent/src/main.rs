@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
         telemetry,
     } = AppConfig::from_env()?;
     let auth = CodexAuth::load_default()?;
-    let client = ChatGptClient::new(auth, client)?;
+    let client = ChatGptClient::new(auth, client, telemetry.cache_health())?;
     let mut service = AgentService::new(client, context, models);
     let session_id = SessionId::new(1);
 
@@ -107,7 +107,9 @@ async fn print_agent_response(
                 cache_health: health,
                 ..
             } => {
-                cache_health = Some(health.clone());
+                if telemetry.cache_health() {
+                    cache_health = Some(health.clone());
+                }
                 Ok(())
             }
             _ => Ok(()),
