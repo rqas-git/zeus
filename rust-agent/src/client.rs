@@ -177,7 +177,7 @@ async fn read_assistant_text_stream(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StablePrefixStats {
-    hash: String,
+    hash: u64,
     bytes: usize,
 }
 
@@ -187,7 +187,7 @@ fn stable_prefix_stats(instructions: &str) -> StablePrefixStats {
     hash.update(instructions);
     hash.update("\0tools\0[]");
     StablePrefixStats {
-        hash: format!("{:016x}", hash.finish()),
+        hash: hash.finish(),
         bytes: instructions.len(),
     }
 }

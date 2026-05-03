@@ -164,7 +164,7 @@ impl CacheStatus {
 pub(crate) struct CacheHealth {
     pub(crate) model: String,
     pub(crate) prompt_cache_key: String,
-    pub(crate) stable_prefix_hash: String,
+    pub(crate) stable_prefix_hash: u64,
     pub(crate) stable_prefix_bytes: usize,
     pub(crate) message_count: usize,
     pub(crate) input_bytes: usize,
@@ -348,7 +348,7 @@ impl InMemorySessionStore {
     fn record_cache_observation(&mut self, cache_health: &CacheHealth) {
         self.last_cache_observation = Some(CacheObservation {
             prompt_cache_key: cache_health.prompt_cache_key.clone(),
-            stable_prefix_hash: cache_health.stable_prefix_hash.clone(),
+            stable_prefix_hash: cache_health.stable_prefix_hash,
         });
     }
 }
@@ -356,7 +356,7 @@ impl InMemorySessionStore {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheObservation {
     prompt_cache_key: String,
-    stable_prefix_hash: String,
+    stable_prefix_hash: u64,
 }
 
 /// Runs ordered turns for a single in-memory session.
@@ -971,7 +971,7 @@ mod tests {
                 CacheHealth {
                     model: model.to_string(),
                     prompt_cache_key: format!("cache-key-{model}"),
-                    stable_prefix_hash: "stable-prefix-hash".to_string(),
+                    stable_prefix_hash: 0x1234,
                     stable_prefix_bytes: 24,
                     message_count: 1,
                     input_bytes: 5,

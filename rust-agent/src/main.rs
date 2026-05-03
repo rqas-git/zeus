@@ -135,7 +135,7 @@ fn format_cache_health(cache_health: &CacheHealth) -> String {
         cache_health.cache_status.as_str(),
         cache_health.model,
         cache_health.prompt_cache_key,
-        cache_health.stable_prefix_hash,
+        format_args!("{:016x}", cache_health.stable_prefix_hash),
         cache_health.stable_prefix_bytes,
         cache_health.message_count,
         cache_health.input_bytes,
