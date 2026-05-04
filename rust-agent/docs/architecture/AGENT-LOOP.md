@@ -6,8 +6,8 @@ transport, and session state separate.
 
 ## Flow
 
-1. `main` loads `AppConfig`, creates one async `ChatGptClient`, and wraps it in
-   an `AgentService`.
+1. `main` loads `AppConfig`, creates one async `ChatGptClient`, opens SQLite
+   session storage, and wraps them in an `AgentService`.
 2. `AgentService` keeps a map of warm session handles by `SessionId`.
 3. Each user message is submitted to a session. Missing sessions are created
    with the configured context-window bounds and default model.
@@ -22,16 +22,16 @@ transport, and session state separate.
    looping model response cannot run forever.
 7. A shared cancellation signal can stop an active model stream or command-backed
    tool before the session returns to `Idle`.
-8. Interactive mode reuses the same service and session, so history lasts for
-   the current terminal process.
+8. Interactive mode reuses the same service and session, and the default
+   terminal session is restored from SQLite across process restarts.
 
 ## Responsibilities
 
 - `AgentLoop` enforces ordered turns, status transitions, and event emission.
 - `InMemorySessionStore` stores retained messages, message ids, current status,
-  and session settings. It stores user/assistant messages, function-call items,
-  and function-call outputs, then creates borrowed prompt windows instead of
-  cloning transcript text.
+  and session settings for the active process. `SessionDatabase` is the SQLite
+  source of truth for session rows, ordered message rows, selected model,
+  status, and cache-continuity metadata.
 - `ToolRegistry` owns the built-in tools, permission policy, and model-visible
   tool specs. It keeps exact filesystem tools (`read_file`, `read_file_range`,
   `list_dir`) alongside a shared FFF-backed index for fuzzy file/path search and
@@ -60,7 +60,8 @@ transport, and session state separate.
   retained or dropped as one unit so follow-up requests do not contain orphaned
   tool outputs. The latest message or tool transcript unit is always retained.
 - Stored session history is retained within configurable message and byte
-  budgets.
+  budgets in memory. SQLite keeps the full ordered message history, and the
+  loop reloads then prunes it to the configured in-memory limits.
 - Prompt request bodies serialize from typed borrowed structures rather than
   first building a generic JSON value.
 - Tool specs serialize from static typed definitions rather than allocating
@@ -109,14 +110,14 @@ while a turn is running.
 
 ## Current Scope
 
-Conversation history is recent and in memory only. The default built-in tool set
-is read-only (`read_file`, `read_file_range`, `list_dir`, `search_files`, and
-`search_text`).
+Conversation history is durable in SQLite and recent in memory. The default
+built-in tool set is read-only (`read_file`, `read_file_range`, `list_dir`,
+`search_files`, and `search_text`).
 `RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
 `RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution plus
 git wrappers. Cancellation is process-local and applies to the active turn;
-persistence and semantic context compaction remain out of scope until product
-behavior requires them.
+semantic context compaction remains out of scope until product behavior requires
+it.
 
 ## Related Docs
 

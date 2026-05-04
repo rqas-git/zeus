@@ -1,8 +1,9 @@
 # Service Layer Architecture
 
 `AgentService` is the backend-facing boundary around the agent loop. It owns one
-long-lived model client and a session map, so terminal and server endpoints can
-submit work without rebuilding transport state for every request.
+long-lived model client, an optional SQLite session database, and a process-local
+session map, so terminal and server endpoints can submit work without rebuilding
+transport state for every request.
 
 ## Flow
 
@@ -10,7 +11,8 @@ submit work without rebuilding transport state for every request.
    client to `AgentService`.
 2. Each request supplies a `SessionId` and user message or session model update.
 3. `AgentService` validates model updates against `ModelConfig`.
-4. `AgentService` finds or creates the matching session handle.
+4. `AgentService` finds or creates the matching session handle, loading any
+   durable SQLite state for that `SessionId`.
 5. The service locks only that session while a turn is running.
 6. The session loop streams the selected model response, executes any requested
    built-in tools, and emits `AgentEvent`s, including tool lifecycle events and
@@ -23,8 +25,8 @@ submit work without rebuilding transport state for every request.
 - `AgentService` owns the warm model client.
 - Auth is handled inside the model client and stays outside session state.
 - `AgentService` owns in-memory session lookup by `SessionId`.
-- `AgentService` creates and deletes process-local session state for server
-  session lifecycle routes.
+- `AgentService` creates, loads, and deletes SQLite-backed session state when a
+  database is configured.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` can request cancellation of the currently running turn without
   waiting on that session's execution lock.
@@ -37,7 +39,8 @@ submit work without rebuilding transport state for every request.
 ## Performance Notes
 
 - The model client is reused across sessions.
-- Session state is reused across turns.
+- Session state is reused across turns and restored from SQLite when a session
+  handle is recreated.
 - The session map lock is held only while finding or creating a session handle.
 - Model streaming and tool execution hold an async mutex for the selected
   session only, so different sessions can stream and execute tools concurrently.
@@ -63,9 +66,18 @@ Turn cancellation also targets only the active turn. Queued same-session
 submissions wait for the running turn to finish or cancel, then continue in
 order.
 
+## Storage
+
+Production startup configures a SQLite database, so sessions and ordered
+messages are durable. The database uses WAL mode, `synchronous=NORMAL`, foreign
+keys, a busy timeout, and cascade deletion of session messages. `AgentLoop`
+continues to keep only bounded recent history in memory; SQLite remains the
+canonical store for the full ordered message list.
+
 ## Current Scope
 
-The session map is process-local; server mode bounds it with configuration, and
-each session's retained message history is bounded. Explicit server deletion
-removes a session from the map, but TTL eviction, persistence, and cross-process
-coordination should be added before multi-tenant production use.
+The active session map and cancellation state are process-local; server mode
+bounds the active map with configuration. Explicit server deletion removes a
+session from memory and SQLite. Session listing, TTL eviction, and
+cross-process coordination should be added only when endpoint behavior requires
+them.

@@ -33,7 +33,11 @@ cd /Users/ajc/rust-agent
 cargo run
 ```
 
-Then type messages after the `You:` prompt. The interactive session keeps recent conversation history in memory until it exits, bounded by `RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Submit a blank line to exit.
+Then type messages after the `You:` prompt. Session history is stored in SQLite
+at `~/.rust-agent/sessions.db` by default and restored for the default terminal
+session across restarts. Recent in-memory history is bounded by
+`RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Submit a
+blank line to exit.
 
 ## Server Mode
 
@@ -82,6 +86,7 @@ Server configuration:
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_PARENT_PID`
+- `RUST_AGENT_STATE_DB`
 
 ## Tool Mode
 
@@ -116,8 +121,10 @@ sessions.
 
 ## Authentication
 
-The application owns its ChatGPT login state at `~/.rust-agent/auth.json` by default.
-Set `RUST_AGENT_HOME` to use a different auth directory.
+The application owns its ChatGPT login state at `~/.rust-agent/auth.json` and
+session database at `~/.rust-agent/sessions.db` by default. Set
+`RUST_AGENT_HOME` to use a different directory for both, or set
+`RUST_AGENT_STATE_DB` to override only the session database path.
 
 Check login status with:
 

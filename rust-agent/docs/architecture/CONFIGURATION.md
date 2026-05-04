@@ -1,7 +1,7 @@
 # Configuration Architecture
 
 `AppConfig` collects runtime settings from environment variables and splits them
-into client, model, context-window, output, server, telemetry, and tool
+into client, model, context-window, output, server, storage, telemetry, and tool
 configuration.
 
 ## Flow
@@ -12,9 +12,10 @@ configuration.
 4. `ContextWindowConfig` configures prompt history bounds.
 5. `OutputConfig` configures terminal delta buffering.
 6. `ServerConfig` configures HTTP compatibility and native HTTP/3 listeners.
-7. `TelemetryConfig` configures optional terminal telemetry output.
-8. `ToolConfig` configures which built-in tools are exposed to the model.
-9. The resulting values are passed into long-lived services.
+7. `StorageConfig` configures the SQLite session database path.
+8. `TelemetryConfig` configures optional terminal telemetry output.
+9. `ToolConfig` configures which built-in tools are exposed to the model.
+10. The resulting values are passed into long-lived services.
 
 ## Environment Variables
 
@@ -25,6 +26,7 @@ configuration.
 - `RUST_AGENT_ORIGINATOR`
 - `RUST_AGENT_VERSION`
 - `RUST_AGENT_HOME`
+- `RUST_AGENT_STATE_DB`
 - `RUST_AGENT_REQUEST_TIMEOUT_SECS`
 - `RUST_AGENT_PROMPT_CACHE_NAMESPACE`
 - `RUST_AGENT_CONTEXT_MAX_MESSAGES`
@@ -74,14 +76,16 @@ configuration.
   intentionally deferred, so use this mode only for trusted local sessions.
 - `RUST_AGENT_TOOL_SEARCH_CONCURRENCY` defaults to `1` and may be set up to
   `16` to allow more simultaneous FFF path/content searches across sessions.
-- `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,
-  rust-agent uses `~/.rust-agent/auth.json`.
+- `RUST_AGENT_HOME` changes the directory that stores `auth.json` and the
+  default `sessions.db`; when unset, rust-agent uses `~/.rust-agent/`.
+- `RUST_AGENT_STATE_DB` overrides the SQLite session database path.
 
 ## Current Scope
 
 Configuration is environment-only. ChatGPT auth tokens are stored separately in
-`auth.json`; `RUST_AGENT_SERVER_TOKEN` is the local server bearer token. HTTP/3
-uses a generated self-signed development certificate unless
+`auth.json`; durable sessions are stored in SQLite at `sessions.db` by default;
+`RUST_AGENT_SERVER_TOKEN` is the local server bearer token. HTTP/3 uses a
+generated self-signed development certificate unless
 `RUST_AGENT_SERVER_TLS_CERT` and `RUST_AGENT_SERVER_TLS_KEY` are set together.
 Tool permissions and server route authentication are process-wide. File config,
 dynamic reload, and per-request overrides should be added only when endpoint
