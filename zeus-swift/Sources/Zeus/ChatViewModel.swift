@@ -14,6 +14,7 @@ final class ChatViewModel: ObservableObject {
 
     let workspace = WorkspaceMetadata.current()
 
+    private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
     private let server = RustAgentServer()
     private let auth = RustAgentAuth()
     private var client: AgentAPIClient?
@@ -88,7 +89,11 @@ final class ChatViewModel: ObservableObject {
             var receivedEvent = false
             var receivedAssistantOutput = false
             do {
+                try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                 try await client.streamTurn(sessionID: sessionID, message: message) { event in
+                    if event.type == "status_changed", event.status == "running" {
+                        try? await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
+                    }
                     await MainActor.run {
                         receivedEvent = true
                         if event.type == "text_delta" || (event.type == "message_completed" && event.role == "assistant") {
@@ -169,10 +174,10 @@ final class ChatViewModel: ObservableObject {
             replaceAssistantText(event.text ?? "")
             currentAssistantLineID = nil
         case "tool_call_started":
-            append(kind: .tool, text: "running \(event.toolName ?? "tool")...")
+            insertToolLine("running \(event.toolName ?? "tool")...")
         case "tool_call_completed":
             let name = event.toolName ?? "tool"
-            append(kind: .tool, text: "\(name) \(event.success == false ? "failed" : "completed")")
+            insertToolLine("\(name) \(event.success == false ? "failed" : "completed")")
         case "cache_health":
             updateTokenUsage(event.cache?.usage)
         case "error":
@@ -225,6 +230,23 @@ final class ChatViewModel: ObservableObject {
 
     private func append(kind: TranscriptKind, text: String) {
         lines.append(TranscriptLine(kind: kind, text: text))
+    }
+
+    private func insertToolLine(_ text: String) {
+        let line = TranscriptLine(kind: .tool, text: text)
+
+        if let currentAssistantLineID,
+           let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) {
+            lines.insert(line, at: index)
+            return
+        }
+
+        if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
+            lines.insert(line, at: index)
+            return
+        }
+
+        lines.append(line)
     }
 
     private func refreshAuthStatus() async {
