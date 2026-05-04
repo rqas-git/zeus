@@ -140,8 +140,7 @@ const APPLY_PATCH_TOOL_SPEC: ToolSpec = ToolSpec {
 };
 const EXEC_COMMAND_TOOL_SPEC: ToolSpec = ToolSpec {
     name: EXEC_COMMAND_TOOL,
-    description:
-        "Execute a non-git shell command from the workspace root and return bounded output.",
+    description: "Execute a bash command from the workspace and return bounded output.",
     parameters: ToolParameters::ExecCommand,
     supports_parallel: false,
 };
@@ -784,8 +783,7 @@ impl Serialize for ExecCommandProperties {
         map.serialize_entry(
             "command",
             &StringProperty {
-                description:
-                    "Shell command to execute. Direct git commands are rejected; use dedicated git tools.",
+                description: "Shell command to execute through bash.",
             },
         )?;
         map.serialize_entry(
@@ -1782,9 +1780,6 @@ async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
         command.len() <= MAX_COMMAND_BYTES,
         "command exceeds {MAX_COMMAND_BYTES} bytes"
     );
-    if mentions_git_executable(command) {
-        anyhow::bail!("{}", git_command_rejection_message(command));
-    }
 
     let cwd = command_cwd(root, args.cwd.as_deref()).await?;
     let timeout_ms = bounded_u64(
@@ -2801,101 +2796,6 @@ fn shell_display_token(token: &str) -> String {
     format!("'{}'", token.replace('\'', "'\\''"))
 }
 
-fn mentions_git_executable(command: &str) -> bool {
-    let mut token = String::new();
-    for ch in command.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\') {
-            token.push(ch);
-        } else {
-            if is_git_executable_token(&token) {
-                return true;
-            }
-            token.clear();
-        }
-    }
-    is_git_executable_token(&token)
-}
-
-fn is_git_executable_token(token: &str) -> bool {
-    let name = token
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(token)
-        .to_ascii_lowercase();
-    name == "git" || name == "git.exe"
-}
-
-fn git_command_rejection_message(command: &str) -> String {
-    let hint = match first_git_subcommand(command).as_deref() {
-        Some("status") => "Use git_status with {}.".to_string(),
-        Some("diff") => {
-            "Use git_diff for normal workspace diffs, or git_query with command=\"diff\" for specialized read-only diff arguments.".to_string()
-        }
-        Some("log") => {
-            "Use git_log for recent commits, or git_query with command=\"log\" for specialized read-only log arguments.".to_string()
-        }
-        Some("show" | "blame" | "grep" | "ls-files" | "rev-parse" | "merge-base" | "describe") => {
-            "Use git_query with the git subcommand in the command field and the remaining tokens in args.".to_string()
-        }
-        Some("branch") => "Use git_query with command=\"branch\" and args=[\"--show-current\"].".to_string(),
-        Some("worktree") => "Use git_query with command=\"worktree\" and args=[\"list\"].".to_string(),
-        Some("submodule") => "Use git_query with command=\"submodule\" and args=[\"status\"].".to_string(),
-        Some("add") => "Use git_add with explicit workspace-relative paths.".to_string(),
-        Some("restore") => {
-            "Use git_restore with explicit workspace-relative paths and staged=true when unstaging.".to_string()
-        }
-        Some("commit") => "Use git_commit with an explicit message and path list.".to_string(),
-        Some(other) => format!(
-            "No dedicated wrapper supports git {other:?}. Use git_query for allowlisted read-only commands, or add a dedicated wrapper before exposing this operation."
-        ),
-        None => "Use git_status, git_diff, git_log, git_query, git_add, git_restore, or git_commit instead.".to_string(),
-    };
-    format!("exec_command cannot run git. {hint}")
-}
-
-fn first_git_subcommand(command: &str) -> Option<String> {
-    let tokens = git_hint_tokens(command);
-    let git_index = tokens
-        .iter()
-        .position(|token| is_git_executable_token(token))?;
-    let mut index = git_index + 1;
-    while index < tokens.len() {
-        let token = &tokens[index];
-        if !token.starts_with('-') {
-            return Some(token.to_ascii_lowercase());
-        }
-        index += 1;
-        if matches!(
-            token.as_str(),
-            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
-        ) {
-            index += 1;
-        }
-    }
-    None
-}
-
-fn git_hint_tokens(command: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    for ch in command.chars() {
-        if ch.is_ascii_alphanumeric()
-            || matches!(
-                ch,
-                '_' | '-' | '.' | '/' | '\\' | ':' | '@' | '^' | '~' | '='
-            )
-        {
-            token.push(ch);
-        } else if !token.is_empty() {
-            tokens.push(std::mem::take(&mut token));
-        }
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    tokens
-}
-
 fn format_file_search_results(
     picker: &FilePicker,
     results: &fff_search::MixedSearchResult<'_>,
@@ -3643,13 +3543,13 @@ mod tests {
             json!({
                 "type": "function",
                 "name": "exec_command",
-                "description": "Execute a non-git shell command from the workspace root and return bounded output.",
+                "description": "Execute a bash command from the workspace and return bounded output.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Shell command to execute. Direct git commands are rejected; use dedicated git tools.",
+                            "description": "Shell command to execute through bash.",
                         },
                         "cwd": {
                             "type": "string",
@@ -3672,16 +3572,6 @@ mod tests {
                     "additionalProperties": false,
                 },
             })
-        );
-    }
-
-    #[test]
-    fn suggests_dedicated_wrappers_for_blocked_git_commands() {
-        assert!(git_command_rejection_message("git -C . status --short").contains("git_status"));
-        assert!(git_command_rejection_message("git show HEAD:README.md").contains("git_query"));
-        assert!(git_command_rejection_message("git add README.md").contains("git_add"));
-        assert!(
-            git_command_rejection_message("git restore --staged README.md").contains("git_restore")
         );
     }
 
@@ -3873,7 +3763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executes_shell_commands_and_blocks_git() {
+    async fn executes_shell_commands_and_allows_git() {
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-exec-{}-{}",
             std::process::id(),
@@ -3896,12 +3786,12 @@ mod tests {
                 .to_string(),
             })
             .await;
-        let blocked = registry
+        let git_command = registry
             .execute(ModelToolCall {
                 item_id: None,
-                call_id: "call_git_block".to_string(),
+                call_id: "call_git_allowed".to_string(),
                 name: EXEC_COMMAND_TOOL.to_string(),
-                arguments: json!({ "command": "git status --short" }).to_string(),
+                arguments: json!({ "command": "git --version" }).to_string(),
             })
             .await;
         let failed = registry
@@ -3939,13 +3829,12 @@ mod tests {
 
         assert!(command.success, "{}", command.output);
         assert!(command.output.contains("src"), "{}", command.output);
-        assert!(!blocked.success);
+        assert!(git_command.success, "{}", git_command.output);
         assert!(
-            blocked.output.contains("cannot run git"),
+            git_command.output.contains("git version"),
             "{}",
-            blocked.output
+            git_command.output
         );
-        assert!(blocked.output.contains("git_status"), "{}", blocked.output);
         assert!(!failed.success);
         assert!(
             failed.output.contains("status: exit 7"),

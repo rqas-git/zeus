@@ -62,8 +62,9 @@ explicit `limit` values may request up to 500 entries.
   `target/rust-agent-tool-output/`, enforces a timeout, rejects oversized command
   inputs, and kills the process group when total output exceeds the hard output
   ceiling.
-- `exec_command` rejects command lines that mention a direct `git` executable
-  token. Repository operations must use the dedicated git wrappers.
+- `exec_command` does not currently apply command-level allow/deny protections;
+  reintroducing a command safety policy is deferred. Treat `workspace-exec` as a
+  trusted-local mode until that policy exists.
 - `git_query` allows read-only inspection commands: `status`, `diff`, `log`,
   `show`, `blame`, `grep`, `ls-files`, `branch --show-current`, `rev-parse`,
   `merge-base`, `describe`, `worktree list`, and `submodule status`.
@@ -86,4 +87,5 @@ The registry does not expose network tools or arbitrary file writes.
 Cross-file writes are planned before execution, but filesystem failures during
 the final rename phase can still leave a partial multi-file patch.
 `workspace-exec` is intended only for trusted local sessions; shell commands are
-not filesystem-sandboxed beyond their starting directory.
+not filesystem-sandboxed beyond their starting directory and are not filtered by
+command content.

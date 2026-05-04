@@ -68,8 +68,8 @@ configuration.
   to expose the `apply_patch` file editing tool.
 - Set `RUST_AGENT_TOOL_MODE=workspace-exec` to expose `workspace-write` tools,
   a bounded `exec_command` shell tool, and dedicated git wrappers. The shell
-  tool rejects direct `git` executable tokens; use `git_status`, `git_diff`,
-  `git_log`, and `git_commit` for repository operations.
+  tool currently permits any bash command string; command-level restrictions are
+  intentionally deferred, so use this mode only for trusted local sessions.
 - `RUST_AGENT_TOOL_SEARCH_CONCURRENCY` defaults to `1` and may be set up to
   `16` to allow more simultaneous FFF path/content searches across sessions.
 - `RUST_AGENT_HOME` changes the directory that stores `auth.json`; when unset,

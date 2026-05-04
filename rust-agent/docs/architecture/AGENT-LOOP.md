@@ -79,8 +79,9 @@ transport, and session state separate.
   temporary-file rename.
 - `exec_command` and the git wrappers are sequential, timeout-bounded, and
   return capped stdout and stderr. Oversized command output kills the process
-  group and returns a failed tool result. `exec_command` rejects direct git
-  executable tokens so repository operations flow through the dedicated wrappers.
+  group and returns a failed tool result. `exec_command` currently permits any
+  bash command string; command-level safety restrictions are intentionally
+  deferred and must be reintroduced before untrusted use.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session

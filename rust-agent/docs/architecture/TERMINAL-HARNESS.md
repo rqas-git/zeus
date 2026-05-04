@@ -41,8 +41,9 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
   scanning if it is still running.
 - One-shot prompt mode does not prewarm FFF, so prompts that do not need search
   avoid the index initialization cost.
-- Shell command execution is opt-in through `workspace-exec`; direct git
-  invocations are rejected by `exec_command` and must use the git wrappers.
+- Shell command execution is opt-in through `workspace-exec`; `exec_command`
+  currently permits any bash command string. Command-level restrictions are
+  intentionally deferred, so this mode is for trusted local sessions only.
 - Model changes reuse the same service and transport client.
 - The binary uses Tokio's multi-threaded runtime so server mode can run
   concurrent listeners and request tasks.

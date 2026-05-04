@@ -104,9 +104,12 @@ RUST_AGENT_TOOL_MODE=workspace-exec cargo run -- "Run the relevant checks"
 `workspace-exec` exposes `workspace-write` tools plus `exec_command` and
 dedicated `git_status`, `git_diff`, `git_log`, `git_query`, `git_add`,
 `git_restore`, and `git_commit` wrappers. `exec_command` runs shell commands
-from the workspace but rejects direct `git` invocations; use the git wrappers
-for repository operations. When stdout or stderr exceeds the retained preview,
-the tool returns the tail and saves the full stream under
+from the workspace and does not currently apply command-level allow/deny
+protections; those restrictions are intentionally deferred and must be
+implemented before using `workspace-exec` for untrusted sessions. The git
+wrappers remain available for structured repository operations. When stdout or
+stderr exceeds the retained preview, the tool returns the tail and saves the
+full stream under
 `target/rust-agent-tool-output/`. Use `workspace-exec` only for trusted local
 sessions.
 
