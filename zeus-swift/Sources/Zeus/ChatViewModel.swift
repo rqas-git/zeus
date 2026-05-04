@@ -21,6 +21,8 @@ final class ChatViewModel: ObservableObject {
     private var sessionID: UInt64?
     private var started = false
     private var currentAssistantLineID: UUID?
+    private var toolLineIDsByCallID: [String: UUID] = [:]
+    private var toolLabelsByCallID: [String: String] = [:]
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
 
@@ -82,6 +84,8 @@ final class ChatViewModel: ObservableObject {
         draft = ""
         isSending = true
         currentAssistantLineID = nil
+        toolLineIDsByCallID.removeAll(keepingCapacity: true)
+        toolLabelsByCallID.removeAll(keepingCapacity: true)
         append(kind: .user, text: message)
         replaceAssistantText("sending...")
 
@@ -92,7 +96,7 @@ final class ChatViewModel: ObservableObject {
                 try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                 try await client.streamTurn(sessionID: sessionID, message: message) { event in
                     if event.type == "status_changed", event.status == "running" {
-                        try? await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
+                        try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
                     }
                     await MainActor.run {
                         receivedEvent = true
@@ -174,10 +178,20 @@ final class ChatViewModel: ObservableObject {
             replaceAssistantText(event.text ?? "")
             currentAssistantLineID = nil
         case "tool_call_started":
-            insertToolLine("running \(event.toolName ?? "tool")...")
+            upsertToolLine(
+                callID: event.toolCallID,
+                label: toolLabel(name: event.toolName, arguments: event.toolArguments),
+                isComplete: false,
+                success: nil
+            )
         case "tool_call_completed":
-            let name = event.toolName ?? "tool"
-            insertToolLine("\(name) \(event.success == false ? "failed" : "completed")")
+            upsertToolLine(
+                callID: event.toolCallID,
+                label: toolLabelsByCallID[event.toolCallID ?? ""]
+                    ?? toolLabel(name: event.toolName, arguments: event.toolArguments),
+                isComplete: true,
+                success: event.success
+            )
         case "cache_health":
             updateTokenUsage(event.cache?.usage)
         case "error":
@@ -232,21 +246,131 @@ final class ChatViewModel: ObservableObject {
         lines.append(TranscriptLine(kind: kind, text: text))
     }
 
-    private func insertToolLine(_ text: String) {
+    private func upsertToolLine(
+        callID: String?,
+        label: String,
+        isComplete: Bool,
+        success: Bool?
+    ) {
+        let text = isComplete
+            ? "\(label) \(success == false ? "failed" : "completed")"
+            : "running \(label)..."
+
+        guard let callID, !callID.isEmpty else {
+            insertToolLine(text)
+            return
+        }
+
+        toolLabelsByCallID[callID] = label
+        if let lineID = toolLineIDsByCallID[callID],
+           let index = lines.firstIndex(where: { $0.id == lineID }) {
+            lines[index].text = text
+            return
+        }
+
+        let lineID = insertToolLine(text)
+        toolLineIDsByCallID[callID] = lineID
+    }
+
+    @discardableResult
+    private func insertToolLine(_ text: String) -> UUID {
         let line = TranscriptLine(kind: .tool, text: text)
+        let lineID = line.id
 
         if let currentAssistantLineID,
            let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) {
             lines.insert(line, at: index)
-            return
+            return lineID
         }
 
         if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
             lines.insert(line, at: index)
-            return
+            return lineID
         }
 
         lines.append(line)
+        return lineID
+    }
+
+    private func toolLabel(name: String?, arguments: String?) -> String {
+        let name = name ?? "tool"
+        guard let arguments,
+              let data = arguments.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let json = object as? [String: Any] else {
+            return name
+        }
+
+        if let target = primaryToolTarget(name: name, json: json), !target.isEmpty {
+            return "\(name) \(target)"
+        }
+        return name
+    }
+
+    private func primaryToolTarget(name: String, json: [String: Any]) -> String? {
+        switch name {
+        case "read_file", "read_file_range", "list_dir", "git_diff":
+            return stringValue(json["path"])
+        case "search_files", "search_text":
+            return quoted(stringValue(json["query"]))
+        case "exec_command":
+            return quoted(stringValue(json["command"]))
+        case "apply_patch":
+            return patchSummary(stringValue(json["patch"]))
+        case "git_add", "git_restore":
+            return pathsSummary(json["paths"])
+        case "git_log":
+            return stringValue(json["path"]) ?? maxCountSummary(json["max_count"])
+        case "git_query":
+            return stringArray(json["args"])?.joined(separator: " ")
+        default:
+            return stringValue(json["path"])
+                ?? stringValue(json["query"])
+                ?? pathsSummary(json["paths"])
+        }
+    }
+
+    private func stringValue(_ value: Any?) -> String? {
+        value as? String
+    }
+
+    private func stringArray(_ value: Any?) -> [String]? {
+        value as? [String]
+    }
+
+    private func quoted(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return "\"\(value)\""
+    }
+
+    private func pathsSummary(_ value: Any?) -> String? {
+        guard let paths = stringArray(value), !paths.isEmpty else { return nil }
+        if paths.count == 1 {
+            return paths[0]
+        }
+        return "\(paths[0]) +\(paths.count - 1)"
+    }
+
+    private func maxCountSummary(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        return "max \(value)"
+    }
+
+    private func patchSummary(_ patch: String?) -> String? {
+        guard let patch, !patch.isEmpty else { return nil }
+        var files: [String] = []
+        for line in patch.split(separator: "\n") {
+            let text = String(line)
+            for prefix in ["*** Add File: ", "*** Update File: ", "*** Delete File: "] {
+                guard text.hasPrefix(prefix) else { continue }
+                files.append(String(text.dropFirst(prefix.count)))
+            }
+        }
+        guard let first = files.first else { return "workspace" }
+        if files.count == 1 {
+            return first
+        }
+        return "\(first) +\(files.count - 1)"
     }
 
     private func refreshAuthStatus() async {
