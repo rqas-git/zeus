@@ -7,12 +7,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use futures_util::future::join_all;
 use tokio::sync::Notify;
 
 use crate::client::ConversationMessage;
 use crate::config::ContextWindowConfig;
+use crate::storage::SessionDatabase;
+use crate::storage::StoredSession;
 use crate::tools::ToolExecution;
 use crate::tools::ToolRegistry;
 use crate::tools::ToolSpec;
@@ -115,6 +118,16 @@ impl SessionId {
 pub(crate) struct MessageId(u64);
 
 impl MessageId {
+    /// Creates a message identifier from a stable numeric value.
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric message identifier.
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+
     const fn next(self) -> Self {
         Self(self.0 + 1)
     }
@@ -133,6 +146,15 @@ impl MessageRole {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
+        }
+    }
+
+    /// Creates a role from its stable storage label.
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            _ => None,
         }
     }
 }
@@ -154,6 +176,16 @@ impl SessionStatus {
             Self::Failed => "failed",
         }
     }
+
+    /// Creates a status from its stable storage label.
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "idle" => Some(Self::Idle),
+            "running" => Some(Self::Running),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 /// Message stored in the current session.
@@ -164,7 +196,7 @@ pub(crate) struct AgentMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum AgentItem {
+pub(crate) enum AgentItem {
     Message {
         role: MessageRole,
         text: String,
@@ -192,6 +224,21 @@ impl AgentItem {
 }
 
 impl AgentMessage {
+    /// Creates a stored agent message from durable parts.
+    pub(crate) fn from_parts(id: MessageId, item: AgentItem) -> Self {
+        Self { id, item }
+    }
+
+    /// Returns the stable message identifier.
+    pub(crate) const fn id(&self) -> MessageId {
+        self.id
+    }
+
+    /// Returns the stored item payload.
+    pub(crate) const fn item(&self) -> &AgentItem {
+        &self.item
+    }
+
     /// Returns the message role.
     #[cfg(test)]
     pub(crate) fn role(&self) -> MessageRole {
@@ -473,9 +520,29 @@ impl InMemorySessionStore {
             session_id,
             status: SessionStatus::Idle,
             config,
-            next_message_id: MessageId(1),
+            next_message_id: MessageId::new(1),
             messages: Vec::new(),
             last_cache_observation: None,
+        }
+    }
+
+    fn from_stored(session_id: SessionId, mut stored: StoredSession) -> Self {
+        if stored.status == SessionStatus::Running {
+            stored.status = SessionStatus::Idle;
+        }
+        let next_message_id = stored
+            .messages
+            .iter()
+            .map(AgentMessage::id)
+            .max_by_key(|id| id.get())
+            .map_or(MessageId::new(1), MessageId::next);
+        Self {
+            session_id,
+            status: stored.status,
+            config: stored.config,
+            next_message_id,
+            messages: stored.messages,
+            last_cache_observation: stored.last_cache_observation,
         }
     }
 
@@ -648,9 +715,9 @@ impl InMemorySessionStore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct CacheObservation {
-    prompt_cache_key: String,
-    stable_prefix_hash: u64,
+pub(crate) struct CacheObservation {
+    pub(crate) prompt_cache_key: String,
+    pub(crate) stable_prefix_hash: u64,
 }
 
 /// Runs ordered turns for a single in-memory session.
@@ -659,6 +726,7 @@ pub(crate) struct AgentLoop {
     store: InMemorySessionStore,
     context_window: ContextWindowConfig,
     tools: ToolRegistry,
+    database: Option<SessionDatabase>,
 }
 
 impl AgentLoop {
@@ -698,7 +766,38 @@ impl AgentLoop {
             store: InMemorySessionStore::new(session_id, config),
             context_window,
             tools,
+            database: None,
         }
+    }
+
+    /// Creates an agent loop backed by durable SQLite session storage.
+    ///
+    /// # Errors
+    /// Returns an error when the session cannot be loaded or initialized.
+    pub(crate) fn with_context_window_tools_and_database(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+        config: SessionConfig,
+        tools: ToolRegistry,
+        database: SessionDatabase,
+    ) -> Result<Self> {
+        let mut store = match database.load_session(session_id)? {
+            Some(stored) => InMemorySessionStore::from_stored(session_id, stored),
+            None => {
+                database.ensure_session(session_id, config.model())?;
+                InMemorySessionStore::new(session_id, config)
+            }
+        };
+        store.prune_history(context_window);
+        if store.status() == SessionStatus::Idle {
+            database.set_session_status(session_id, SessionStatus::Idle)?;
+        }
+        Ok(Self {
+            store,
+            context_window,
+            tools,
+            database: Some(database),
+        })
     }
 
     /// Returns the session identifier.
@@ -726,6 +825,10 @@ impl AgentLoop {
             self.store.status() != SessionStatus::Running,
             "cannot change model while session is running"
         );
+        let model = model.into();
+        if let Some(database) = &self.database {
+            database.set_session_model(self.session_id(), &model)?;
+        }
         self.store.set_model(model);
         Ok(())
     }
@@ -764,6 +867,7 @@ impl AgentLoop {
 
         let user_text = text.into();
         let user_id = self.store.append_message(MessageRole::User, user_text);
+        self.persist_message(user_id)?;
         if let Err(error) = emit(AgentEvent::MessageCompleted {
             session_id: self.session_id(),
             message_id: user_id,
@@ -776,12 +880,22 @@ impl AgentLoop {
                 .unwrap_or_default(),
         }) {
             self.store.remove_last_message(user_id);
-            return Err(error);
+            return rollback_persisted_message(
+                self.database.as_ref(),
+                self.session_id(),
+                user_id,
+                error,
+            );
         }
 
         if let Err(error) = self.begin_running(&mut emit) {
             self.store.remove_last_message(user_id);
-            return Err(error);
+            return rollback_persisted_message(
+                self.database.as_ref(),
+                self.session_id(),
+                user_id,
+                error,
+            );
         }
         self.store.prune_history(self.context_window);
         let result = self.run_until_done(model, &cancellation, &mut emit).await;
@@ -797,12 +911,8 @@ impl AgentLoop {
             }
             Err(error) => {
                 self.store.prune_history(self.context_window);
-                self.store.set_status(SessionStatus::Failed);
+                self.set_status(SessionStatus::Failed, &mut emit)?;
                 let message = error.to_string();
-                emit(AgentEvent::StatusChanged {
-                    session_id: self.session_id(),
-                    status: SessionStatus::Failed,
-                })?;
                 emit(AgentEvent::Error {
                     session_id: self.session_id(),
                     message: &message,
@@ -812,16 +922,58 @@ impl AgentLoop {
         }
     }
 
+    fn persist_message(&self, message_id: MessageId) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        let message = self
+            .store
+            .messages()
+            .iter()
+            .find(|message| message.id() == message_id)
+            .context("message missing from session store")?;
+        database.insert_message(self.session_id(), message)
+    }
+
+    fn persist_messages_from(&self, start: usize) -> Result<()> {
+        let Some(database) = &self.database else {
+            return Ok(());
+        };
+        for message in &self.store.messages()[start..] {
+            database.insert_message(self.session_id(), message)?;
+        }
+        Ok(())
+    }
+
+    fn persist_status(&self, status: SessionStatus) -> Result<()> {
+        if let Some(database) = &self.database {
+            database.set_session_status(self.session_id(), status)?;
+        }
+        Ok(())
+    }
+
+    fn record_cache_observation(&mut self, cache_health: &CacheHealth) -> Result<()> {
+        self.store.record_cache_observation(cache_health);
+        if let (Some(database), Some(observation)) =
+            (&self.database, &self.store.last_cache_observation)
+        {
+            database.record_cache_observation(self.session_id(), observation)?;
+        }
+        Ok(())
+    }
+
     fn begin_running(
         &mut self,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         self.store.set_status(SessionStatus::Running);
+        self.persist_status(SessionStatus::Running)?;
         if let Err(error) = emit(AgentEvent::StatusChanged {
             session_id: self.session_id(),
             status: SessionStatus::Running,
         }) {
             self.store.set_status(SessionStatus::Idle);
+            self.persist_status(SessionStatus::Idle)?;
             return Err(error);
         }
         Ok(())
@@ -833,6 +985,7 @@ impl AgentLoop {
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         self.store.set_status(status);
+        self.persist_status(status)?;
         emit(AgentEvent::StatusChanged {
             session_id: self.session_id(),
             status,
@@ -889,13 +1042,14 @@ impl AgentLoop {
                 session_id,
                 cache_health,
             })?;
-            self.store.record_cache_observation(cache_health);
+            self.record_cache_observation(cache_health)?;
         }
         let assistant_text = model_response.text;
         if !assistant_text.is_empty() {
             let assistant_id = self
                 .store
                 .append_message(MessageRole::Assistant, assistant_text);
+            self.persist_message(assistant_id)?;
             let assistant_text = self
                 .store
                 .messages()
@@ -962,7 +1116,9 @@ impl AgentLoop {
                 )
             })
             .collect::<Vec<_>>();
+        let first_new_message = self.store.messages().len();
         self.store.append_tool_transcript(tool_calls, executions);
+        self.persist_messages_from(first_new_message)?;
         for (tool_call_id, tool_name, success) in completions {
             emit(AgentEvent::ToolCallCompleted {
                 session_id,
@@ -973,6 +1129,20 @@ impl AgentLoop {
         }
         Ok(())
     }
+}
+
+fn rollback_persisted_message(
+    database: Option<&SessionDatabase>,
+    session_id: SessionId,
+    message_id: MessageId,
+    error: anyhow::Error,
+) -> Result<()> {
+    if let Some(database) = database {
+        database
+            .delete_message(session_id, message_id)
+            .context("failed to roll back persisted message")?;
+    }
+    Err(error)
 }
 
 #[cfg(test)]
@@ -1070,6 +1240,69 @@ mod tests {
 
         assert_eq!(agent.messages().len(), 4);
         assert_eq!(agent.messages()[3].text(), "rust-agent");
+    }
+
+    #[tokio::test]
+    async fn sqlite_database_restores_session_history() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(7);
+        let mut agent = AgentLoop::with_context_window_tools_and_database(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            ToolRegistry::default(),
+            database.clone(),
+        )
+        .unwrap();
+        let first_streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                assert_eq!(history, &[ConversationMessage::user("hello")]);
+                Ok("one".to_string())
+            },
+        );
+        agent
+            .submit_user_message("hello", &first_streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        let mut restored = AgentLoop::with_context_window_tools_and_database(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            ToolRegistry::default(),
+            database.clone(),
+        )
+        .unwrap();
+        let second_streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                assert_eq!(
+                    history,
+                    &[
+                        ConversationMessage::user("hello"),
+                        ConversationMessage::assistant("one"),
+                        ConversationMessage::user("again"),
+                    ]
+                );
+                Ok("two".to_string())
+            },
+        );
+
+        restored
+            .submit_user_message("again", &second_streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        let stored = database.load_session(session_id).unwrap().unwrap();
+        assert_eq!(stored.messages.len(), 4);
+        assert_eq!(stored.messages[3].text(), "two");
     }
 
     #[tokio::test]

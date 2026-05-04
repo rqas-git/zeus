@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::storage::default_database_path;
 use crate::tools::ToolPolicy;
 use crate::tools::DEFAULT_FFF_SEARCH_CONCURRENCY;
 use crate::tools::MAX_FFF_SEARCH_CONCURRENCY;
@@ -41,6 +42,7 @@ pub(crate) struct AppConfig {
     pub(crate) models: ModelConfig,
     pub(crate) output: OutputConfig,
     pub(crate) server: ServerConfig,
+    pub(crate) storage: StorageConfig,
     pub(crate) telemetry: TelemetryConfig,
     pub(crate) tools: ToolConfig,
 }
@@ -57,6 +59,7 @@ impl AppConfig {
             models: ModelConfig::from_env()?,
             output: OutputConfig::from_env()?,
             server: ServerConfig::from_env()?,
+            storage: StorageConfig::from_env()?,
             telemetry: TelemetryConfig::from_env()?,
             tools: ToolConfig::from_env()?,
         })
@@ -556,6 +559,40 @@ impl Default for ServerConfig {
             h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
             h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
             parent_pid: None,
+        }
+    }
+}
+
+/// Local durable storage configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StorageConfig {
+    database_path: PathBuf,
+}
+
+impl StorageConfig {
+    /// Loads durable storage configuration from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error when the default rust-agent home cannot be resolved.
+    pub(crate) fn from_env() -> Result<Self> {
+        Ok(Self {
+            database_path: env_optional_path("RUST_AGENT_STATE_DB")
+                .map(Ok)
+                .unwrap_or_else(default_database_path)?,
+        })
+    }
+
+    /// Returns the SQLite session database path.
+    pub(crate) fn database_path(&self) -> &std::path::Path {
+        &self.database_path
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            database_path: default_database_path()
+                .unwrap_or_else(|_| PathBuf::from(".rust-agent").join("sessions.db")),
         }
     }
 }

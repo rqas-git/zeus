@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod server;
 mod service;
+mod storage;
 #[cfg(test)]
 mod test_http;
 mod tools;
@@ -28,6 +29,7 @@ use client::ChatGptClient;
 use config::AppConfig;
 use mimalloc::MiMalloc;
 use service::AgentService;
+use storage::SessionDatabase;
 use tools::ToolRegistry;
 
 #[global_allocator]
@@ -52,6 +54,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         models,
         output,
         server: _,
+        storage,
         telemetry,
         tools: tool_config,
     } = AppConfig::from_env()?;
@@ -65,14 +68,18 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         Some(message) => {
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
-            let service = AgentService::with_tools(client, context, models, tools);
+            let database = SessionDatabase::open(storage.database_path())?;
+            let service =
+                AgentService::with_tools(client, context, models, tools).with_database(database);
             print_agent_response(&service, session_id, output, telemetry, message).await
         }
         None => {
             let _search_index_warmup = tools.spawn_search_index_warmup();
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
-            let service = AgentService::with_tools(client, context, models, tools);
+            let database = SessionDatabase::open(storage.database_path())?;
+            let service =
+                AgentService::with_tools(client, context, models, tools).with_database(database);
             run_interactive_loop(&service, session_id, output, telemetry).await
         }
     }
@@ -85,6 +92,7 @@ async fn run_server() -> Result<()> {
         models,
         output: _,
         server,
+        storage,
         telemetry,
         tools: tool_config,
     } = AppConfig::from_env()?;
@@ -95,7 +103,9 @@ async fn run_server() -> Result<()> {
     let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
     let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+    let database = SessionDatabase::open(storage.database_path())?;
     let service = AgentService::with_tools(client, context, models, tools)
+        .with_database(database)
         .with_session_limit(server.max_sessions());
     server::serve(service, server).await
 }

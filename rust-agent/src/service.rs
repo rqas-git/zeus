@@ -16,6 +16,7 @@ use crate::agent_loop::SessionId;
 use crate::agent_loop::TurnCancellation;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
+use crate::storage::SessionDatabase;
 use crate::tools::ToolRegistry;
 
 /// Reuses a model client and keeps conversation state by session.
@@ -25,6 +26,7 @@ pub(crate) struct AgentService<M> {
     context_window: ContextWindowConfig,
     model_config: ModelConfig,
     tools: ToolRegistry,
+    database: Option<SessionDatabase>,
     max_sessions: usize,
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
 }
@@ -103,9 +105,16 @@ where
             context_window,
             model_config,
             tools,
+            database: None,
             max_sessions: usize::MAX,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Enables SQLite-backed session storage.
+    pub(crate) fn with_database(mut self, database: SessionDatabase) -> Self {
+        self.database = Some(database);
+        self
     }
 
     /// Sets the maximum number of retained sessions.
@@ -131,14 +140,20 @@ where
                 self.context_window,
                 SessionConfig::new(self.model_config.default_model()),
                 self.tools.clone(),
-            ),
+                self.database.clone(),
+            )?,
         );
         Ok(())
     }
 
-    /// Deletes an in-memory session if it exists.
+    /// Deletes a session from memory and durable storage if present.
     pub(crate) fn delete_session(&self, session_id: SessionId) -> Result<bool> {
-        Ok(self.lock_sessions()?.remove(&session_id).is_some())
+        let removed_from_memory = self.lock_sessions()?.remove(&session_id).is_some();
+        let removed_from_storage = match &self.database {
+            Some(database) => database.delete_session(session_id)?,
+            None => false,
+        };
+        Ok(removed_from_memory || removed_from_storage)
     }
 
     /// Requests cancellation of the currently running turn for a session.
@@ -151,11 +166,16 @@ where
 
     /// Returns the model selected for a session, or the default for a new session.
     pub(crate) async fn session_model(&self, session_id: SessionId) -> Result<String> {
-        let Some(session) = self.session(session_id)? else {
-            return Ok(self.model_config.default_model().to_string());
-        };
-        let agent = session.agent.lock().await;
-        Ok(agent.model().to_string())
+        if let Some(session) = self.session(session_id)? {
+            let agent = session.agent.lock().await;
+            return Ok(agent.model().to_string());
+        }
+        if let Some(database) = &self.database {
+            if let Some(stored) = database.load_session(session_id)? {
+                return Ok(stored.config.model().to_string());
+            }
+        }
+        Ok(self.model_config.default_model().to_string())
     }
 
     /// Returns the backend allowlist for model changes.
@@ -180,15 +200,20 @@ where
                 Arc::clone(session)
             } else {
                 self.ensure_can_insert_session(&sessions)?;
-                sessions.insert(
+                let session = Self::new_session(
                     session_id,
-                    Self::new_session(
-                        session_id,
-                        self.context_window,
-                        SessionConfig::new(model.clone()),
-                        self.tools.clone(),
-                    ),
-                );
+                    self.context_window,
+                    SessionConfig::new(model.clone()),
+                    self.tools.clone(),
+                    self.database.clone(),
+                )?;
+                {
+                    let Ok(mut agent) = session.agent.try_lock() else {
+                        anyhow::bail!("cannot change model while session is running");
+                    };
+                    agent.set_model(model.clone())?;
+                }
+                sessions.insert(session_id, session);
                 return Ok(model);
             }
         };
@@ -235,7 +260,8 @@ where
             self.context_window,
             SessionConfig::new(self.model_config.default_model()),
             self.tools.clone(),
-        );
+            self.database.clone(),
+        )?;
         sessions.insert(session_id, Arc::clone(&session));
         Ok(session)
     }
@@ -245,10 +271,21 @@ where
         context_window: ContextWindowConfig,
         config: SessionConfig,
         tools: ToolRegistry,
-    ) -> SharedSession {
-        Arc::new(SessionHandle::new(
-            AgentLoop::with_context_window_and_tools(session_id, context_window, config, tools),
-        ))
+        database: Option<SessionDatabase>,
+    ) -> Result<SharedSession> {
+        let agent = match database {
+            Some(database) => AgentLoop::with_context_window_tools_and_database(
+                session_id,
+                context_window,
+                config,
+                tools,
+                database,
+            )?,
+            None => {
+                AgentLoop::with_context_window_and_tools(session_id, context_window, config, tools)
+            }
+        };
+        Ok(Arc::new(SessionHandle::new(agent)))
     }
 
     fn lock_sessions(
