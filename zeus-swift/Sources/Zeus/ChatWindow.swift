@@ -11,13 +11,13 @@ struct ChatWindow: View {
                 HeaderBar(onLoginStatus: viewModel.showLoginStatus)
 
                 TranscriptView(lines: viewModel.lines)
-                    .padding(.top, 12)
+                    .padding(.top, 10)
 
                 InputPrompt(
                     text: $viewModel.draft,
                     onSubmit: viewModel.sendDraft
                 )
-                .padding(.top, 10)
+                .padding(.top, 8)
 
                 FooterBar(
                     workspace: viewModel.workspace,
@@ -26,13 +26,13 @@ struct ChatWindow: View {
                     permissions: viewModel.permissions,
                     tokenUsage: viewModel.tokenUsage
                 )
-                .padding(.top, 14)
+                .padding(.top, 11)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 12)
-            .padding(.bottom, 18)
+            .padding(.horizontal, 19)
+            .padding(.top, 10)
+            .padding(.bottom, 14)
         }
-        .font(.system(size: 15, weight: .regular, design: .monospaced))
+        .font(.system(size: 12, weight: .regular, design: .monospaced))
         .foregroundStyle(TerminalColors.primaryText)
         .onDisappear {
             viewModel.shutdown()
@@ -69,9 +69,9 @@ private struct HeaderBar: View {
                 Button("Login Status", action: onLoginStatus)
             } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 13, weight: .regular))
+                    .font(.system(size: 10, weight: .regular))
                     .foregroundStyle(TerminalColors.dimText)
-                    .frame(width: 20, height: 18)
+                    .frame(width: 16, height: 14)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
@@ -79,7 +79,7 @@ private struct HeaderBar: View {
             .fixedSize()
             .help("Settings")
         }
-        .frame(height: 18)
+        .frame(height: 14)
     }
 }
 
@@ -89,14 +89,14 @@ private struct TranscriptView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 13) {
+                LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(lines) { line in
                         TerminalLineView(line: line)
                             .id(line.id)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 8)
+                .padding(.bottom, 6)
             }
             .scrollIndicators(.hidden)
             .onChange(of: lines) { newLines in
@@ -112,8 +112,8 @@ private struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
-    private let markerWidth: CGFloat = 12
-    private let markerTextSpacing: CGFloat = 10
+    private let markerWidth: CGFloat = 10
+    private let markerTextSpacing: CGFloat = 8
 
     var body: some View {
         switch line.kind {
@@ -158,8 +158,8 @@ private struct TerminalLineView: View {
     private func marker(color: Color) -> some View {
         Circle()
             .fill(color)
-            .frame(width: 9, height: 9)
-            .padding(.top, 5)
+            .frame(width: 7, height: 7)
+            .padding(.top, 4)
     }
 
     private var textColor: Color {
@@ -175,8 +175,8 @@ private struct TerminalLineView: View {
 private struct InputPrompt: View {
     @Binding var text: String
     let onSubmit: () -> Void
-    private let markerWidth: CGFloat = 12
-    private let markerTextSpacing: CGFloat = 10
+    private let markerWidth: CGFloat = 10
+    private let markerTextSpacing: CGFloat = 8
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: markerTextSpacing) {
@@ -189,7 +189,7 @@ private struct InputPrompt: View {
                 placeholder: "type a command or ask anything...",
                 onSubmit: onSubmit
             )
-                .frame(height: 22)
+                .frame(height: 18)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -205,24 +205,24 @@ private struct FooterBar: View {
     var body: some View {
         HStack(spacing: 0) {
             footerText(workspace.name, color: TerminalColors.dimText)
-                .frame(minWidth: 120, alignment: .leading)
+                .frame(minWidth: 96, alignment: .leading)
             footerText(workspace.branch, color: TerminalColors.green)
-                .frame(minWidth: 120, alignment: .leading)
+                .frame(minWidth: 96, alignment: .leading)
             footerText(model, color: TerminalColors.cyan)
-                .frame(minWidth: 150, alignment: .leading)
+                .frame(minWidth: 120, alignment: .leading)
             footerText(effort, color: TerminalColors.primaryText)
-                .frame(minWidth: 115, alignment: .leading)
+                .frame(minWidth: 92, alignment: .leading)
             footerText(permissions, color: TerminalColors.primaryText)
-                .frame(minWidth: 115, alignment: .leading)
+                .frame(minWidth: 92, alignment: .leading)
             footerText(tokenUsage, color: TerminalColors.dimText)
-                .frame(minWidth: 170, alignment: .leading)
-            Spacer(minLength: 18)
+                .frame(minWidth: 136, alignment: .leading)
+            Spacer(minLength: 14)
             footerText(workspace.displayPath, color: TerminalColors.dimText)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .font(.system(size: 14, weight: .regular, design: .monospaced))
-        .frame(height: 22)
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .frame(height: 18)
     }
 
     private func footerText(_ text: String, color: Color) -> some View {

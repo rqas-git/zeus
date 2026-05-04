@@ -17,7 +17,7 @@ struct PromptTextField: NSViewRepresentable {
         textField.isBordered = false
         textField.drawsBackground = false
         textField.focusRingType = .none
-        textField.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        textField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textField.textColor = NSColor(TerminalPalette.primaryText)
         textField.placeholderString = placeholder
         textField.cell?.sendsActionOnEndEditing = false
