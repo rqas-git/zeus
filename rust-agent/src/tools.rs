@@ -56,6 +56,8 @@ const GIT_STATUS_TOOL: &str = "git_status";
 const GIT_DIFF_TOOL: &str = "git_diff";
 const GIT_LOG_TOOL: &str = "git_log";
 const GIT_QUERY_TOOL: &str = "git_query";
+const GIT_ADD_TOOL: &str = "git_add";
+const GIT_RESTORE_TOOL: &str = "git_restore";
 const GIT_COMMIT_TOOL: &str = "git_commit";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
@@ -166,6 +168,18 @@ const GIT_QUERY_TOOL_SPEC: ToolSpec = ToolSpec {
     parameters: ToolParameters::GitQuery,
     supports_parallel: false,
 };
+const GIT_ADD_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_ADD_TOOL,
+    description: "Stage explicit workspace-relative paths for the next git commit.",
+    parameters: ToolParameters::GitAdd,
+    supports_parallel: false,
+};
+const GIT_RESTORE_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_RESTORE_TOOL,
+    description: "Restore or unstage explicit workspace-relative paths.",
+    parameters: ToolParameters::GitRestore,
+    supports_parallel: false,
+};
 const GIT_COMMIT_TOOL_SPEC: ToolSpec = ToolSpec {
     name: GIT_COMMIT_TOOL,
     description: "Create an atomic git commit for explicit workspace-relative paths.",
@@ -202,6 +216,8 @@ const WORKSPACE_EXEC_TOOL_SPECS: &[ToolSpec] = &[
     GIT_DIFF_TOOL_SPEC,
     GIT_LOG_TOOL_SPEC,
     GIT_QUERY_TOOL_SPEC,
+    GIT_ADD_TOOL_SPEC,
+    GIT_RESTORE_TOOL_SPEC,
     GIT_COMMIT_TOOL_SPEC,
 ];
 
@@ -282,6 +298,8 @@ enum ToolParameters {
     GitDiff,
     GitLog,
     GitQuery,
+    GitAdd,
+    GitRestore,
     GitCommit,
 }
 
@@ -307,6 +325,8 @@ impl ToolParameters {
             Self::GitQuery => {
                 "git_query:command:string:required:args:string_array:max_output_bytes:integer"
             }
+            Self::GitAdd => "git_add:paths:string_array:required",
+            Self::GitRestore => "git_restore:paths:string_array:required:staged:boolean",
             Self::GitCommit => "git_commit:message:string:required:paths:string_array:required",
         }
     }
@@ -403,6 +423,22 @@ impl Serialize for ToolParameters {
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &GitQueryProperties)?;
                 map.serialize_entry("required", &["command"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::GitAdd => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &GitAddProperties)?;
+                map.serialize_entry("required", &["paths"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::GitRestore => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &GitRestoreProperties)?;
+                map.serialize_entry("required", &["paths"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
             }
@@ -748,7 +784,7 @@ impl Serialize for ExecCommandProperties {
             "command",
             &StringProperty {
                 description:
-                    "Shell command to execute. Direct git commands are rejected; use git_* tools.",
+                    "Shell command to execute. Direct git commands are rejected; use dedicated git tools.",
             },
         )?;
         map.serialize_entry(
@@ -856,6 +892,49 @@ impl Serialize for GitQueryProperties {
                 description: "Maximum stdout bytes and stderr bytes to retain separately.",
                 minimum: 1,
                 maximum: MAX_COMMAND_OUTPUT_BYTES,
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct GitAddProperties;
+
+impl Serialize for GitAddProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(
+            "paths",
+            &StringArrayProperty {
+                description: "Workspace-relative paths to stage.",
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct GitRestoreProperties;
+
+impl Serialize for GitRestoreProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry(
+            "paths",
+            &StringArrayProperty {
+                description: "Workspace-relative paths to restore or unstage.",
+            },
+        )?;
+        map.serialize_entry(
+            "staged",
+            &BooleanProperty {
+                description:
+                    "When true, unstage paths. When false or omitted, discard worktree changes for paths.",
             },
         )?;
         map.end()
@@ -1014,6 +1093,22 @@ impl ToolRegistry {
             }
             GIT_QUERY_TOOL => {
                 return git_query(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_ADD_TOOL => {
+                return git_add(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_RESTORE_TOOL => {
+                return git_restore(&self.root, &call.arguments)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1216,6 +1311,20 @@ struct GitQueryArguments {
     args: Vec<String>,
     #[serde(default)]
     max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitAddArguments {
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitRestoreArguments {
+    paths: Vec<String>,
+    #[serde(default)]
+    staged: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1662,7 +1771,7 @@ async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
     );
     anyhow::ensure!(
         !mentions_git_executable(command),
-        "exec_command cannot run git; use git_status, git_diff, git_log, or git_commit"
+        "exec_command cannot run git; use git_status, git_diff, git_log, git_query, git_add, git_restore, or git_commit"
     );
 
     let cwd = command_cwd(root, args.cwd.as_deref()).await?;
@@ -1746,6 +1855,30 @@ async fn git_query(root: &Path, arguments: &str) -> Result<ToolOutput> {
     Ok(process_result_output(result))
 }
 
+async fn git_add(root: &Path, arguments: &str) -> Result<ToolOutput> {
+    let args = parse_git_add_arguments(arguments)?;
+    let pathspecs = git_pathspecs(&args.paths)?;
+    let mut git_args = vec!["add".to_string(), "--".to_string()];
+    git_args.extend(pathspecs);
+    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    Ok(process_result_output(result))
+}
+
+async fn git_restore(root: &Path, arguments: &str) -> Result<ToolOutput> {
+    let args = parse_git_restore_arguments(arguments)?;
+    let pathspecs = git_pathspecs(&args.paths)?;
+    let mut git_args = vec!["restore".to_string()];
+    if args.staged {
+        git_args.push("--staged".to_string());
+    } else {
+        git_args.push("--worktree".to_string());
+    }
+    git_args.push("--".to_string());
+    git_args.extend(pathspecs);
+    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    Ok(process_result_output(result))
+}
+
 async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_git_commit_arguments(arguments)?;
     let message = trimmed_required("message", &args.message)?;
@@ -1753,22 +1886,7 @@ async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
         message.len() <= MAX_GIT_COMMIT_MESSAGE_BYTES,
         "message exceeds {MAX_GIT_COMMIT_MESSAGE_BYTES} bytes"
     );
-    anyhow::ensure!(!args.paths.is_empty(), "paths cannot be empty");
-    anyhow::ensure!(
-        args.paths.len() <= MAX_GIT_PATHS,
-        "paths exceed {MAX_GIT_PATHS} entries"
-    );
-    let mut pathspecs = Vec::with_capacity(args.paths.len());
-    let mut path_bytes = 0usize;
-    for path in &args.paths {
-        let pathspec = git_pathspec(path)?;
-        path_bytes = path_bytes.saturating_add(pathspec.len());
-        anyhow::ensure!(
-            path_bytes <= MAX_GIT_PATH_BYTES,
-            "paths exceed {MAX_GIT_PATH_BYTES} bytes"
-        );
-        pathspecs.push(pathspec);
-    }
+    let pathspecs = git_pathspecs(&args.paths)?;
 
     let mut add_args = vec!["add".to_string(), "--".to_string()];
     add_args.extend(pathspecs.iter().cloned());
@@ -1944,6 +2062,14 @@ fn parse_git_query_arguments(arguments: &str) -> Result<GitQueryArguments> {
     serde_json::from_str(arguments).context("invalid git_query arguments")
 }
 
+fn parse_git_add_arguments(arguments: &str) -> Result<GitAddArguments> {
+    serde_json::from_str(arguments).context("invalid git_add arguments")
+}
+
+fn parse_git_restore_arguments(arguments: &str) -> Result<GitRestoreArguments> {
+    serde_json::from_str(arguments).context("invalid git_restore arguments")
+}
+
 fn parse_git_commit_arguments(arguments: &str) -> Result<GitCommitArguments> {
     serde_json::from_str(arguments).context("invalid git_commit arguments")
 }
@@ -2110,6 +2236,26 @@ async fn command_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
 fn git_pathspec(path: &str) -> Result<String> {
     let relative = clean_workspace_relative_path(path)?;
     Ok(relative.to_string_lossy().into_owned())
+}
+
+fn git_pathspecs(paths: &[String]) -> Result<Vec<String>> {
+    anyhow::ensure!(!paths.is_empty(), "paths cannot be empty");
+    anyhow::ensure!(
+        paths.len() <= MAX_GIT_PATHS,
+        "paths exceed {MAX_GIT_PATHS} entries"
+    );
+    let mut pathspecs = Vec::with_capacity(paths.len());
+    let mut path_bytes = 0usize;
+    for path in paths {
+        let pathspec = git_pathspec(path)?;
+        path_bytes = path_bytes.saturating_add(pathspec.len());
+        anyhow::ensure!(
+            path_bytes <= MAX_GIT_PATH_BYTES,
+            "paths exceed {MAX_GIT_PATH_BYTES} bytes"
+        );
+        pathspecs.push(pathspec);
+    }
+    Ok(pathspecs)
 }
 
 fn read_only_git_args(command: &str, args: &[String]) -> Result<Vec<String>> {
@@ -3355,6 +3501,8 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name() == GIT_DIFF_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_LOG_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_QUERY_TOOL));
+        assert!(specs.iter().any(|spec| spec.name() == GIT_ADD_TOOL));
+        assert!(specs.iter().any(|spec| spec.name() == GIT_RESTORE_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_COMMIT_TOOL));
         let exec_spec = specs
             .iter()
@@ -3371,7 +3519,7 @@ mod tests {
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "Shell command to execute. Direct git commands are rejected; use git_* tools.",
+                            "description": "Shell command to execute. Direct git commands are rejected; use dedicated git tools.",
                         },
                         "cwd": {
                             "type": "string",
@@ -3689,6 +3837,42 @@ mod tests {
                 .to_string(),
             })
             .await;
+        let add = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_add".to_string(),
+                name: GIT_ADD_TOOL.to_string(),
+                arguments: json!({ "paths": ["README.md"] }).to_string(),
+            })
+            .await;
+        let staged_status = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_status_staged".to_string(),
+                name: GIT_STATUS_TOOL.to_string(),
+                arguments: "{}".to_string(),
+            })
+            .await;
+        let restore_staged = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_restore_staged".to_string(),
+                name: GIT_RESTORE_TOOL.to_string(),
+                arguments: json!({
+                    "paths": ["README.md"],
+                    "staged": true,
+                })
+                .to_string(),
+            })
+            .await;
+        let unstaged_status = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_status_unstaged".to_string(),
+                name: GIT_STATUS_TOOL.to_string(),
+                arguments: "{}".to_string(),
+            })
+            .await;
         let commit = registry
             .execute(ModelToolCall {
                 item_id: None,
@@ -3709,6 +3893,15 @@ mod tests {
                 arguments: json!({ "max_count": 1 }).to_string(),
             })
             .await;
+        fs::write(temp.join("README.md"), "discard\n").unwrap();
+        let restore_worktree = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_restore_worktree".to_string(),
+                name: GIT_RESTORE_TOOL.to_string(),
+                arguments: json!({ "paths": ["README.md"] }).to_string(),
+            })
+            .await;
 
         assert!(status.success, "{}", status.output);
         assert!(status.output.contains(" M README.md"), "{}", status.output);
@@ -3725,10 +3918,26 @@ mod tests {
             "{}",
             branch_delete.output
         );
+        assert!(add.success, "{}", add.output);
+        assert!(staged_status.success, "{}", staged_status.output);
+        assert!(
+            staged_status.output.contains("M  README.md"),
+            "{}",
+            staged_status.output
+        );
+        assert!(restore_staged.success, "{}", restore_staged.output);
+        assert!(unstaged_status.success, "{}", unstaged_status.output);
+        assert!(
+            unstaged_status.output.contains(" M README.md"),
+            "{}",
+            unstaged_status.output
+        );
         assert!(commit.success, "{}", commit.output);
         assert!(commit.output.contains("git commit"), "{}", commit.output);
         assert!(log.success, "{}", log.output);
         assert!(log.output.contains("Update readme"), "{}", log.output);
+        assert!(restore_worktree.success, "{}", restore_worktree.output);
+        assert_eq!(fs::read_to_string(temp.join("README.md")).unwrap(), "new\n");
 
         fs::remove_dir_all(&temp).unwrap();
     }

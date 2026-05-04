@@ -9,8 +9,8 @@ read-only. Write access is opt-in with `RUST_AGENT_TOOL_MODE=workspace-write`.
   `search_files`, and `search_text`.
 - `workspace-write` exposes the read-only tools plus `apply_patch`.
 - `workspace-exec` exposes the workspace-write tools plus `exec_command` and
-  dedicated git wrappers: `git_status`, `git_diff`, `git_log`, `git_query`, and
-  `git_commit`.
+  dedicated git wrappers: `git_status`, `git_diff`, `git_log`, `git_query`,
+  `git_add`, `git_restore`, and `git_commit`.
 
 ## Patch Tool
 
@@ -66,6 +66,9 @@ explicit `limit` values may request up to 500 entries.
 - `git_query` allows read-only inspection commands: `status`, `diff`, `log`,
   `show`, `blame`, `grep`, `ls-files`, `branch --show-current`, `rev-parse`,
   `merge-base`, `describe`, `worktree list`, and `submodule status`.
+- `git_add` and `git_restore` require explicit workspace-relative paths.
+  `git_restore` unstages paths when `staged` is true; otherwise it restores the
+  worktree copy for those paths.
 - `git_commit` requires explicit workspace-relative paths and commits only those
   pathspecs. Git path lists and commit messages are bounded before execution.
 - `list_dir` keeps only the lexicographically first capped result set in memory
