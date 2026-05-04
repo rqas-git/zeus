@@ -35,6 +35,5 @@ struct WindowConfigurator: NSViewRepresentable {
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.backgroundColor = backgroundColor.cgColor
-        NSApp.activate(ignoringOtherApps: true)
     }
 }

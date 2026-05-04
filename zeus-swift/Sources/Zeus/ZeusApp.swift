@@ -8,7 +8,6 @@ struct ZeusApp: App {
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     var body: some Scene {
