@@ -21,13 +21,8 @@ final class RustAgentServer {
         for candidate in candidates {
             let client = AgentAPIClient(baseURL: candidate.baseURL, token: token)
             if await client.healthz() {
-                do {
-                    _ = try await client.models()
-                    return client
-                } catch {
-                    failures.append("\(candidate.httpAddress) is occupied but rejected Zeus auth: \(error.localizedDescription)")
-                    continue
-                }
+                failures.append("\(candidate.httpAddress) is already occupied; trying another port")
+                continue
             }
 
             do {
