@@ -1,5 +1,10 @@
 import SwiftUI
 
+private enum TerminalLayout {
+    static let markerWidth: CGFloat = 10
+    static let markerTextSpacing: CGFloat = 8
+}
+
 struct ChatWindow: View {
     @ObservedObject var viewModel: ChatViewModel
 
@@ -35,7 +40,7 @@ struct ChatWindow: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowConfigurator())
         .font(.system(size: 12, weight: .regular, design: .monospaced))
-        .foregroundStyle(TerminalColors.primaryText)
+        .foregroundStyle(TerminalPalette.primaryText)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             viewModel.shutdown()
         }
@@ -73,7 +78,7 @@ private struct HeaderBar: View {
             HStack {
                 Text("zeus")
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .foregroundStyle(TerminalColors.dimText)
+                    .foregroundStyle(TerminalPalette.dimText)
                     .padding(.leading, 66)
                     .allowsHitTesting(false)
 
@@ -85,7 +90,7 @@ private struct HeaderBar: View {
                     Image(systemName: "gearshape")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(
-                            isShowingSettings ? TerminalColors.cyan : TerminalColors.dimText
+                            isShowingSettings ? TerminalPalette.cyan : TerminalPalette.dimText
                         )
                         .frame(width: 18, height: 16)
                         .contentShape(Rectangle())
@@ -117,12 +122,12 @@ private struct SettingsDropdown: View {
                 HStack(spacing: 7) {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(TerminalColors.cyan)
+                        .foregroundStyle(TerminalPalette.cyan)
                         .frame(width: 12)
 
                     Text("Login Status")
                         .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundStyle(TerminalColors.primaryText)
+                        .foregroundStyle(TerminalPalette.primaryText)
 
                     Spacer(minLength: 0)
                 }
@@ -139,7 +144,7 @@ private struct SettingsDropdown: View {
         )
         .overlay(
             Rectangle()
-                .stroke(TerminalColors.dimText.opacity(0.48), lineWidth: 1)
+                .stroke(TerminalPalette.dimText.opacity(0.48), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 6)
     }
@@ -150,7 +155,7 @@ private struct TerminalMenuButtonStyle: ButtonStyle {
         configuration.label
             .background(
                 Rectangle()
-                    .fill(configuration.isPressed ? TerminalColors.cyan.opacity(0.12) : .clear)
+                    .fill(configuration.isPressed ? TerminalPalette.cyan.opacity(0.12) : .clear)
             )
     }
 }
@@ -184,20 +189,18 @@ private struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
-    private let markerWidth: CGFloat = 10
-    private let markerTextSpacing: CGFloat = 8
 
     var body: some View {
         if line.kind == .tool {
-            HStack(alignment: .center, spacing: markerTextSpacing) {
+            HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
                 toolPrefix
-                    .frame(width: markerWidth, alignment: .leading)
+                    .frame(width: TerminalLayout.markerWidth, alignment: .leading)
                 lineText
             }
         } else {
-            HStack(alignment: .top, spacing: markerTextSpacing) {
+            HStack(alignment: .top, spacing: TerminalLayout.markerTextSpacing) {
                 prefix
-                    .frame(width: markerWidth, alignment: .leading)
+                    .frame(width: TerminalLayout.markerWidth, alignment: .leading)
                 lineText
             }
         }
@@ -223,18 +226,18 @@ private struct TerminalLineView: View {
         switch line.kind {
         case .user:
             Text(">")
-                .foregroundStyle(TerminalColors.cyan)
+                .foregroundStyle(TerminalPalette.cyan)
         case .assistant:
-            marker(color: TerminalColors.green)
+            marker(color: TerminalPalette.green)
         case .status, .tool:
-            marker(color: TerminalColors.green)
+            marker(color: TerminalPalette.green)
         case .error:
-            marker(color: TerminalColors.red)
+            marker(color: TerminalPalette.red)
         }
     }
 
     private var toolPrefix: some View {
-        marker(color: TerminalColors.green, topPadding: 0)
+        marker(color: TerminalPalette.green, topPadding: 0)
     }
 
     private func marker(color: Color) -> some View {
@@ -251,9 +254,9 @@ private struct TerminalLineView: View {
     private var textColor: Color {
         switch line.kind {
         case .error:
-            return TerminalColors.red
+            return TerminalPalette.red
         default:
-            return TerminalColors.primaryText
+            return TerminalPalette.primaryText
         }
     }
 }
@@ -280,18 +283,18 @@ private struct ToolCallLine: View {
                     .foregroundStyle(statusColor)
             }
 
-            toolCell(width: 118, borderColor: TerminalColors.cyan.opacity(0.42)) {
+            toolCell(width: 118, borderColor: TerminalPalette.cyan.opacity(0.42)) {
                 Text(toolCall.name)
-                    .foregroundStyle(TerminalColors.cyan)
+                    .foregroundStyle(TerminalPalette.cyan)
                     .fontWeight(.semibold)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
 
             if let target = toolCall.target, !target.isEmpty {
-                toolCell(borderColor: TerminalColors.dimText.opacity(0.38)) {
+                toolCell(borderColor: TerminalPalette.dimText.opacity(0.38)) {
                     Text(target)
-                        .foregroundStyle(TerminalColors.primaryText)
+                        .foregroundStyle(TerminalPalette.primaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -303,7 +306,6 @@ private struct ToolCallLine: View {
 
     private func toolCell<Content: View>(
         width: CGFloat? = nil,
-        maxWidth: CGFloat? = nil,
         borderColor: Color,
         horizontalPadding: CGFloat = 7,
         alignment: Alignment = .leading,
@@ -322,7 +324,6 @@ private struct ToolCallLine: View {
                 toolCellStyle(
                     content()
                         .padding(.horizontal, horizontalPadding)
-                        .frame(maxWidth: maxWidth, alignment: alignment)
                         .frame(minHeight: 23, alignment: .center),
                     borderColor: borderColor
                 )
@@ -337,7 +338,7 @@ private struct ToolCallLine: View {
         content
             .background(
                 Rectangle()
-                    .fill(TerminalColors.cyan.opacity(0.026))
+                    .fill(TerminalPalette.cyan.opacity(0.026))
             )
             .overlay(
                 Rectangle()
@@ -363,20 +364,20 @@ private struct ToolCallLine: View {
     private var iconColor: Color {
         switch toolCall.status {
         case .failed:
-            return TerminalColors.red
+            return TerminalPalette.red
         default:
-            return TerminalColors.cyan
+            return TerminalPalette.cyan
         }
     }
 
     private var statusColor: Color {
         switch toolCall.status {
         case .running:
-            return TerminalColors.dimText
+            return TerminalPalette.dimText
         case .completed:
-            return TerminalColors.green
+            return TerminalPalette.green
         case .failed:
-            return TerminalColors.red
+            return TerminalPalette.red
         }
     }
 }
@@ -384,14 +385,12 @@ private struct ToolCallLine: View {
 private struct InputPrompt: View {
     @Binding var text: String
     let onSubmit: () -> Void
-    private let markerWidth: CGFloat = 10
-    private let markerTextSpacing: CGFloat = 8
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: markerTextSpacing) {
+        HStack(alignment: .firstTextBaseline, spacing: TerminalLayout.markerTextSpacing) {
             Text(">")
-                .foregroundStyle(TerminalColors.cyan)
-                .frame(width: markerWidth, alignment: .leading)
+                .foregroundStyle(TerminalPalette.cyan)
+                .frame(width: TerminalLayout.markerWidth, alignment: .leading)
 
             PromptTextField(
                 text: $text,
@@ -416,18 +415,18 @@ private struct FooterBar: View {
     var body: some View {
         HStack(spacing: 0) {
             HStack(spacing: itemSpacing) {
-                footerText(workspace.name, color: TerminalColors.dimText)
-                footerText(workspace.branch, color: TerminalColors.green)
-                footerText(model, color: TerminalColors.cyan)
-                footerText(effort, color: TerminalColors.primaryText)
-                footerText(permissions, color: TerminalColors.primaryText)
-                footerText(tokenUsage, color: TerminalColors.dimText)
+                footerText(workspace.name, color: TerminalPalette.dimText)
+                footerText(workspace.branch, color: TerminalPalette.green)
+                footerText(model, color: TerminalPalette.cyan)
+                footerText(effort, color: TerminalPalette.primaryText)
+                footerText(permissions, color: TerminalPalette.primaryText)
+                footerText(tokenUsage, color: TerminalPalette.dimText)
             }
             .layoutPriority(1)
 
             Spacer(minLength: pathSpacing)
 
-            footerText(workspace.displayPath, color: TerminalColors.dimText)
+            footerText(workspace.displayPath, color: TerminalPalette.dimText)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: 260, alignment: .trailing)
@@ -442,12 +441,4 @@ private struct FooterBar: View {
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
     }
-}
-
-private enum TerminalColors {
-    static let primaryText = TerminalPalette.primaryText
-    static let dimText = TerminalPalette.dimText
-    static let cyan = TerminalPalette.cyan
-    static let green = TerminalPalette.green
-    static let red = TerminalPalette.red
 }
