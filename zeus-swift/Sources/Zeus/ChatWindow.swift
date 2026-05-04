@@ -401,25 +401,27 @@ private struct FooterBar: View {
     let effort: String
     let permissions: String
     let tokenUsage: String
+    private let itemSpacing: CGFloat = 22
+    private let pathSpacing: CGFloat = 32
 
     var body: some View {
         HStack(spacing: 0) {
-            footerText(workspace.name, color: TerminalColors.dimText)
-                .frame(minWidth: 96, alignment: .leading)
-            footerText(workspace.branch, color: TerminalColors.green)
-                .frame(minWidth: 96, alignment: .leading)
-            footerText(model, color: TerminalColors.cyan)
-                .frame(minWidth: 120, alignment: .leading)
-            footerText(effort, color: TerminalColors.primaryText)
-                .frame(minWidth: 92, alignment: .leading)
-            footerText(permissions, color: TerminalColors.primaryText)
-                .frame(minWidth: 92, alignment: .leading)
-            footerText(tokenUsage, color: TerminalColors.dimText)
-                .frame(minWidth: 136, alignment: .leading)
-            Spacer(minLength: 14)
+            HStack(spacing: itemSpacing) {
+                footerText(workspace.name, color: TerminalColors.dimText)
+                footerText(workspace.branch, color: TerminalColors.green)
+                footerText(model, color: TerminalColors.cyan)
+                footerText(effort, color: TerminalColors.primaryText)
+                footerText(permissions, color: TerminalColors.primaryText)
+                footerText(tokenUsage, color: TerminalColors.dimText)
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: pathSpacing)
+
             footerText(workspace.displayPath, color: TerminalColors.dimText)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .frame(maxWidth: 260, alignment: .trailing)
         }
         .font(.system(size: 11, weight: .regular, design: .monospaced))
         .frame(height: 18)
@@ -428,7 +430,8 @@ private struct FooterBar: View {
     private func footerText(_ text: String, color: Color) -> some View {
         Text(text)
             .foregroundStyle(color)
-            .fixedSize(horizontal: false, vertical: true)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
