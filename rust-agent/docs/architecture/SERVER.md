@@ -79,8 +79,9 @@ Important event names include:
   request reaches an FFF-backed tool before scanning completes, that tool is the
   path that waits on a blocking worker and then runs against the ready index.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
-- The event queue capacity is configurable and applies to direct turn streams
-  and session broadcast streams.
+- The event queue capacity is configurable for session broadcast streams.
+  Direct turn streams use a per-turn unbounded channel so submitted-turn events
+  are not dropped when the response body is polled slowly.
 - SSE bodies are streamed from Tokio channels instead of buffering whole turns.
 - HTTP/3 concurrent bidirectional and unidirectional stream limits are
   configurable.

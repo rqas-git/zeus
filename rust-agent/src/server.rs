@@ -37,7 +37,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::agent_loop::AgentEvent;
@@ -258,7 +258,6 @@ struct ServerState<M> {
     events: EventBus,
     sessions: SessionRegistry,
     auth: ServerAuth,
-    event_queue_capacity: usize,
     alt_svc: HeaderValue,
 }
 
@@ -269,7 +268,6 @@ impl<M> Clone for ServerState<M> {
             events: self.events.clone(),
             sessions: self.sessions.clone(),
             auth: self.auth.clone(),
-            event_queue_capacity: self.event_queue_capacity,
             alt_svc: self.alt_svc.clone(),
         }
     }
@@ -307,7 +305,6 @@ impl<M> ServerState<M> {
             events: EventBus::new(event_queue_capacity, max_event_channels),
             sessions: SessionRegistry::new(max_sessions),
             auth,
-            event_queue_capacity,
             alt_svc,
         }
     }
@@ -663,7 +660,7 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::NOT_FOUND, error),
     };
-    let (tx, rx) = mpsc::channel(state.event_queue_capacity);
+    let (tx, rx) = mpsc::unbounded_channel();
     let service = Arc::clone(&state.service);
     let events = state.events.clone();
     tokio::spawn(async move {
@@ -673,7 +670,7 @@ where
                 let event = ServerEvent::from_agent_event(event);
                 let is_error = matches!(event, ServerEvent::Error { .. });
                 events.publish(event.clone())?;
-                let _ = tx.try_send(event);
+                let _ = tx.send(event);
                 if is_error {
                     error_forwarded = true;
                 }
@@ -687,7 +684,7 @@ where
                     session_id: session_id.get(),
                 };
                 let _ = events.publish(event.clone());
-                let _ = tx.try_send(event);
+                let _ = tx.send(event);
             }
             Err(error) if !error_forwarded => {
                 let event = ServerEvent::Error {
@@ -695,13 +692,13 @@ where
                     message: error.to_string(),
                 };
                 let _ = events.publish(event.clone());
-                let _ = tx.try_send(event);
+                let _ = tx.send(event);
             }
             Err(_) => {}
         }
     });
 
-    sse_from_mpsc(rx)
+    sse_from_unbounded_mpsc(rx)
 }
 
 async fn session_events<M>(
@@ -721,8 +718,10 @@ where
     }
 }
 
-fn sse_from_mpsc(receiver: mpsc::Receiver<ServerEvent>) -> axum::response::Response {
-    let stream = ReceiverStream::new(receiver).map(encode_sse);
+fn sse_from_unbounded_mpsc(
+    receiver: mpsc::UnboundedReceiver<ServerEvent>,
+) -> axum::response::Response {
+    let stream = UnboundedReceiverStream::new(receiver).map(encode_sse);
     sse_response(Body::from_stream(stream))
 }
 
@@ -1329,6 +1328,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_turn_stream_preserves_events_above_configured_queue_capacity() {
+        const DELTAS: usize = 32;
+
+        let service = Arc::new(AgentService::new(
+            ManyDeltaStreamer { deltas: DELTAS },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 1, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+
+        assert_eq!(body.matches("event: message.text_delta\n").count(), DELTAS);
+        assert!(body.contains(
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+        ));
+    }
+
+    #[tokio::test]
     async fn failed_turn_streams_one_error_event() {
         let service = Arc::new(AgentService::new(
             FailingStreamer,
@@ -1713,6 +1747,27 @@ mod tests {
                 on_delta(delta)?;
             }
             Ok(ModelResponse::new(self.text))
+        }
+    }
+
+    struct ManyDeltaStreamer {
+        deltas: usize,
+    }
+
+    impl ModelStreamer for ManyDeltaStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            for _ in 0..self.deltas {
+                on_delta("x")?;
+            }
+            Ok(ModelResponse::new("x".repeat(self.deltas)))
         }
     }
 

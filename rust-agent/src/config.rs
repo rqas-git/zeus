@@ -504,7 +504,7 @@ impl ServerConfig {
         self.auth_token.as_deref()
     }
 
-    /// Returns the bounded event queue capacity per streaming client.
+    /// Returns the bounded event queue capacity per session event stream.
     pub(crate) const fn event_queue_capacity(&self) -> usize {
         self.event_queue_capacity
     }
