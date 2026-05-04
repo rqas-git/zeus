@@ -32,6 +32,8 @@ struct ChatWindow: View {
             .padding(.top, 10)
             .padding(.bottom, 14)
         }
+        .ignoresSafeArea(.container, edges: .top)
+        .background(WindowConfigurator())
         .font(.system(size: 12, weight: .regular, design: .monospaced))
         .foregroundStyle(TerminalColors.primaryText)
         .onDisappear {

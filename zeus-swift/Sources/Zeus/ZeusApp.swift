@@ -19,6 +19,7 @@ struct ZeusApp: App {
                     await viewModel.start()
                 }
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
     }
 }
