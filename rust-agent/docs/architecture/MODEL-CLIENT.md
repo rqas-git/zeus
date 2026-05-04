@@ -52,6 +52,10 @@ specific backend provider.
   loop.
 - SSE event JSON parsing borrows event fields and raw nested payloads where
   possible.
+- The SSE parser intentionally does not enforce per-line, per-event, or
+  full-response byte caps. Like pi-mono's provider parsers, it assumes the
+  configured backend is trusted and relies on context/history limits after
+  parsing rather than truncating provider streams mid-response.
 - Prompt-cache keys are stable per configured namespace, session, and model.
   Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
   not look like normal cache reuse.
@@ -73,6 +77,7 @@ list and individual commands.
 ## Current Scope
 
 The client does not yet support request cancellation, general retries, websocket
-transport, provider failover, remote compaction, or provider-specific tool
-repair. The only transport retry is the targeted one-shot auth refresh after a
-`401 Unauthorized` response.
+transport, provider failover, remote compaction, provider-specific tool repair,
+or hard byte caps on backend SSE streams. The only transport retry is the
+targeted one-shot auth refresh after a `401 Unauthorized` response. Add stream
+caps before using this client with untrusted providers.

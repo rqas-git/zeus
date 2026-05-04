@@ -90,7 +90,9 @@ event shape.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
 - The event queue capacity is configurable for session broadcast streams.
   Direct turn streams use a per-turn unbounded channel so submitted-turn events
-  are not dropped when the response body is polled slowly.
+  are not dropped when the response body is polled slowly. This is intentional
+  and matches pi-mono's trusted-local tradeoff: preserve all turn-local events
+  instead of dropping or backpressuring them.
 - SSE bodies are streamed from Tokio channels instead of buffering whole turns.
 - HTTP/3 concurrent bidirectional and unidirectional stream limits are
   configurable.
