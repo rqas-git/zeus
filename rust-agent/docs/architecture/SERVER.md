@@ -35,7 +35,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 `GET /` and `GET /healthz` are public. All other routes require
 `Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a stable
 token; otherwise startup prints a generated token to stderr. Numeric session IDs
-must come from `POST /sessions`.
+must come from `POST /sessions`; generated IDs stay within JavaScript's
+JSON-safe integer range.
 
 ## Transport
 

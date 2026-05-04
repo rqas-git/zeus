@@ -52,6 +52,7 @@ const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const GENERATED_TOKEN_BYTES: usize = 32;
+const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 
 /// Runs the local server until interrupted.
 ///
@@ -456,7 +457,7 @@ fn random_session_id() -> Result<SessionId> {
     loop {
         let mut bytes = [0u8; 8];
         getrandom::fill(&mut bytes).context("failed to generate session id")?;
-        let value = u64::from_le_bytes(bytes);
+        let value = u64::from_le_bytes(bytes) & MAX_JSON_SAFE_INTEGER;
         if value != 0 {
             return Ok(SessionId::new(value));
         }
@@ -1169,6 +1170,14 @@ mod tests {
             std::str::from_utf8(&body).unwrap(),
             r#"{"model":"test-default"}"#
         );
+    }
+
+    #[test]
+    fn generated_session_ids_are_json_safe() {
+        for _ in 0..128 {
+            let session_id = random_session_id().unwrap().get();
+            assert!((1..=MAX_JSON_SAFE_INTEGER).contains(&session_id));
+        }
     }
 
     #[tokio::test]
