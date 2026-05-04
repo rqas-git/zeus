@@ -72,6 +72,8 @@ explicit `limit` values may request up to 500 entries.
   worktree copy for those paths.
 - `git_commit` requires explicit workspace-relative paths and commits only those
   pathspecs. Git path lists and commit messages are bounded before execution.
+- Path-scoped git wrappers pass workspace paths as literal pathspecs, so Git
+  pathspec magic cannot widen the requested path set.
 - `list_dir` keeps only the lexicographically first capped result set in memory
   while scanning large directories.
 - `search_text` output is capped before it is returned to the model.

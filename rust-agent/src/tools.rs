@@ -2294,7 +2294,7 @@ async fn command_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
 
 fn git_pathspec(path: &str) -> Result<String> {
     let relative = clean_workspace_relative_path(path)?;
-    Ok(relative.to_string_lossy().into_owned())
+    Ok(format!(":(literal){}", relative.to_string_lossy()))
 }
 
 fn git_pathspecs(paths: &[String]) -> Result<Vec<String>> {
@@ -3685,6 +3685,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_pathspecs_force_literal_matching() {
+        assert_eq!(git_pathspec("README.md").unwrap(), ":(literal)README.md");
+        assert_eq!(git_pathspec(":(top)*").unwrap(), ":(literal):(top)*");
+    }
+
     #[tokio::test]
     async fn executes_read_file_and_list_dir() {
         let temp = std::env::temp_dir().join(format!("rust-agent-tools-{}", std::process::id()));
@@ -4150,6 +4156,55 @@ mod tests {
         assert!(log.output.contains("Update readme"), "{}", log.output);
         assert!(restore_worktree.success, "{}", restore_worktree.output);
         assert_eq!(fs::read_to_string(temp.join("README.md")).unwrap(), "new\n");
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn git_wrappers_treat_magic_pathspecs_as_literal() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-git-magic-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        run_test_git(&temp, ["init"]);
+        run_test_git(&temp, ["config", "user.email", "agent@example.com"]);
+        run_test_git(&temp, ["config", "user.name", "Rust Agent"]);
+        fs::write(temp.join("a.txt"), "old a\n").unwrap();
+        fs::write(temp.join("b.txt"), "old b\n").unwrap();
+        run_test_git(&temp, ["add", "a.txt", "b.txt"]);
+        run_test_git(&temp, ["commit", "-m", "Initial commit"]);
+        fs::write(temp.join("a.txt"), "new a\n").unwrap();
+        fs::write(temp.join("b.txt"), "new b\n").unwrap();
+
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
+        let restore = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_restore_magic".to_string(),
+                name: GIT_RESTORE_TOOL.to_string(),
+                arguments: json!({ "paths": [":(top)*"] }).to_string(),
+            })
+            .await;
+        let commit = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_commit_magic".to_string(),
+                name: GIT_COMMIT_TOOL.to_string(),
+                arguments: json!({
+                    "message": "Try magic pathspec",
+                    "paths": [":(top)*"],
+                })
+                .to_string(),
+            })
+            .await;
+
+        assert!(!restore.success, "{}", restore.output);
+        assert_eq!(fs::read_to_string(temp.join("a.txt")).unwrap(), "new a\n");
+        assert_eq!(fs::read_to_string(temp.join("b.txt")).unwrap(), "new b\n");
+        assert!(!commit.success, "{}", commit.output);
 
         fs::remove_dir_all(&temp).unwrap();
     }
