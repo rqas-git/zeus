@@ -3,11 +3,9 @@ import Foundation
 final class RustAgentServer {
     let token = "zeus-swift-dev-token"
 
-    private let candidates = [
-        ServerCandidate(httpPort: 4196, h3Port: 4533),
-        ServerCandidate(httpPort: 4197, h3Port: 4534),
-        ServerCandidate(httpPort: 4198, h3Port: 4535)
-    ]
+    private let candidates = (0..<20).map {
+        ServerCandidate(httpPort: 4196 + $0, h3Port: 4533 + $0)
+    }
     private var process: Process?
     private let outputCapture = ProcessOutputCapture()
 
@@ -17,11 +15,17 @@ final class RustAgentServer {
 
     func start() async throws -> AgentAPIClient {
         var failures: [String] = []
+        var reusableClient: AgentAPIClient?
 
         for candidate in candidates {
             let client = AgentAPIClient(baseURL: candidate.baseURL, token: token)
             if await client.healthz() {
-                failures.append("\(candidate.httpAddress) is already occupied; trying another port")
+                if (try? await client.models()) != nil {
+                    reusableClient = reusableClient ?? client
+                    failures.append("\(candidate.httpAddress) already has a compatible server; trying to start a fresh server first")
+                } else {
+                    failures.append("\(candidate.httpAddress) is occupied by an incompatible server")
+                }
                 continue
             }
 
@@ -33,6 +37,10 @@ final class RustAgentServer {
                 stop()
                 failures.append("\(candidate.httpAddress): \(error.localizedDescription)")
             }
+        }
+
+        if let reusableClient {
+            return reusableClient
         }
 
         throw RustAgentServerError.noAvailableServer(failures)
