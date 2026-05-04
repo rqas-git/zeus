@@ -40,12 +40,28 @@ struct AgentAPIClient {
         request.setValue("text/event-stream", forHTTPHeaderField: "accept")
         request.httpBody = try JSONEncoder().encode(TurnRequest(message: message))
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response: response, data: data)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        try validate(response: response)
 
-        let events = try decodeEvents(from: data)
-        for event in events {
+        var parser = SSEStreamParser()
+        var receivedEvent = false
+
+        for try await byte in bytes {
+            if let frame = parser.append(byte),
+               let event = try decodeEvent(fromFrame: frame) {
+                receivedEvent = true
+                await onEvent(event)
+            }
+        }
+
+        if let frame = parser.finish(),
+           let event = try decodeEvent(fromFrame: frame) {
+            receivedEvent = true
             await onEvent(event)
+        }
+
+        if !receivedEvent {
+            throw AgentClientError.noStreamEvents(parser.preview)
         }
     }
 
@@ -72,35 +88,68 @@ struct AgentAPIClient {
         }
     }
 
-    private func decodeEvents(from data: Data) throws -> [AgentServerEvent] {
+    private func decodeEvent(fromFrame data: Data) throws -> AgentServerEvent? {
         guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
-            throw AgentClientError.noStreamEvents("")
+            return nil
         }
 
         let normalized = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-        let frames = normalized.components(separatedBy: "\n\n")
-        var events: [AgentServerEvent] = []
+        let dataLines = normalized
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .compactMap { line -> String? in
+                guard line.hasPrefix("data:") else { return nil }
+                let value = line.dropFirst(5)
+                return value.first == " " ? String(value.dropFirst()) : String(value)
+            }
 
-        for frame in frames {
-            let dataLines = frame
-                .split(separator: "\n", omittingEmptySubsequences: false)
-                .compactMap { line -> String? in
-                    guard line.hasPrefix("data:") else { return nil }
-                    let value = line.dropFirst(5)
-                    return value.first == " " ? String(value.dropFirst()) : String(value)
-                }
+        guard !dataLines.isEmpty else { return nil }
+        let eventData = Data(dataLines.joined(separator: "\n").utf8)
+        return try JSONDecoder().decode(AgentServerEvent.self, from: eventData)
+    }
+}
 
-            guard !dataLines.isEmpty else { continue }
-            let eventData = Data(dataLines.joined(separator: "\n").utf8)
-            events.append(try JSONDecoder().decode(AgentServerEvent.self, from: eventData))
+private struct SSEStreamParser {
+    private var buffer = Data()
+    private var previewData = Data()
+
+    var preview: String {
+        String(data: previewData, encoding: .utf8) ?? ""
+    }
+
+    mutating func append(_ byte: UInt8) -> Data? {
+        if previewData.count < 1_000 {
+            previewData.append(byte)
         }
 
-        if events.isEmpty {
-            throw AgentClientError.noStreamEvents(String(normalized.prefix(1_000)))
+        buffer.append(byte)
+        if buffer.hasSuffixBytes([13, 10, 13, 10]) {
+            return frame(dropping: 4)
         }
-        return events
+        if buffer.hasSuffixBytes([10, 10]) {
+            return frame(dropping: 2)
+        }
+        return nil
+    }
+
+    mutating func finish() -> Data? {
+        guard !buffer.isEmpty else { return nil }
+        defer { buffer.removeAll(keepingCapacity: true) }
+        return buffer
+    }
+
+    private mutating func frame(dropping terminatorLength: Int) -> Data {
+        let frame = buffer.dropLast(terminatorLength)
+        buffer.removeAll(keepingCapacity: true)
+        return Data(frame)
+    }
+}
+
+private extension Data {
+    func hasSuffixBytes(_ bytes: [UInt8]) -> Bool {
+        guard count >= bytes.count else { return false }
+        return suffix(bytes.count).elementsEqual(bytes)
     }
 }
 
