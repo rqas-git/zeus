@@ -25,6 +25,7 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Json;
+use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
@@ -133,6 +134,7 @@ where
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
         .route("/sessions", post(create_session::<M>))
+        .route("/sessions/{session_id}", delete(delete_session::<M>))
         .route(
             "/sessions/{session_id}/model",
             get(session_model::<M>).put(set_session_model::<M>),
@@ -341,6 +343,19 @@ impl<M> ServerState<M> {
         Ok(session_id)
     }
 
+    fn delete_session(&self, session_id: u64) -> Result<bool>
+    where
+        M: ModelStreamer + Sync,
+    {
+        let session_id = SessionId::new(session_id);
+        if !self.sessions.remove(session_id)? {
+            return Ok(false);
+        }
+        let _ = self.service.delete_session(session_id)?;
+        self.events.remove_session(session_id)?;
+        Ok(true)
+    }
+
     #[cfg(test)]
     fn register_session_for_test(&self, session_id: SessionId) {
         self.sessions
@@ -458,10 +473,16 @@ impl SessionRegistry {
             .contains(&session_id))
     }
 
+    fn remove(&self, session_id: SessionId) -> Result<bool> {
+        Ok(self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?
+            .remove(&session_id))
+    }
+
     fn release(&self, session_id: SessionId) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(&session_id);
-        }
+        let _ = self.remove(session_id);
     }
 
     #[cfg(test)]
@@ -542,6 +563,14 @@ impl EventBus {
             .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?;
         cleanup_empty_event_channels(&mut sessions);
         Ok(sessions.get(&session_id).cloned())
+    }
+
+    fn remove_session(&self, session_id: SessionId) -> Result<()> {
+        self.sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?
+            .remove(&session_id);
+        Ok(())
     }
 }
 
@@ -630,6 +659,20 @@ where
         model: state.service.default_model().to_string(),
     })
     .into_response()
+}
+
+async fn delete_session<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    match state.delete_session(session_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error_response(StatusCode::NOT_FOUND, anyhow::anyhow!("session not found")),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
 }
 
 async fn session_model<M>(
@@ -1271,6 +1314,82 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn deletes_sessions_and_frees_capacity() {
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("ok", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default"]).unwrap(),
+            )
+            .with_session_limit(1),
+        );
+        let state = ServerState::with_limits(
+            service,
+            16,
+            "127.0.0.1:4433".parse().unwrap(),
+            ServerAuth::for_test(),
+            1,
+            usize::MAX,
+        );
+        let app = router(state);
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = created["session_id"].as_u64().unwrap();
+
+        let deleted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri(format!("/sessions/{session_id}"))
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        let model = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{session_id}/model"))
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(model.status(), StatusCode::NOT_FOUND);
+
+        let recreated = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recreated.status(), StatusCode::OK);
     }
 
     #[tokio::test]

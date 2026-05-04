@@ -23,6 +23,8 @@ submit work without rebuilding transport state for every request.
 - `AgentService` owns the warm model client.
 - Auth is handled inside the model client and stays outside session state.
 - `AgentService` owns in-memory session lookup by `SessionId`.
+- `AgentService` creates and deletes process-local session state for server
+  session lifecycle routes.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` serializes work per session without serializing unrelated
   sessions.
@@ -58,6 +60,7 @@ cannot silently apply after a user message that was already submitted.
 
 ## Current Scope
 
-The session map is process-local and unbounded, but each session's retained
-message history is bounded. Session eviction, persistence, and cross-process
+The session map is process-local; server mode bounds it with configuration, and
+each session's retained message history is bounded. Explicit server deletion
+removes a session from the map, but TTL eviction, persistence, and cross-process
 coordination should be added before multi-tenant production use.

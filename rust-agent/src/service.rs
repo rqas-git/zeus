@@ -89,6 +89,11 @@ where
         Ok(())
     }
 
+    /// Deletes an in-memory session if it exists.
+    pub(crate) fn delete_session(&self, session_id: SessionId) -> Result<bool> {
+        Ok(self.lock_sessions()?.remove(&session_id).is_some())
+    }
+
     /// Returns the model selected for a session, or the default for a new session.
     pub(crate) async fn session_model(&self, session_id: SessionId) -> Result<String> {
         let Some(session) = self.session(session_id)? else {
@@ -366,6 +371,31 @@ mod tests {
             .to_string();
 
         assert!(error.contains("session limit exceeded"));
+        assert_eq!(service.session_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_session_removes_state_and_frees_limit() {
+        let model = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _selected_model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                Ok("unused".to_string())
+            },
+        );
+        let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
+            .with_session_limit(1);
+
+        service.create_session(SessionId::new(1)).unwrap();
+        assert_eq!(service.session_count().unwrap(), 1);
+
+        assert!(service.delete_session(SessionId::new(1)).unwrap());
+        assert_eq!(service.session_count().unwrap(), 0);
+        assert!(!service.delete_session(SessionId::new(1)).unwrap());
+
+        service.create_session(SessionId::new(2)).unwrap();
         assert_eq!(service.session_count().unwrap(), 1);
     }
 

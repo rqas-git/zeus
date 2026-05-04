@@ -18,7 +18,9 @@ router through both HTTP compatibility and native HTTP/3 transports.
 7. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
 8. Clients create random server-issued sessions before using session routes.
-9. Turn requests submit work to `AgentService` and stream named SSE frames.
+9. Clients can explicitly delete server sessions when they no longer need the
+   in-memory state.
+10. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
@@ -28,6 +30,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `GET /models` returns the default model and allowed model list.
 - `GET /sessions/{session_id}/model` returns the session model.
 - `PUT /sessions/{session_id}/model` changes the session model when idle.
+- `DELETE /sessions/{session_id}` deletes the in-memory session, frees its
+  registry slot, and closes its session event channel.
 - `POST /sessions/{session_id}/turns:stream` submits a user message and returns
   the turn as SSE.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
@@ -99,11 +103,13 @@ tool result arrives.
 The server is process-local and uses one bearer token for non-health routes.
 Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
 stable token, and treat the generated token as a local-development convenience.
-Sessions are in-memory, random, and process-local; persistence, cancellation,
-per-user authorization, and multi-process coordination are not implemented. Use
-`workspace-write` and `workspace-exec` only for trusted local deployments because
-any bearer-token holder can ask the model to edit workspace files or run local
-commands. WebSocket endpoints are not implemented because SSE matches the
-current server-to-client event flow with less protocol overhead. Set
+Sessions are in-memory, random, and process-local. Clients can explicitly delete
+sessions, which removes future route access and closes the session event stream;
+it does not cancel an already-running direct turn stream. Persistence, turn
+cancellation, per-user authorization, and multi-process coordination are not
+implemented. Use `workspace-write` and `workspace-exec` only for trusted local
+deployments because any bearer-token holder can ask the model to edit workspace
+files or run local commands. WebSocket endpoints are not implemented because SSE
+matches the current server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should control
 server lifetime.
