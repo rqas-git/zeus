@@ -34,9 +34,11 @@ use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
@@ -56,6 +58,10 @@ const GIT_COMMIT_TOOL: &str = "git_commit";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const RANGE_TRUNCATION_MARKER: &str = "\n[truncated: range exceeds requested max_bytes]";
+const DEFAULT_READ_LINE_LIMIT: usize = 2000;
+const MAX_READ_LINE_LIMIT: usize = 2000;
+const MAX_READ_LINE_BYTES: usize = 2000;
+const READ_LINE_TRUNCATION_SUFFIX: &str = "... (line truncated to 2000 bytes)";
 const MAX_DIR_ENTRIES: usize = 200;
 const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -83,10 +89,8 @@ const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const READ_FILE_TOOL_SPEC: ToolSpec = ToolSpec {
     name: READ_FILE_TOOL,
-    description: "Read a UTF-8 text file from the current workspace.",
-    parameters: ToolParameters::Path {
-        description: "Workspace-relative path to the file to read.",
-    },
+    description: "Read a UTF-8 text file from the current workspace, optionally by line range.",
+    parameters: ToolParameters::ReadFile,
     supports_parallel: true,
 };
 const READ_FILE_RANGE_TOOL_SPEC: ToolSpec = ToolSpec {
@@ -251,6 +255,7 @@ impl Serialize for ToolSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolParameters {
     Path { description: &'static str },
+    ReadFile,
     ReadFileRange,
     SearchFiles,
     SearchText,
@@ -266,6 +271,7 @@ impl ToolParameters {
     const fn cache_key(self) -> &'static str {
         match self {
             Self::Path { .. } => "path:string:required:no_additional_properties",
+            Self::ReadFile => "read_file:path:string:required:offset:integer:limit:integer",
             Self::ReadFileRange => {
                 "read_file_range:path:string:required:offset:integer:max_bytes:integer"
             }
@@ -295,6 +301,14 @@ impl Serialize for ToolParameters {
                 let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &PathProperties { description })?;
+                map.serialize_entry("required", &["path"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::ReadFile => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &ReadFileProperties)?;
                 map.serialize_entry("required", &["path"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
@@ -481,6 +495,40 @@ impl Serialize for StringItems {
         let mut state = serializer.serialize_struct("StringItems", 1)?;
         state.serialize_field("type", self.item_type)?;
         state.end()
+    }
+}
+
+struct ReadFileProperties;
+
+impl Serialize for ReadFileProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry(
+            "path",
+            &StringProperty {
+                description: "Workspace-relative path to the file to read.",
+            },
+        )?;
+        map.serialize_entry(
+            "offset",
+            &IntegerProperty {
+                description: "1-indexed line number to start reading from.",
+                minimum: 1,
+                maximum: usize::MAX,
+            },
+        )?;
+        map.serialize_entry(
+            "limit",
+            &IntegerProperty {
+                description: "Maximum number of lines to read.",
+                minimum: 1,
+                maximum: MAX_READ_LINE_LIMIT,
+            },
+        )?;
+        map.end()
     }
 }
 
@@ -978,6 +1026,16 @@ struct PathArguments {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReadFileArguments {
+    path: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadFileRangeArguments {
     path: String,
     #[serde(default)]
@@ -1190,7 +1248,11 @@ impl FffSearchState {
 }
 
 async fn read_file(root: &Path, arguments: &str) -> Result<String> {
-    let args = parse_path_arguments(arguments)?;
+    let args = parse_read_file_arguments(arguments)?;
+    if args.offset.is_some() || args.limit.is_some() {
+        return read_file_lines(root, &args).await;
+    }
+
     let path = resolve_workspace_path(root, &args.path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
@@ -1220,6 +1282,73 @@ async fn read_file(root: &Path, arguments: &str) -> Result<String> {
         text.push_str(FILE_TRUNCATION_MARKER);
     }
     Ok(text)
+}
+
+async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String> {
+    let path = resolve_workspace_path(root, &args.path)?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{} is not a file",
+        display_path(root, &path)
+    );
+
+    let offset = args.offset.unwrap_or(1);
+    anyhow::ensure!(offset > 0, "offset must be a 1-indexed line number");
+    let limit = bounded_limit(args.limit, DEFAULT_READ_LINE_LIMIT, MAX_READ_LINE_LIMIT);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
+    let mut lines = BufReader::new(file).lines();
+    let start = offset - 1;
+    let mut raw = Vec::new();
+    let mut retained_bytes = 0usize;
+    let mut line_count = 0usize;
+    let mut cut_by_bytes = false;
+    let mut has_more = false;
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .with_context(|| format!("failed to read {}", display_path(root, &path)))?
+    {
+        line_count = line_count.saturating_add(1);
+        if line_count <= start {
+            continue;
+        }
+
+        if raw.len() >= limit {
+            has_more = true;
+            continue;
+        }
+
+        let line = truncate_read_line(&line);
+        let line_bytes = line.len() + usize::from(!raw.is_empty());
+        if retained_bytes.saturating_add(line_bytes) > MAX_FILE_BYTES {
+            cut_by_bytes = true;
+            has_more = true;
+            break;
+        }
+
+        retained_bytes = retained_bytes.saturating_add(line_bytes);
+        raw.push(line);
+    }
+
+    if raw.is_empty() && offset > line_count.saturating_add(usize::from(line_count == 0)) {
+        anyhow::bail!("offset exceeds file length");
+    }
+
+    Ok(format_line_read_result(
+        root,
+        &path,
+        offset,
+        line_count,
+        &raw,
+        has_more,
+        cut_by_bytes,
+    ))
 }
 
 async fn read_file_range(root: &Path, arguments: &str) -> Result<String> {
@@ -1543,6 +1672,10 @@ fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
     serde_json::from_str(arguments).context("invalid path arguments")
 }
 
+fn parse_read_file_arguments(arguments: &str) -> Result<ReadFileArguments> {
+    serde_json::from_str(arguments).context("invalid read_file arguments")
+}
+
 fn parse_read_file_range_arguments(arguments: &str) -> Result<ReadFileRangeArguments> {
     serde_json::from_str(arguments).context("invalid read_file_range arguments")
 }
@@ -1602,6 +1735,60 @@ fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
         Some("fuzzy") => Ok(GrepMode::Fuzzy),
         Some(mode) => anyhow::bail!("unsupported search_text mode {mode:?}"),
     }
+}
+
+fn truncate_read_line(line: &str) -> String {
+    if line.len() <= MAX_READ_LINE_BYTES {
+        return line.to_string();
+    }
+
+    let mut end = MAX_READ_LINE_BYTES;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = line[..end].to_string();
+    truncated.push_str(READ_LINE_TRUNCATION_SUFFIX);
+    truncated
+}
+
+fn format_line_read_result(
+    root: &Path,
+    path: &Path,
+    offset: usize,
+    line_count: usize,
+    lines: &[String],
+    has_more: bool,
+    cut_by_bytes: bool,
+) -> String {
+    let mut output = String::new();
+    output.push_str("<path>");
+    output.push_str(&display_path(root, path));
+    output.push_str("</path>\n<type>file</type>\n<content>\n");
+
+    for (index, line) in lines.iter().enumerate() {
+        output.push_str(&(offset + index).to_string());
+        output.push_str(": ");
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    let last_line = offset.saturating_add(lines.len()).saturating_sub(1);
+    if cut_by_bytes {
+        let next_offset = last_line.saturating_add(1);
+        output.push_str(&format!(
+            "\n(Output capped at {MAX_FILE_BYTES} bytes. Showing lines {offset}-{last_line}. Use offset={next_offset} to continue.)"
+        ));
+    } else if has_more {
+        let next_offset = last_line.saturating_add(1);
+        output.push_str(&format!(
+            "\n(Showing lines {offset}-{last_line} of {line_count}. Use offset={next_offset} to continue.)"
+        ));
+    } else {
+        output.push_str(&format!("\n(End of file - total {line_count} lines)"));
+    }
+
+    output.push_str("\n</content>");
+    output
 }
 
 struct CappedText {
@@ -2501,13 +2688,25 @@ mod tests {
                 {
                     "type": "function",
                     "name": "read_file",
-                    "description": "Read a UTF-8 text file from the current workspace.",
+                    "description": "Read a UTF-8 text file from the current workspace, optionally by line range.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
                                 "description": "Workspace-relative path to the file to read.",
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "1-indexed line number to start reading from.",
+                                "minimum": 1,
+                                "maximum": usize::MAX,
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of lines to read.",
+                                "minimum": 1,
+                                "maximum": MAX_READ_LINE_LIMIT,
                             },
                         },
                         "required": ["path"],
@@ -2750,6 +2949,37 @@ mod tests {
         assert_eq!(range.output, "main() {}\n");
         assert!(list.success);
         assert_eq!(list.output, "src/");
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_file_supports_line_pagination() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-read-lines-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("notes.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        let read = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_read_lines".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: r#"{"path":"notes.txt","offset":2,"limit":2}"#.to_string(),
+            })
+            .await;
+
+        assert!(read.success, "{}", read.output);
+        assert!(read.output.contains("<path>notes.txt</path>"));
+        assert!(read.output.contains("2: beta"));
+        assert!(read.output.contains("3: gamma"));
+        assert!(!read.output.contains("1: alpha"));
+        assert!(read.output.contains("Use offset=4 to continue."));
 
         fs::remove_dir_all(&temp).unwrap();
     }
