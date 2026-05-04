@@ -1769,10 +1769,9 @@ async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
         command.len() <= MAX_COMMAND_BYTES,
         "command exceeds {MAX_COMMAND_BYTES} bytes"
     );
-    anyhow::ensure!(
-        !mentions_git_executable(command),
-        "exec_command cannot run git; use git_status, git_diff, git_log, git_query, git_add, git_restore, or git_commit"
-    );
+    if mentions_git_executable(command) {
+        anyhow::bail!("{}", git_command_rejection_message(command));
+    }
 
     let cwd = command_cwd(root, args.cwd.as_deref()).await?;
     let timeout_ms = bounded_u64(
@@ -2766,6 +2765,77 @@ fn is_git_executable_token(token: &str) -> bool {
     name == "git" || name == "git.exe"
 }
 
+fn git_command_rejection_message(command: &str) -> String {
+    let hint = match first_git_subcommand(command).as_deref() {
+        Some("status") => "Use git_status with {}.".to_string(),
+        Some("diff") => {
+            "Use git_diff for normal workspace diffs, or git_query with command=\"diff\" for specialized read-only diff arguments.".to_string()
+        }
+        Some("log") => {
+            "Use git_log for recent commits, or git_query with command=\"log\" for specialized read-only log arguments.".to_string()
+        }
+        Some("show" | "blame" | "grep" | "ls-files" | "rev-parse" | "merge-base" | "describe") => {
+            "Use git_query with the git subcommand in the command field and the remaining tokens in args.".to_string()
+        }
+        Some("branch") => "Use git_query with command=\"branch\" and args=[\"--show-current\"].".to_string(),
+        Some("worktree") => "Use git_query with command=\"worktree\" and args=[\"list\"].".to_string(),
+        Some("submodule") => "Use git_query with command=\"submodule\" and args=[\"status\"].".to_string(),
+        Some("add") => "Use git_add with explicit workspace-relative paths.".to_string(),
+        Some("restore") => {
+            "Use git_restore with explicit workspace-relative paths and staged=true when unstaging.".to_string()
+        }
+        Some("commit") => "Use git_commit with an explicit message and path list.".to_string(),
+        Some(other) => format!(
+            "No dedicated wrapper supports git {other:?}. Use git_query for allowlisted read-only commands, or add a dedicated wrapper before exposing this operation."
+        ),
+        None => "Use git_status, git_diff, git_log, git_query, git_add, git_restore, or git_commit instead.".to_string(),
+    };
+    format!("exec_command cannot run git. {hint}")
+}
+
+fn first_git_subcommand(command: &str) -> Option<String> {
+    let tokens = git_hint_tokens(command);
+    let git_index = tokens
+        .iter()
+        .position(|token| is_git_executable_token(token))?;
+    let mut index = git_index + 1;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if !token.starts_with('-') {
+            return Some(token.to_ascii_lowercase());
+        }
+        index += 1;
+        if matches!(
+            token.as_str(),
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn git_hint_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    for ch in command.chars() {
+        if ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '_' | '-' | '.' | '/' | '\\' | ':' | '@' | '^' | '~' | '='
+            )
+        {
+            token.push(ch);
+        } else if !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
 fn format_file_search_results(
     picker: &FilePicker,
     results: &fff_search::MixedSearchResult<'_>,
@@ -3545,6 +3615,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn suggests_dedicated_wrappers_for_blocked_git_commands() {
+        assert!(git_command_rejection_message("git -C . status --short").contains("git_status"));
+        assert!(git_command_rejection_message("git show HEAD:README.md").contains("git_query"));
+        assert!(git_command_rejection_message("git add README.md").contains("git_add"));
+        assert!(
+            git_command_rejection_message("git restore --staged README.md").contains("git_restore")
+        );
+    }
+
     #[tokio::test]
     async fn executes_read_file_and_list_dir() {
         let temp = std::env::temp_dir().join(format!("rust-agent-tools-{}", std::process::id()));
@@ -3728,6 +3808,7 @@ mod tests {
             "{}",
             blocked.output
         );
+        assert!(blocked.output.contains("git_status"), "{}", blocked.output);
         assert!(!failed.success);
         assert!(
             failed.output.contains("status: exit 7"),
