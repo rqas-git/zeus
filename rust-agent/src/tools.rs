@@ -1934,22 +1934,38 @@ async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
 
     let patch = ParsedPatch::parse(&args.patch)?;
     let changes = prepare_patch_changes(root, patch).await?;
-    for change in &changes {
-        let result = match change {
-            PreparedChange::Write {
-                path, temp_path, ..
-            } => commit_temp_file(path, temp_path).await,
-            PreparedChange::Delete { path, .. } => tokio::fs::remove_file(path)
-                .await
-                .with_context(|| format!("failed to delete {}", display_path(root, path))),
-        };
-        if let Err(error) = result {
-            cleanup_prepared_changes(&changes).await;
+    apply_prepared_changes(root, &changes).await?;
+
+    Ok(format_patch_summary(&changes))
+}
+
+async fn apply_prepared_changes(root: &Path, changes: &[PreparedChange]) -> Result<()> {
+    for (applied, change) in changes.iter().enumerate() {
+        if let Err(error) = apply_prepared_change(root, change).await {
+            if let Err(rollback_error) = rollback_applied_changes(root, &changes[..applied]).await {
+                cleanup_prepared_changes(changes).await;
+                return Err(error).with_context(|| {
+                    format!("failed to roll back patch after apply failure: {rollback_error}")
+                });
+            }
+            cleanup_prepared_changes(changes).await;
             return Err(error);
         }
     }
 
-    Ok(format_patch_summary(&changes))
+    cleanup_prepared_changes(changes).await;
+    Ok(())
+}
+
+async fn apply_prepared_change(root: &Path, change: &PreparedChange) -> Result<()> {
+    match change {
+        PreparedChange::Write {
+            path, temp_path, ..
+        } => commit_temp_file(path, temp_path).await,
+        PreparedChange::Delete { path, .. } => tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("failed to delete {}", display_path(root, path))),
+    }
 }
 
 async fn prepare_patch_changes(root: &Path, patch: ParsedPatch) -> Result<Vec<PreparedChange>> {
@@ -1993,6 +2009,7 @@ async fn prepare_patch_change(
                 after_bytes,
                 path,
                 temp_path,
+                backup_path: None,
             })
         }
         PatchOperation::Update { path, hunks } => {
@@ -2000,6 +2017,8 @@ async fn prepare_patch_change(
             ensure_unique_patch_path(seen, &path)?;
             let (content, permissions) = read_patch_target(root, &path).await?;
             let before_bytes = content.len();
+            let backup_path =
+                write_temp_sibling(&path, &content, Some(permissions.clone())).await?;
             let content = apply_hunks(&content, &hunks, &display_path(root, &path))?;
             ensure_patch_file_size(content.len() as u64)?;
             let after_bytes = content.len();
@@ -2010,16 +2029,19 @@ async fn prepare_patch_change(
                 after_bytes,
                 path,
                 temp_path,
+                backup_path: Some(backup_path),
             })
         }
         PatchOperation::Delete { path } => {
             let path = resolve_workspace_path(root, &path)?;
             ensure_unique_patch_path(seen, &path)?;
-            let (content, _permissions) = read_patch_target(root, &path).await?;
+            let (content, permissions) = read_patch_target(root, &path).await?;
+            let backup_path = write_temp_sibling(&path, &content, Some(permissions)).await?;
             Ok(PreparedChange::Delete {
                 display_path: display_path(root, &path),
                 before_bytes: content.len(),
                 path,
+                backup_path,
             })
         }
     }
@@ -2950,11 +2972,13 @@ enum PreparedChange {
         after_bytes: usize,
         path: PathBuf,
         temp_path: PathBuf,
+        backup_path: Option<PathBuf>,
     },
     Delete {
         display_path: String,
         before_bytes: usize,
         path: PathBuf,
+        backup_path: PathBuf,
     },
 }
 
@@ -3163,10 +3187,76 @@ async fn commit_temp_file(path: &Path, temp_path: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn rollback_applied_changes(root: &Path, changes: &[PreparedChange]) -> Result<()> {
+    let mut errors = Vec::new();
+    for change in changes.iter().rev() {
+        if let Err(error) = rollback_applied_change(root, change).await {
+            errors.push(error.to_string());
+        }
+    }
+
+    anyhow::ensure!(
+        errors.is_empty(),
+        "rollback failed for {} change(s): {}",
+        errors.len(),
+        errors.join("; ")
+    );
+    Ok(())
+}
+
+async fn rollback_applied_change(root: &Path, change: &PreparedChange) -> Result<()> {
+    match change {
+        PreparedChange::Write {
+            path,
+            backup_path: Some(backup_path),
+            ..
+        } => restore_backup_file(root, path, backup_path).await,
+        PreparedChange::Write {
+            path,
+            backup_path: None,
+            ..
+        } => remove_file_if_exists(path)
+            .await
+            .with_context(|| format!("failed to remove added {}", display_path(root, path))),
+        PreparedChange::Delete {
+            path, backup_path, ..
+        } => restore_backup_file(root, path, backup_path).await,
+    }
+}
+
+async fn restore_backup_file(root: &Path, path: &Path, backup_path: &Path) -> Result<()> {
+    remove_file_if_exists(path)
+        .await
+        .with_context(|| format!("failed to clear {}", display_path(root, path)))?;
+    tokio::fs::rename(backup_path, path)
+        .await
+        .with_context(|| format!("failed to restore {}", display_path(root, path)))
+}
+
+async fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn cleanup_prepared_changes(changes: &[PreparedChange]) {
     for change in changes {
-        if let PreparedChange::Write { temp_path, .. } = change {
-            let _ = tokio::fs::remove_file(temp_path).await;
+        match change {
+            PreparedChange::Write {
+                temp_path,
+                backup_path,
+                ..
+            } => {
+                let _ = tokio::fs::remove_file(temp_path).await;
+                if let Some(backup_path) = backup_path {
+                    let _ = tokio::fs::remove_file(backup_path).await;
+                }
+            }
+            PreparedChange::Delete { backup_path, .. } => {
+                let _ = tokio::fs::remove_file(backup_path).await;
+            }
         }
     }
 }
@@ -4151,6 +4241,54 @@ mod tests {
             "pub fn created() {}\n"
         );
         assert!(!temp.join("obsolete.rs").exists());
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rolls_back_applied_changes_when_later_commit_fails() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-rollback-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let temp = temp.canonicalize().unwrap();
+        fs::write(temp.join("a.txt"), "old a\n").unwrap();
+        fs::write(temp.join("b.txt"), "old b\n").unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: a.txt\n",
+            "@@\n",
+            "-old a\n",
+            "+new a\n",
+            "*** Update File: b.txt\n",
+            "@@\n",
+            "-old b\n",
+            "+new b\n",
+            "*** End Patch\n",
+        );
+        let changes = prepare_patch_changes(&temp, ParsedPatch::parse(patch).unwrap())
+            .await
+            .unwrap();
+        fs::remove_file(temp.join("b.txt")).unwrap();
+        fs::create_dir(temp.join("b.txt")).unwrap();
+
+        let error = apply_prepared_changes(&temp, &changes)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("failed to replace"), "{error}");
+        assert_eq!(fs::read_to_string(temp.join("a.txt")).unwrap(), "old a\n");
+        assert!(fs::metadata(temp.join("b.txt")).unwrap().is_dir());
+        let leaked_temp = fs::read_dir(&temp)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.contains(".rust-agent-"));
+        assert_eq!(leaked_temp, None);
 
         fs::remove_dir_all(&temp).unwrap();
     }
