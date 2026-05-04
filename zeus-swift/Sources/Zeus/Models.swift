@@ -12,12 +12,32 @@ struct TranscriptLine: Identifiable, Equatable {
     let id: UUID
     var kind: TranscriptKind
     var text: String
+    var toolCall: ToolCallTranscript?
 
-    init(id: UUID = UUID(), kind: TranscriptKind, text: String) {
+    init(
+        id: UUID = UUID(),
+        kind: TranscriptKind,
+        text: String,
+        toolCall: ToolCallTranscript? = nil
+    ) {
         self.id = id
         self.kind = kind
         self.text = text
+        self.toolCall = toolCall
     }
+}
+
+struct ToolCallTranscript: Equatable {
+    var name: String
+    var action: String
+    var target: String?
+    var status: ToolCallStatus
+}
+
+enum ToolCallStatus: Equatable {
+    case running
+    case completed
+    case failed
 }
 
 struct WorkspaceMetadata {

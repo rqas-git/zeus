@@ -23,7 +23,7 @@ final class ChatViewModel: ObservableObject {
     private var currentAssistantLineID: UUID?
     private var assistantPlaceholderLineID: UUID?
     private var toolLineIDsByCallID: [String: UUID] = [:]
-    private var toolLabelsByCallID: [String: String] = [:]
+    private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
 
@@ -87,7 +87,7 @@ final class ChatViewModel: ObservableObject {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
-        toolLabelsByCallID.removeAll(keepingCapacity: true)
+        toolDisplaysByCallID.removeAll(keepingCapacity: true)
         append(kind: .user, text: message)
         showAssistantPlaceholder("sending...")
 
@@ -182,17 +182,24 @@ final class ChatViewModel: ObservableObject {
         case "tool_call_started":
             upsertToolLine(
                 callID: event.toolCallID,
-                label: toolLabel(name: event.toolName, arguments: event.toolArguments),
-                isComplete: false,
-                success: nil
+                display: toolDisplay(
+                    name: event.toolName,
+                    arguments: event.toolArguments,
+                    status: .running
+                )
             )
         case "tool_call_completed":
+            let callID = event.toolCallID ?? ""
+            var display = toolDisplaysByCallID[callID]
+                ?? toolDisplay(
+                    name: event.toolName,
+                    arguments: event.toolArguments,
+                    status: .completed
+                )
+            display.status = event.success == false ? .failed : .completed
             upsertToolLine(
                 callID: event.toolCallID,
-                label: toolLabelsByCallID[event.toolCallID ?? ""]
-                    ?? toolLabel(name: event.toolName, arguments: event.toolArguments),
-                isComplete: true,
-                success: event.success
+                display: display
             )
         case "cache_health":
             updateTokenUsage(event.cache?.usage)
@@ -275,33 +282,30 @@ final class ChatViewModel: ObservableObject {
 
     private func upsertToolLine(
         callID: String?,
-        label: String,
-        isComplete: Bool,
-        success: Bool?
+        display: ToolCallTranscript
     ) {
-        let text = isComplete
-            ? "\(label) \(success == false ? "failed" : "completed")"
-            : "running \(label)..."
+        let text = toolFallbackText(display)
 
         guard let callID, !callID.isEmpty else {
-            insertToolLine(text)
+            insertToolLine(text, display: display)
             return
         }
 
-        toolLabelsByCallID[callID] = label
+        toolDisplaysByCallID[callID] = display
         if let lineID = toolLineIDsByCallID[callID],
            let index = lines.firstIndex(where: { $0.id == lineID }) {
             lines[index].text = text
+            lines[index].toolCall = display
             return
         }
 
-        let lineID = insertToolLine(text)
+        let lineID = insertToolLine(text, display: display)
         toolLineIDsByCallID[callID] = lineID
     }
 
     @discardableResult
-    private func insertToolLine(_ text: String) -> UUID {
-        let line = TranscriptLine(kind: .tool, text: text)
+    private func insertToolLine(_ text: String, display: ToolCallTranscript? = nil) -> UUID {
+        let line = TranscriptLine(kind: .tool, text: text, toolCall: display)
         let lineID = line.id
 
         if let currentAssistantLineID,
@@ -319,19 +323,68 @@ final class ChatViewModel: ObservableObject {
         return lineID
     }
 
-    private func toolLabel(name: String?, arguments: String?) -> String {
+    private func toolDisplay(
+        name: String?,
+        arguments: String?,
+        status: ToolCallStatus
+    ) -> ToolCallTranscript {
         let name = name ?? "tool"
+        let action = toolAction(name)
         guard let arguments,
               let data = arguments.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               let json = object as? [String: Any] else {
-            return name
+            return ToolCallTranscript(name: name, action: action, target: nil, status: status)
         }
 
-        if let target = primaryToolTarget(name: name, json: json), !target.isEmpty {
-            return "\(name) \(target)"
+        let target = primaryToolTarget(name: name, json: json)
+        return ToolCallTranscript(
+            name: name,
+            action: action,
+            target: target?.isEmpty == true ? nil : target,
+            status: status
+        )
+    }
+
+    private func toolFallbackText(_ display: ToolCallTranscript) -> String {
+        let target = display.target.map { " \($0)" } ?? ""
+        switch display.status {
+        case .running:
+            return "\(display.action) \(display.name)\(target)..."
+        case .completed:
+            return "\(display.name)\(target) completed"
+        case .failed:
+            return "\(display.name)\(target) failed"
         }
-        return name
+    }
+
+    private func toolAction(_ name: String) -> String {
+        switch name {
+        case "read_file", "read_file_range":
+            return "reading"
+        case "list_dir":
+            return "listing"
+        case "search_files", "search_text":
+            return "searching"
+        case "apply_patch":
+            return "patching"
+        case "exec_command":
+            return "running"
+        case "git_add":
+            return "staging"
+        case "git_restore":
+            return "restoring"
+        case "git_diff":
+            return "diffing"
+        case "git_log":
+            return "reading log"
+        case "git_query", "git_status":
+            return "checking"
+        case "git_commit":
+            return "committing"
+        default:
+            return "running"
+        }
     }
 
     private func primaryToolTarget(name: String, json: [String: Any]) -> String? {
