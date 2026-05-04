@@ -1,4 +1,5 @@
 import Foundation
+import ZeusCore
 
 struct AgentAPIClient {
     let baseURL: URL
@@ -198,50 +199,4 @@ struct CreateSessionResponse: Decodable {
 
 struct TurnRequest: Encodable {
     let message: String
-}
-
-struct AgentServerEvent: Decodable {
-    let type: String
-    let sessionID: UInt64
-    let status: String?
-    let delta: String?
-    let role: String?
-    let text: String?
-    let message: String?
-    let toolCallID: String?
-    let toolName: String?
-    let toolArguments: String?
-    let success: Bool?
-    let cache: CacheHealthPayload?
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case sessionID = "session_id"
-        case status
-        case delta
-        case role
-        case text
-        case message
-        case toolCallID = "tool_call_id"
-        case toolName = "tool_name"
-        case toolArguments = "tool_arguments"
-        case success
-        case cache
-    }
-}
-
-struct CacheHealthPayload: Decodable {
-    let usage: TokenUsagePayload?
-}
-
-struct TokenUsagePayload: Decodable {
-    let inputTokens: UInt64?
-    let outputTokens: UInt64?
-    let totalTokens: UInt64?
-
-    enum CodingKeys: String, CodingKey {
-        case inputTokens = "input_tokens"
-        case outputTokens = "output_tokens"
-        case totalTokens = "total_tokens"
-    }
 }

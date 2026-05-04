@@ -9,6 +9,7 @@ struct ZeusChecks {
         checks.run("TerminalMarkdownParser stops paragraphs at block starts", testParagraphBoundaries)
         checks.run("ToolMetadata maps known tools", testToolMetadata)
         checks.run("ToolMetadata summarizes arguments", testToolTargets)
+        checks.run("AgentServerEvent decodes typed events", testAgentServerEvents)
         checks.finish()
     }
 }
@@ -171,4 +172,31 @@ private func testToolTargets() throws {
         ) == "Sources/App.swift",
         "unexpected patch summary"
     )
+}
+
+private func testAgentServerEvents() throws {
+    let textDelta = try decodeEvent(
+        #"{"type":"text_delta","session_id":42,"delta":"hello"}"#
+    )
+    try require(textDelta == .textDelta(sessionID: 42, delta: "hello"), "unexpected text delta")
+    try require(textDelta.isAssistantOutputEvent, "text delta should be assistant output")
+
+    let unknown = try decodeEvent(
+        #"{"type":"new_event","session_id":7,"message":"later"}"#
+    )
+    try require(unknown == .unknown(type: "new_event", sessionID: 7), "unexpected unknown event")
+
+    let cacheHealth = try decodeEvent(
+        #"{"type":"cache_health","session_id":1,"cache":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}"#
+    )
+    guard case let .cacheHealth(_, cache) = cacheHealth else {
+        throw CheckFailure.message("expected cache health event")
+    }
+    try require(cache?.usage?.inputTokens == 2, "unexpected input tokens")
+    try require(cache?.usage?.outputTokens == 3, "unexpected output tokens")
+    try require(cache?.usage?.totalTokens == 5, "unexpected total tokens")
+}
+
+private func decodeEvent(_ json: String) throws -> AgentServerEvent {
+    try JSONDecoder().decode(AgentServerEvent.self, from: Data(json.utf8))
 }

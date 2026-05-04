@@ -98,12 +98,12 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                 try await client.streamTurn(sessionID: sessionID, message: message) { event in
-                    if event.type == "status_changed", event.status == "running" {
+                    if case let .statusChanged(_, status) = event, status == "running" {
                         try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
                     }
                     await MainActor.run {
                         receivedEvent = true
-                        if event.type == "text_delta" || (event.type == "message_completed" && event.role == "assistant") {
+                        if event.isAssistantOutputEvent {
                             receivedAssistantOutput = true
                         }
                         self.handle(event)
@@ -169,50 +169,50 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func handle(_ event: AgentServerEvent) {
-        switch event.type {
-        case "status_changed":
-            if event.status == "running" {
+        switch event {
+        case let .statusChanged(_, status):
+            if status == "running" {
                 showAssistantPlaceholder("thinking...")
             }
-        case "text_delta":
-            appendAssistantDelta(event.delta ?? "")
-        case "message_completed":
-            guard event.role == "assistant" else { return }
-            replaceAssistantText(event.text ?? "")
+        case let .textDelta(_, delta):
+            appendAssistantDelta(delta ?? "")
+        case let .messageCompleted(_, role, text):
+            guard role == "assistant" else { return }
+            replaceAssistantText(text ?? "")
             currentAssistantLineID = nil
-        case "tool_call_started":
+        case let .toolCallStarted(_, toolCallID, toolName, toolArguments):
             upsertToolLine(
-                callID: event.toolCallID,
+                callID: toolCallID,
                 display: toolDisplay(
-                    name: event.toolName,
-                    arguments: event.toolArguments,
+                    name: toolName,
+                    arguments: toolArguments,
                     status: .running
                 )
             )
-        case "tool_call_completed":
-            let callID = event.toolCallID ?? ""
+        case let .toolCallCompleted(_, toolCallID, toolName, toolArguments, success):
+            let callID = toolCallID ?? ""
             var display = toolDisplaysByCallID[callID]
                 ?? toolDisplay(
-                    name: event.toolName,
-                    arguments: event.toolArguments,
+                    name: toolName,
+                    arguments: toolArguments,
                     status: .completed
                 )
-            display.status = event.success == false ? .failed : .completed
+            display.status = success == false ? .failed : .completed
             upsertToolLine(
-                callID: event.toolCallID,
+                callID: toolCallID,
                 display: display
             )
-        case "cache_health":
-            updateTokenUsage(event.cache?.usage)
-        case "error":
-            let message = event.message ?? "rust-agent reported an error."
+        case let .cacheHealth(_, cache):
+            updateTokenUsage(cache?.usage)
+        case let .error(_, eventMessage):
+            let message = eventMessage ?? "rust-agent reported an error."
             append(kind: .error, text: message)
             if message.contains("not logged in") {
                 append(kind: .status, text: "type /login to authorize rust-agent")
             }
-        case "turn_completed":
+        case .turnCompleted:
             isSending = false
-        default:
+        case .unknown:
             break
         }
     }
