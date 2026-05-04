@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 final class RustAgentServer {
@@ -51,6 +52,10 @@ final class RustAgentServer {
         self.process = nil
         if process.isRunning {
             process.terminate()
+            waitForExit(process, timeout: 0.75)
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
         }
     }
 
@@ -99,7 +104,15 @@ final class RustAgentServer {
         environment["RUST_AGENT_SERVER_HTTP_ADDR"] = candidate.httpAddress
         environment["RUST_AGENT_SERVER_H3_ADDR"] = candidate.h3Address
         environment["RUST_AGENT_CACHE_HEALTH"] = "1"
+        environment["RUST_AGENT_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
         return environment
+    }
+
+    private func waitForExit(_ process: Process, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
     }
 
     private func capture(_ pipe: Pipe) {

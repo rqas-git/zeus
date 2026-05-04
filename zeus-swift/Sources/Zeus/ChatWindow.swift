@@ -36,6 +36,9 @@ struct ChatWindow: View {
         .background(WindowConfigurator())
         .font(.system(size: 12, weight: .regular, design: .monospaced))
         .foregroundStyle(TerminalColors.primaryText)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            viewModel.shutdown()
+        }
         .onDisappear {
             viewModel.shutdown()
         }
