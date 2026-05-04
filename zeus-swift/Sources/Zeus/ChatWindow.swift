@@ -263,11 +263,16 @@ private struct ToolCallLine: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 4) {
-            toolCell(width: 24, borderColor: iconColor.opacity(0.42)) {
+            toolCell(
+                width: 24,
+                borderColor: iconColor.opacity(0.42),
+                horizontalPadding: 0,
+                alignment: .center
+            ) {
                 Image(systemName: iconName)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(iconColor)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(width: 14, height: 13, alignment: .center)
             }
 
             toolCell(width: 76, borderColor: statusColor.opacity(0.52)) {
@@ -300,23 +305,25 @@ private struct ToolCallLine: View {
         width: CGFloat? = nil,
         maxWidth: CGFloat? = nil,
         borderColor: Color,
+        horizontalPadding: CGFloat = 7,
+        alignment: Alignment = .leading,
         @ViewBuilder content: () -> Content
     ) -> some View {
         Group {
             if let width {
                 toolCellStyle(
                     content()
-                        .padding(.horizontal, 7)
-                        .frame(width: width, alignment: .leading)
-                        .frame(minHeight: 23),
+                        .padding(.horizontal, horizontalPadding)
+                        .frame(width: width, alignment: alignment)
+                        .frame(minHeight: 23, alignment: .center),
                     borderColor: borderColor
                 )
             } else {
                 toolCellStyle(
                     content()
-                        .padding(.horizontal, 7)
-                        .frame(maxWidth: maxWidth, alignment: .leading)
-                        .frame(minHeight: 23),
+                        .padding(.horizontal, horizontalPadding)
+                        .frame(maxWidth: maxWidth, alignment: alignment)
+                        .frame(minHeight: 23, alignment: .center),
                     borderColor: borderColor
                 )
             }
