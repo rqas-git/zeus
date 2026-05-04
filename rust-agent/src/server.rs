@@ -861,6 +861,7 @@ enum ServerEvent {
         session_id: u64,
         tool_call_id: String,
         tool_name: String,
+        tool_arguments: String,
     },
     ToolCallCompleted {
         session_id: u64,
@@ -909,10 +910,12 @@ impl ServerEvent {
                 session_id,
                 tool_call_id,
                 tool_name,
+                tool_arguments,
             } => Self::ToolCallStarted {
                 session_id: session_id.get(),
                 tool_call_id: tool_call_id.to_string(),
                 tool_name: tool_name.to_string(),
+                tool_arguments: tool_arguments.to_string(),
             },
             AgentEvent::ToolCallCompleted {
                 session_id,
@@ -1422,6 +1425,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streams_tool_call_arguments_in_started_event() {
+        let turn = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::new(
+            ToolThenContinueStreamer {
+                turn: Arc::clone(&turn),
+            },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"read the manifest"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+
+        assert!(body.contains(
+            "event: tool_call.started\ndata: {\"type\":\"tool_call_started\",\"session_id\":7,\"tool_call_id\":\"call_read\",\"tool_name\":\"read_file\",\"tool_arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n"
+        ));
+        assert_eq!(turn.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn stream_queue_backpressure_does_not_fail_turn() {
         let turn = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(AgentService::new(
@@ -1731,6 +1769,7 @@ mod tests {
                     session_id,
                     tool_call_id: format!("call_{index}"),
                     tool_name: "read_file".to_string(),
+                    tool_arguments: r#"{"path":"benchmark.txt"}"#.to_string(),
                 }),
                 3 => events.push(ServerEvent::ToolCallCompleted {
                     session_id,

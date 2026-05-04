@@ -198,6 +198,7 @@ pub(crate) enum AgentEvent<'a> {
         session_id: SessionId,
         tool_call_id: &'a str,
         tool_name: &'a str,
+        tool_arguments: &'a str,
     },
     ToolCallCompleted {
         session_id: SessionId,
@@ -814,6 +815,7 @@ impl AgentLoop {
                 session_id,
                 tool_call_id: &tool_call.call_id,
                 tool_name: &tool_call.name,
+                tool_arguments: &tool_call.arguments,
             })?;
         }
 

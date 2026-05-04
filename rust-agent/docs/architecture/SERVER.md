@@ -69,6 +69,10 @@ Important event names include:
 - `server.heartbeat`
 - `server.events_lagged`
 
+`tool_call.started` includes the tool call id, tool name, and raw JSON
+`tool_arguments` so clients can render the requested tool invocation before the
+tool result arrives.
+
 ## Performance Notes
 
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
