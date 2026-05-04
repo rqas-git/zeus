@@ -209,6 +209,8 @@ private struct TerminalLineView: View {
         Group {
             if line.kind == .tool, let toolCall = line.toolCall {
                 ToolCallLine(toolCall: toolCall)
+            } else if line.kind == .assistant {
+                TerminalMarkdownView(text: line.text)
             } else {
                 Text(line.text.isEmpty ? " " : line.text)
                     .foregroundStyle(textColor)
