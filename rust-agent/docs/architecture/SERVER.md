@@ -73,9 +73,10 @@ Important event names include:
 - `server.heartbeat`
 - `server.events_lagged`
 
-`tool_call.started` includes the tool call id, tool name, and raw JSON
-`tool_arguments` so clients can render the requested tool invocation before the
-tool result arrives.
+`tool_call.started` includes the tool call id, tool name, and raw JSON `args` so
+clients can render the requested tool invocation before the tool result arrives.
+The short `args` field is intentional and follows pi-mono's tool execution start
+event shape.
 
 ## Performance Notes
 

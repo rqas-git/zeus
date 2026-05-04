@@ -904,7 +904,7 @@ enum ServerEvent {
         session_id: u64,
         tool_call_id: String,
         tool_name: String,
-        tool_arguments: String,
+        args: String,
     },
     ToolCallCompleted {
         session_id: u64,
@@ -953,12 +953,12 @@ impl ServerEvent {
                 session_id,
                 tool_call_id,
                 tool_name,
-                tool_arguments,
+                args,
             } => Self::ToolCallStarted {
                 session_id: session_id.get(),
                 tool_call_id: tool_call_id.to_string(),
                 tool_name: tool_name.to_string(),
-                tool_arguments: tool_arguments.to_string(),
+                args: args.to_string(),
             },
             AgentEvent::ToolCallCompleted {
                 session_id,
@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_tool_call_arguments_in_started_event() {
+    async fn streams_tool_call_args_in_started_event() {
         let turn = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(AgentService::new(
             ToolThenContinueStreamer {
@@ -1573,7 +1573,7 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
 
         assert!(body.contains(
-            "event: tool_call.started\ndata: {\"type\":\"tool_call_started\",\"session_id\":7,\"tool_call_id\":\"call_read\",\"tool_name\":\"read_file\",\"tool_arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n"
+            "event: tool_call.started\ndata: {\"type\":\"tool_call_started\",\"session_id\":7,\"tool_call_id\":\"call_read\",\"tool_name\":\"read_file\",\"args\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}\n\n"
         ));
         assert_eq!(turn.load(Ordering::SeqCst), 2);
     }
@@ -1888,7 +1888,7 @@ mod tests {
                     session_id,
                     tool_call_id: format!("call_{index}"),
                     tool_name: "read_file".to_string(),
-                    tool_arguments: r#"{"path":"benchmark.txt"}"#.to_string(),
+                    args: r#"{"path":"benchmark.txt"}"#.to_string(),
                 }),
                 3 => events.push(ServerEvent::ToolCallCompleted {
                     session_id,
