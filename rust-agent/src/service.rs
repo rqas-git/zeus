@@ -13,6 +13,7 @@ use crate::agent_loop::AgentLoop;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
+use crate::agent_loop::TurnCancellation;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
 use crate::tools::ToolRegistry;
@@ -28,7 +29,53 @@ pub(crate) struct AgentService<M> {
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
 }
 
-type SharedSession = Arc<AsyncMutex<AgentLoop>>;
+#[derive(Debug)]
+struct SessionHandle {
+    agent: AsyncMutex<AgentLoop>,
+    active_turn: Mutex<Option<TurnCancellation>>,
+}
+
+type SharedSession = Arc<SessionHandle>;
+
+impl SessionHandle {
+    fn new(agent: AgentLoop) -> Self {
+        Self {
+            agent: AsyncMutex::new(agent),
+            active_turn: Mutex::new(None),
+        }
+    }
+
+    fn begin_turn(&self) -> Result<TurnCancellation> {
+        let cancellation = TurnCancellation::new();
+        let mut active_turn = self
+            .active_turn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+        *active_turn = Some(cancellation.clone());
+        Ok(cancellation)
+    }
+
+    fn clear_turn(&self) -> Result<()> {
+        let mut active_turn = self
+            .active_turn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+        *active_turn = None;
+        Ok(())
+    }
+
+    fn cancel_turn(&self) -> Result<bool> {
+        let active_turn = self
+            .active_turn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+        let Some(cancellation) = active_turn.as_ref() else {
+            return Ok(false);
+        };
+        cancellation.cancel();
+        Ok(true)
+    }
+}
 
 impl<M> AgentService<M>
 where
@@ -94,12 +141,20 @@ where
         Ok(self.lock_sessions()?.remove(&session_id).is_some())
     }
 
+    /// Requests cancellation of the currently running turn for a session.
+    pub(crate) fn cancel_session_turn(&self, session_id: SessionId) -> Result<bool> {
+        let Some(session) = self.session(session_id)? else {
+            return Ok(false);
+        };
+        session.cancel_turn()
+    }
+
     /// Returns the model selected for a session, or the default for a new session.
     pub(crate) async fn session_model(&self, session_id: SessionId) -> Result<String> {
         let Some(session) = self.session(session_id)? else {
             return Ok(self.model_config.default_model().to_string());
         };
-        let agent = session.lock().await;
+        let agent = session.agent.lock().await;
         Ok(agent.model().to_string())
     }
 
@@ -138,7 +193,7 @@ where
             }
         };
 
-        let Ok(mut agent) = session.try_lock() else {
+        let Ok(mut agent) = session.agent.try_lock() else {
             anyhow::bail!("cannot change model while session is running");
         };
         agent.set_model(model)?;
@@ -156,8 +211,13 @@ where
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
         let session = self.session_or_insert_default(session_id)?;
-        let mut agent = session.lock().await;
-        agent.submit_user_message(message, &self.model, emit).await
+        let mut agent = session.agent.lock().await;
+        let cancellation = session.begin_turn()?;
+        let result = agent
+            .submit_user_message_with_cancellation(message, &self.model, cancellation, emit)
+            .await;
+        session.clear_turn()?;
+        result
     }
 
     fn session(&self, session_id: SessionId) -> Result<Option<SharedSession>> {
@@ -186,12 +246,9 @@ where
         config: SessionConfig,
         tools: ToolRegistry,
     ) -> SharedSession {
-        Arc::new(AsyncMutex::new(AgentLoop::with_context_window_and_tools(
-            session_id,
-            context_window,
-            config,
-            tools,
-        )))
+        Arc::new(SessionHandle::new(
+            AgentLoop::with_context_window_and_tools(session_id, context_window, config, tools),
+        ))
     }
 
     fn lock_sessions(
@@ -228,6 +285,7 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio::sync::Notify;
 
+    use crate::agent_loop::is_turn_cancelled;
     use crate::agent_loop::ModelResponse;
     use crate::client::ConversationMessage;
     use crate::tools::ToolSpec;
@@ -476,6 +534,48 @@ mod tests {
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn cancels_running_turn_and_allows_next_turn() {
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let started_calls = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::new(
+            CancellableStreamer {
+                first_started: Arc::clone(&first_started),
+                release_first: Arc::clone(&release_first),
+                started_calls: Arc::clone(&started_calls),
+            },
+            ContextWindowConfig::default(),
+            test_model_config(),
+        ));
+
+        let running = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .submit_user_message(SessionId::new(1), "one", |_| Ok(()))
+                    .await
+            }
+        });
+
+        first_started.notified().await;
+        assert!(service.cancel_session_turn(SessionId::new(1)).unwrap());
+
+        let error = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .expect("cancelled turn should finish promptly")
+            .expect("turn task should not panic")
+            .unwrap_err();
+        assert!(is_turn_cancelled(&error), "{error}");
+        assert!(!service.cancel_session_turn(SessionId::new(1)).unwrap());
+
+        service
+            .submit_user_message(SessionId::new(1), "two", |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(started_calls.load(Ordering::SeqCst), 2);
+    }
+
     fn test_model_config() -> ModelConfig {
         ModelConfig::new("test-default", ["test-default", "test-fast"]).unwrap()
     }
@@ -548,6 +648,33 @@ mod tests {
         started_calls: Arc<AtomicUsize>,
         active: Arc<AtomicUsize>,
         max_active: Arc<AtomicUsize>,
+    }
+
+    struct CancellableStreamer {
+        first_started: Arc<Notify>,
+        release_first: Arc<Notify>,
+        started_calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelStreamer for CancellableStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let call = self.started_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+            }
+
+            on_delta("ok")?;
+            Ok(ModelResponse::new("ok"))
+        }
     }
 
     impl ModelStreamer for OrderedStreamer {

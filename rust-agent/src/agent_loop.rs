@@ -1,10 +1,15 @@
 //! In-memory agent loop for ordered session turns.
 
+use std::fmt;
 use std::future::Future;
 use std::ops::Range;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::future::join_all;
+use tokio::sync::Notify;
 
 use crate::client::ConversationMessage;
 use crate::config::ContextWindowConfig;
@@ -13,6 +18,81 @@ use crate::tools::ToolRegistry;
 use crate::tools::ToolSpec;
 
 const MAX_TOOL_ROUNDS: usize = 8;
+
+/// Shared cancellation signal for one running turn.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnCancellation {
+    inner: Arc<TurnCancellationState>,
+}
+
+#[derive(Debug)]
+struct TurnCancellationState {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl TurnCancellation {
+    /// Creates a cancellation signal for a turn.
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(TurnCancellationState {
+                cancelled: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Requests cancellation for the turn.
+    pub(crate) fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
+    }
+
+    /// Returns `true` when cancellation has been requested.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Waits until cancellation is requested.
+    pub(crate) async fn cancelled(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(TurnCancelled.into());
+        }
+        Ok(())
+    }
+}
+
+impl Default for TurnCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+struct TurnCancelled;
+
+impl fmt::Display for TurnCancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("turn cancelled")
+    }
+}
+
+impl std::error::Error for TurnCancelled {}
+
+/// Returns `true` when an error represents turn cancellation.
+pub(crate) fn is_turn_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<TurnCancelled>().is_some()
+}
 
 /// Strong identifier for an agent session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -660,10 +740,26 @@ impl AgentLoop {
         model: &impl ModelStreamer,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
+        self.submit_user_message_with_cancellation(text, model, TurnCancellation::new(), &mut emit)
+            .await
+    }
+
+    /// Appends a user message and runs the turn with a cancellation signal.
+    ///
+    /// # Errors
+    /// Returns an error if the session is already running, cancellation is requested, model streaming fails, or event publishing fails.
+    pub(crate) async fn submit_user_message_with_cancellation(
+        &mut self,
+        text: impl Into<String>,
+        model: &impl ModelStreamer,
+        cancellation: TurnCancellation,
+        mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<()> {
         anyhow::ensure!(
             self.store.status() != SessionStatus::Running,
             "session is already running"
         );
+        cancellation.ensure_not_cancelled()?;
 
         let user_text = text.into();
         let user_id = self.store.append_message(MessageRole::User, user_text);
@@ -687,11 +783,16 @@ impl AgentLoop {
             return Err(error);
         }
         self.store.prune_history(self.context_window);
-        let result = self.run_until_done(model, &mut emit).await;
+        let result = self.run_until_done(model, &cancellation, &mut emit).await;
         match result {
             Ok(()) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
                 Ok(())
+            }
+            Err(error) if is_turn_cancelled(&error) => {
+                self.store.prune_history(self.context_window);
+                self.set_status(SessionStatus::Idle, &mut emit)?;
+                Err(error)
             }
             Err(error) => {
                 self.store.prune_history(self.context_window);
@@ -740,16 +841,19 @@ impl AgentLoop {
     async fn run_until_done(
         &mut self,
         model: &impl ModelStreamer,
+        cancellation: &TurnCancellation,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         for _ in 0..MAX_TOOL_ROUNDS {
-            let tool_calls = self.run_once(model, emit).await?;
+            cancellation.ensure_not_cancelled()?;
+            let tool_calls = self.run_once(model, cancellation, emit).await?;
             if tool_calls.is_empty() {
                 self.store.prune_history(self.context_window);
                 return Ok(());
             }
 
-            self.execute_tool_calls(tool_calls, emit).await?;
+            self.execute_tool_calls(tool_calls, cancellation, emit)
+                .await?;
             self.store.prune_history(self.context_window);
         }
 
@@ -759,22 +863,25 @@ impl AgentLoop {
     async fn run_once(
         &mut self,
         model: &impl ModelStreamer,
+        cancellation: &TurnCancellation,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
         let history = self.store.conversation_window(self.context_window);
         let session_id = self.session_id();
         let selected_model = self.store.model();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
-        let mut model_response = model
-            .stream_conversation(
+        let mut model_response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(TurnCancelled.into()),
+            response = model.stream_conversation(
                 &history,
                 self.tools.specs(),
                 true,
                 session_id,
                 selected_model,
                 &mut on_delta,
-            )
-            .await?;
+            ) => response?,
+        };
         if let Some(cache_health) = model_response.cache_health.as_mut() {
             cache_health.cache_status = self.store.cache_status(cache_health);
             emit(AgentEvent::CacheHealth {
@@ -807,9 +914,11 @@ impl AgentLoop {
     async fn execute_tool_calls(
         &mut self,
         tool_calls: Vec<ModelToolCall>,
+        cancellation: &TurnCancellation,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         let session_id = self.session_id();
+        cancellation.ensure_not_cancelled()?;
         for tool_call in &tool_calls {
             emit(AgentEvent::ToolCallStarted {
                 session_id,
@@ -823,19 +932,24 @@ impl AgentLoop {
             .iter()
             .all(|call| self.tools.supports_parallel(&call.name))
         {
-            join_all(
-                tool_calls
-                    .iter()
-                    .map(|tool_call| self.tools.execute_ref(tool_call)),
-            )
+            join_all(tool_calls.iter().map(|tool_call| {
+                self.tools
+                    .execute_ref_with_cancellation(tool_call, cancellation)
+            }))
             .await
         } else {
             let mut executions = Vec::new();
             for tool_call in &tool_calls {
-                executions.push(self.tools.execute_ref(tool_call).await);
+                cancellation.ensure_not_cancelled()?;
+                executions.push(
+                    self.tools
+                        .execute_ref_with_cancellation(tool_call, cancellation)
+                        .await,
+                );
             }
             executions
         };
+        cancellation.ensure_not_cancelled()?;
 
         let completions = executions
             .iter()

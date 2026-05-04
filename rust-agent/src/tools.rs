@@ -46,6 +46,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::agent_loop::ModelToolCall;
+use crate::agent_loop::TurnCancellation;
 
 const READ_FILE_TOOL: &str = "read_file";
 const READ_FILE_RANGE_TOOL: &str = "read_file_range";
@@ -1056,6 +1057,16 @@ impl ToolRegistry {
 
     /// Executes a borrowed model tool call and converts failures into model-visible output.
     pub(crate) async fn execute_ref(&self, call: &ModelToolCall) -> ToolExecution {
+        self.execute_ref_with_cancellation(call, &TurnCancellation::new())
+            .await
+    }
+
+    /// Executes a borrowed model tool call with a shared cancellation signal.
+    pub(crate) async fn execute_ref_with_cancellation(
+        &self,
+        call: &ModelToolCall,
+        cancellation: &TurnCancellation,
+    ) -> ToolExecution {
         if !self.specs().iter().any(|spec| spec.name() == call.name) {
             return ToolExecution {
                 call_id: call.call_id.clone(),
@@ -1067,7 +1078,7 @@ impl ToolRegistry {
 
         match call.name.as_str() {
             EXEC_COMMAND_TOOL => {
-                return exec_command(&self.root, &call.arguments)
+                return exec_command(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1075,7 +1086,7 @@ impl ToolRegistry {
                     });
             }
             GIT_STATUS_TOOL => {
-                return git_status(&self.root, &call.arguments)
+                return git_status(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1083,7 +1094,7 @@ impl ToolRegistry {
                     });
             }
             GIT_DIFF_TOOL => {
-                return git_diff(&self.root, &call.arguments)
+                return git_diff(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1091,7 +1102,7 @@ impl ToolRegistry {
                     });
             }
             GIT_LOG_TOOL => {
-                return git_log(&self.root, &call.arguments)
+                return git_log(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1099,7 +1110,7 @@ impl ToolRegistry {
                     });
             }
             GIT_QUERY_TOOL => {
-                return git_query(&self.root, &call.arguments)
+                return git_query(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1107,7 +1118,7 @@ impl ToolRegistry {
                     });
             }
             GIT_ADD_TOOL => {
-                return git_add(&self.root, &call.arguments)
+                return git_add(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1115,7 +1126,7 @@ impl ToolRegistry {
                     });
             }
             GIT_RESTORE_TOOL => {
-                return git_restore(&self.root, &call.arguments)
+                return git_restore(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1123,7 +1134,7 @@ impl ToolRegistry {
                     });
             }
             GIT_COMMIT_TOOL => {
-                return git_commit(&self.root, &call.arguments)
+                return git_commit(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1781,7 +1792,11 @@ async fn collect_deep_dir_entries(
     Ok(truncated)
 }
 
-async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn exec_command(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_exec_command_arguments(arguments)?;
     let command = trimmed_required("command", &args.command)?;
     anyhow::ensure!(
@@ -1807,23 +1822,32 @@ async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
         &cwd,
         timeout_ms,
         max_output_bytes,
+        cancellation,
     )
     .await?;
     Ok(process_result_output(result))
 }
 
-async fn git_status(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_status(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let _args = parse_git_status_arguments(arguments)?;
     let args = vec![
         "status".to_string(),
         "--short".to_string(),
         "--branch".to_string(),
     ];
-    let result = run_git(root, args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let result = run_git(root, args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_diff(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_diff(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_diff_arguments(arguments)?;
     let max_output_bytes = bounded_limit(
         args.max_output_bytes,
@@ -1839,11 +1863,15 @@ async fn git_diff(root: &Path, arguments: &str) -> Result<ToolOutput> {
         git_args.push(git_pathspec(path)?);
     }
 
-    let result = run_git(root, git_args, max_output_bytes).await?;
+    let result = run_git(root, git_args, max_output_bytes, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_log(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_log(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_log_arguments(arguments)?;
     let max_count = bounded_limit(args.max_count, DEFAULT_GIT_LOG_COUNT, MAX_GIT_LOG_COUNT);
     let git_args = vec![
@@ -1854,11 +1882,15 @@ async fn git_log(root: &Path, arguments: &str) -> Result<ToolOutput> {
         max_count.to_string(),
     ];
 
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_query(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_query(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_query_arguments(arguments)?;
     let max_output_bytes = bounded_limit(
         args.max_output_bytes,
@@ -1866,20 +1898,28 @@ async fn git_query(root: &Path, arguments: &str) -> Result<ToolOutput> {
         MAX_COMMAND_OUTPUT_BYTES,
     );
     let git_args = read_only_git_args(&args.command, &args.args)?;
-    let result = run_git(root, git_args, max_output_bytes).await?;
+    let result = run_git(root, git_args, max_output_bytes, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_add(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_add(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_add_arguments(arguments)?;
     let pathspecs = git_pathspecs(&args.paths)?;
     let mut git_args = vec!["add".to_string(), "--".to_string()];
     git_args.extend(pathspecs);
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_restore(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_restore(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_restore_arguments(arguments)?;
     let pathspecs = git_pathspecs(&args.paths)?;
     let mut git_args = vec!["restore".to_string()];
@@ -1890,11 +1930,15 @@ async fn git_restore(root: &Path, arguments: &str) -> Result<ToolOutput> {
     }
     git_args.push("--".to_string());
     git_args.extend(pathspecs);
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
     Ok(process_result_output(result))
 }
 
-async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
+async fn git_commit(
+    root: &Path,
+    arguments: &str,
+    cancellation: &TurnCancellation,
+) -> Result<ToolOutput> {
     let args = parse_git_commit_arguments(arguments)?;
     let message = trimmed_required("message", &args.message)?;
     anyhow::ensure!(
@@ -1905,7 +1949,7 @@ async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
 
     let mut add_args = vec!["add".to_string(), "--".to_string()];
     add_args.extend(pathspecs.iter().cloned());
-    let add_result = run_git(root, add_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let add_result = run_git(root, add_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
     let add_output = process_result_output(add_result);
     if !add_output.success {
         return Ok(ToolOutput {
@@ -1921,7 +1965,13 @@ async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
         "--".to_string(),
     ];
     commit_args.extend(pathspecs);
-    let commit_result = run_git(root, commit_args, DEFAULT_COMMAND_OUTPUT_BYTES).await?;
+    let commit_result = run_git(
+        root,
+        commit_args,
+        DEFAULT_COMMAND_OUTPUT_BYTES,
+        cancellation,
+    )
+    .await?;
     let commit_output = process_result_output(commit_result);
 
     Ok(ToolOutput {
@@ -2469,7 +2519,12 @@ fn deny_git_query_output_file_args(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn run_git(root: &Path, args: Vec<String>, max_output_bytes: usize) -> Result<ProcessResult> {
+async fn run_git(
+    root: &Path,
+    args: Vec<String>,
+    max_output_bytes: usize,
+    cancellation: &TurnCancellation,
+) -> Result<ProcessResult> {
     run_process(
         root,
         "git",
@@ -2477,6 +2532,7 @@ async fn run_git(root: &Path, args: Vec<String>, max_output_bytes: usize) -> Res
         root,
         DEFAULT_COMMAND_TIMEOUT_MS,
         max_output_bytes,
+        cancellation,
     )
     .await
 }
@@ -2488,6 +2544,7 @@ async fn run_process(
     cwd: &Path,
     timeout_ms: u64,
     max_output_bytes: usize,
+    cancellation: &TurnCancellation,
 ) -> Result<ProcessResult> {
     let display = display_command(program, args);
     let mut command = Command::new(program);
@@ -2535,8 +2592,14 @@ async fn run_process(
 
     let started = Instant::now();
     let mut timed_out = false;
+    let mut cancelled = false;
     let mut killed_for_output = false;
     let status = loop {
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            kill_process(child_id, &mut child).await;
+            break Some(child.wait().await.context("failed to wait for command")?);
+        }
         if output_limit_exceeded.load(Ordering::Relaxed) {
             killed_for_output = true;
             kill_process(child_id, &mut child).await;
@@ -2569,6 +2632,7 @@ async fn run_process(
         timeout_ms,
         status,
         timed_out,
+        cancelled,
         output_limit_exceeded,
         stdout,
         stderr,
@@ -2724,6 +2788,7 @@ struct ProcessResult {
     timeout_ms: u64,
     status: Option<std::process::ExitStatus>,
     timed_out: bool,
+    cancelled: bool,
     output_limit_exceeded: bool,
     stdout: LimitedOutput,
     stderr: LimitedOutput,
@@ -2748,6 +2813,7 @@ fn process_result_output(result: ProcessResult) -> ToolOutput {
         .as_ref()
         .is_some_and(std::process::ExitStatus::success)
         && !result.timed_out
+        && !result.cancelled
         && !result.output_limit_exceeded;
     let output = format_process_result(&result);
     ToolOutput { output, success }
@@ -2770,6 +2836,8 @@ fn format_process_result(result: &ProcessResult) -> String {
             "status: timed out after {} ms\n",
             result.timeout_ms
         ));
+    } else if result.cancelled {
+        output.push_str("status: cancelled\n");
     } else if result.output_limit_exceeded {
         output.push_str(&format!(
             "status: output exceeded {} bytes; process killed\n",
@@ -3422,6 +3490,7 @@ fn display_path(root: &Path, path: &Path) -> String {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::time::Duration;
     use std::time::Instant;
 
     use serde_json::json;
@@ -3999,6 +4068,56 @@ mod tests {
             tail_preview.output
         );
 
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancels_running_shell_command() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-cancel-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
+        let cancellation = TurnCancellation::new();
+
+        let running = tokio::spawn({
+            let registry = registry.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                registry
+                    .execute_ref_with_cancellation(
+                        &ModelToolCall {
+                            item_id: None,
+                            call_id: "call_exec_cancel".to_string(),
+                            name: EXEC_COMMAND_TOOL.to_string(),
+                            arguments: json!({
+                                "command": "sleep 5",
+                                "timeout_ms": 300_000,
+                            })
+                            .to_string(),
+                        },
+                        &cancellation,
+                    )
+                    .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancellation.cancel();
+        let execution = tokio::time::timeout(Duration::from_secs(2), running)
+            .await
+            .expect("cancelled command should finish promptly")
+            .expect("command task should not panic");
+
+        assert!(!execution.success);
+        assert!(
+            execution.output.contains("status: cancelled"),
+            "{}",
+            execution.output
+        );
         fs::remove_dir_all(&temp).unwrap();
     }
 
