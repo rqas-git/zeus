@@ -67,6 +67,7 @@ final class ChatViewModel: ObservableObject {
             append(kind: .status, text: "ready")
             await refreshAuthStatus()
         } catch {
+            started = false
             isReady = false
             append(kind: .error, text: error.localizedDescription)
         }
