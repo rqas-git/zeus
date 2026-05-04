@@ -188,18 +188,16 @@ private struct TerminalLineView: View {
     private let markerTextSpacing: CGFloat = 8
 
     var body: some View {
-        switch line.kind {
-        case .user, .assistant:
-            HStack(alignment: .top, spacing: markerTextSpacing) {
-                prefix
+        if line.kind == .tool {
+            HStack(alignment: .center, spacing: markerTextSpacing) {
+                toolPrefix
                     .frame(width: markerWidth, alignment: .leading)
                 lineText
             }
-        default:
+        } else {
             HStack(alignment: .top, spacing: markerTextSpacing) {
                 prefix
                     .frame(width: markerWidth, alignment: .leading)
-
                 lineText
             }
         }
@@ -235,11 +233,19 @@ private struct TerminalLineView: View {
         }
     }
 
+    private var toolPrefix: some View {
+        marker(color: TerminalColors.green, topPadding: 0)
+    }
+
     private func marker(color: Color) -> some View {
+        marker(color: color, topPadding: 4)
+    }
+
+    private func marker(color: Color, topPadding: CGFloat) -> some View {
         Circle()
             .fill(color)
             .frame(width: 7, height: 7)
-            .padding(.top, 4)
+            .padding(.top, topPadding)
     }
 
     private var textColor: Color {
@@ -256,55 +262,80 @@ private struct ToolCallLine: View {
     let toolCall: ToolCallTranscript
 
     var body: some View {
-        HStack(alignment: .center, spacing: 7) {
-            Image(systemName: iconName)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(iconColor)
-                .frame(width: 13, height: 13)
+        HStack(alignment: .center, spacing: 4) {
+            toolCell(width: 24, borderColor: iconColor.opacity(0.42)) {
+                Image(systemName: iconName)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(iconColor)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
 
-            Text(statusText)
-                .foregroundStyle(statusColor)
+            toolCell(width: 76, borderColor: statusColor.opacity(0.52)) {
+                Text(statusText)
+                    .foregroundStyle(statusColor)
+            }
 
-            Rectangle()
-                .fill(TerminalColors.dimText.opacity(0.35))
-                .frame(width: 1, height: 11)
-
-            Text(toolCall.name)
-                .foregroundStyle(TerminalColors.cyan)
-                .fontWeight(.semibold)
+            toolCell(width: 118, borderColor: TerminalColors.cyan.opacity(0.42)) {
+                Text(toolCall.name)
+                    .foregroundStyle(TerminalColors.cyan)
+                    .fontWeight(.semibold)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
 
             if let target = toolCall.target, !target.isEmpty {
-                Text(":")
-                    .foregroundStyle(TerminalColors.dimText)
-
-                Text(target)
-                    .foregroundStyle(TerminalColors.primaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                toolCell(borderColor: TerminalColors.dimText.opacity(0.38)) {
+                    Text(target)
+                        .foregroundStyle(TerminalColors.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
         }
         .font(.system(size: 11, weight: .regular, design: .monospaced))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(TerminalColors.cyan.opacity(0.035))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .stroke(borderColor, lineWidth: 1)
-        )
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(statusColor.opacity(0.9))
-                .frame(width: 2)
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 5,
-                        bottomLeadingRadius: 5
-                    )
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func toolCell<Content: View>(
+        width: CGFloat? = nil,
+        maxWidth: CGFloat? = nil,
+        borderColor: Color,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Group {
+            if let width {
+                toolCellStyle(
+                    content()
+                        .padding(.horizontal, 7)
+                        .frame(width: width, alignment: .leading)
+                        .frame(minHeight: 23),
+                    borderColor: borderColor
                 )
+            } else {
+                toolCellStyle(
+                    content()
+                        .padding(.horizontal, 7)
+                        .frame(maxWidth: maxWidth, alignment: .leading)
+                        .frame(minHeight: 23),
+                    borderColor: borderColor
+                )
+            }
         }
+    }
+
+    private func toolCellStyle<Content: View>(
+        _ content: Content,
+        borderColor: Color
+    ) -> some View {
+        content
+            .background(
+                Rectangle()
+                    .fill(TerminalColors.cyan.opacity(0.026))
+            )
+            .overlay(
+                Rectangle()
+                    .stroke(borderColor, lineWidth: 1)
+            )
     }
 
     private var statusText: String {
@@ -353,17 +384,6 @@ private struct ToolCallLine: View {
             return TerminalColors.red
         default:
             return TerminalColors.cyan
-        }
-    }
-
-    private var borderColor: Color {
-        switch toolCall.status {
-        case .running:
-            return TerminalColors.dimText.opacity(0.32)
-        case .completed:
-            return TerminalColors.green.opacity(0.45)
-        case .failed:
-            return TerminalColors.red.opacity(0.55)
         }
     }
 
