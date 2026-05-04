@@ -60,8 +60,8 @@ explicit `limit` values may request up to 500 entries.
   current directory, captures stdout and stderr separately, caps retained output,
   keeps the tail of truncated streams, writes full truncated streams under
   `target/rust-agent-tool-output/`, enforces a timeout, rejects oversized command
-  inputs, and kills the process group when total output exceeds the hard output
-  ceiling.
+  inputs, honors turn cancellation, and kills the process group when cancelled
+  or when total output exceeds the hard output ceiling.
 - `exec_command` does not currently apply command-level allow/deny protections;
   reintroducing a command safety policy is deferred. Treat `workspace-exec` as a
   trusted-local mode until that policy exists.

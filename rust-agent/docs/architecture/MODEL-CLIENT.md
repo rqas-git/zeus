@@ -76,8 +76,10 @@ list and individual commands.
 
 ## Current Scope
 
-The client does not yet support request cancellation, general retries, websocket
-transport, provider failover, remote compaction, provider-specific tool repair,
-or hard byte caps on backend SSE streams. The only transport retry is the
-targeted one-shot auth refresh after a `401 Unauthorized` response. Add stream
-caps before using this client with untrusted providers.
+Request cancellation is caller-driven by dropping the streaming future; the
+client does not expose provider-side cancellation ids. The client does not yet
+support general retries, websocket transport, provider failover, remote
+compaction, provider-specific tool repair, or hard byte caps on backend SSE
+streams. The only transport retry is the targeted one-shot auth refresh after a
+`401 Unauthorized` response. Add stream caps before using this client with
+untrusted providers.

@@ -41,6 +41,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
+use crate::agent_loop::is_turn_cancelled;
 use crate::agent_loop::AgentEvent;
 use crate::agent_loop::CacheHealth;
 use crate::agent_loop::ModelStreamer;
@@ -142,6 +143,10 @@ where
         .route(
             "/sessions/{session_id}/turns:stream",
             post(stream_turn::<M>),
+        )
+        .route(
+            "/sessions/{session_id}/turns:cancel",
+            post(cancel_turn::<M>),
         )
         .route("/sessions/{session_id}/events", get(session_events::<M>))
         .with_state(state.clone())
@@ -755,6 +760,13 @@ where
                 let _ = events.publish(event.clone());
                 let _ = tx.send(event);
             }
+            Err(error) if is_turn_cancelled(&error) => {
+                let event = ServerEvent::TurnCancelled {
+                    session_id: session_id.get(),
+                };
+                let _ = events.publish(event.clone());
+                let _ = tx.send(event);
+            }
             Err(error) if !error_forwarded => {
                 let event = ServerEvent::Error {
                     session_id: session_id.get(),
@@ -768,6 +780,23 @@ where
     });
 
     sse_from_unbounded_mpsc(rx)
+}
+
+async fn cancel_turn<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    match state.service.cancel_session_turn(session_id) {
+        Ok(cancelled) => Json(CancelTurnResponse { cancelled }).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
 }
 
 async fn session_events<M>(
@@ -919,6 +948,9 @@ enum ServerEvent {
     TurnCompleted {
         session_id: u64,
     },
+    TurnCancelled {
+        session_id: u64,
+    },
 }
 
 impl ServerEvent {
@@ -993,7 +1025,8 @@ impl ServerEvent {
             | Self::ToolCallStarted { session_id, .. }
             | Self::ToolCallCompleted { session_id, .. }
             | Self::Error { session_id, .. }
-            | Self::TurnCompleted { session_id } => SessionId::new(*session_id),
+            | Self::TurnCompleted { session_id }
+            | Self::TurnCancelled { session_id } => SessionId::new(*session_id),
         }
     }
 
@@ -1010,6 +1043,7 @@ impl ServerEvent {
             Self::ToolCallCompleted { .. } => "tool_call.completed",
             Self::Error { .. } => "session.error",
             Self::TurnCompleted { .. } => "turn.completed",
+            Self::TurnCancelled { .. } => "turn.cancelled",
         }
     }
 }
@@ -1091,6 +1125,11 @@ struct SessionModelResponse {
 }
 
 #[derive(Serialize)]
+struct CancelTurnResponse {
+    cancelled: bool,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -1114,6 +1153,7 @@ mod tests {
     use axum::http::Method;
     use axum::http::Request;
     use bytes::Buf;
+    use tokio::sync::Notify;
     use tower::ServiceExt;
 
     use crate::agent_loop::ModelResponse;
@@ -1544,6 +1584,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancels_running_turn_stream() {
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let service = Arc::new(AgentService::new(
+            CancellableStreamer {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let app = router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        started.notified().await;
+        let cancelled = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:cancel")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancel_body = to_bytes(cancelled.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&cancel_body).unwrap(),
+            r#"{"cancelled":true}"#
+        );
+
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("cancelled turn stream should finish")
+        .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(
+            "event: turn.cancelled\ndata: {\"type\":\"turn_cancelled\",\"session_id\":7}\n\n"
+        ));
+        assert!(body.contains(
+            "event: session.status_changed\ndata: {\"type\":\"status_changed\",\"session_id\":7,\"status\":\"idle\"}\n\n"
+        ));
+        assert!(!body.contains("event: session.error\n"));
+        assert!(!body.contains("event: turn.completed\n"));
+        release.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn cancel_turn_reports_false_when_idle() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:cancel")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"cancelled":false}"#
+        );
+    }
+
+    #[tokio::test]
     async fn streams_tool_call_args_in_started_event() {
         let turn = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(AgentService::new(
@@ -1968,6 +2105,27 @@ mod tests {
             _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
         ) -> Result<ModelResponse> {
             anyhow::bail!("model failed")
+        }
+    }
+
+    struct CancellableStreamer {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl ModelStreamer for CancellableStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(ModelResponse::new("released"))
         }
     }
 

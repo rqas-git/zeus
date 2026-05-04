@@ -34,6 +34,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
   registry slot, and closes its session event channel.
 - `POST /sessions/{session_id}/turns:stream` submits a user message and returns
   the turn as SSE.
+- `POST /sessions/{session_id}/turns:cancel` requests cancellation of the
+  currently running turn for the session and returns whether a turn was active.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
 
 `GET /` and `GET /healthz` are public. All other routes require
@@ -69,6 +71,7 @@ Important event names include:
 - `tool_call.started`
 - `tool_call.completed`
 - `turn.completed`
+- `turn.cancelled`
 - `session.error`
 - `server.heartbeat`
 - `server.events_lagged`
@@ -108,11 +111,12 @@ Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
 stable token, and treat the generated token as a local-development convenience.
 Sessions are in-memory, random, and process-local. Clients can explicitly delete
 sessions, which removes future route access and closes the session event stream;
-it does not cancel an already-running direct turn stream. Persistence, turn
-cancellation, per-user authorization, and multi-process coordination are not
-implemented. Use `workspace-write` and `workspace-exec` only for trusted local
-deployments because any bearer-token holder can ask the model to edit workspace
-files or run local commands. WebSocket endpoints are not implemented because SSE
-matches the current server-to-client event flow with less protocol overhead. Set
-`RUST_AGENT_PARENT_PID` only when another local supervisor process should control
-server lifetime.
+it does not cancel an already-running direct turn stream. Use
+`POST /sessions/{session_id}/turns:cancel` before deletion when the active turn
+should stop. Persistence, per-user authorization, and multi-process coordination
+are not implemented. Use `workspace-write` and `workspace-exec` only for trusted
+local deployments because any bearer-token holder can ask the model to edit
+workspace files or run local commands. WebSocket endpoints are not implemented
+because SSE matches the current server-to-client event flow with less protocol
+overhead. Set `RUST_AGENT_PARENT_PID` only when another local supervisor process
+should control server lifetime.

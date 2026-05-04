@@ -26,6 +26,8 @@ submit work without rebuilding transport state for every request.
 - `AgentService` creates and deletes process-local session state for server
   session lifecycle routes.
 - `AgentService` enforces the configured model allowlist.
+- `AgentService` can request cancellation of the currently running turn without
+  waiting on that session's execution lock.
 - `AgentService` serializes work per session without serializing unrelated
   sessions.
 - `AgentLoop` still owns per-session ordering, tool execution, and message
@@ -57,6 +59,9 @@ ordered conversation turns and history updates.
 Session model updates are intentionally not queued behind an active turn. If the
 target session is busy, `set_session_model` returns an error so a model change
 cannot silently apply after a user message that was already submitted.
+Turn cancellation also targets only the active turn. Queued same-session
+submissions wait for the running turn to finish or cancel, then continue in
+order.
 
 ## Current Scope
 

@@ -20,7 +20,9 @@ transport, and session state separate.
    repeats until the model returns no more tool calls.
 6. Tool calls are bounded by a fixed per-turn round limit so a malformed or
    looping model response cannot run forever.
-7. Interactive mode reuses the same service and session, so history lasts for
+7. A shared cancellation signal can stop an active model stream or command-backed
+   tool before the session returns to `Idle`.
+8. Interactive mode reuses the same service and session, so history lasts for
    the current terminal process.
 
 ## Responsibilities
@@ -40,7 +42,8 @@ transport, and session state separate.
   bounded shell command tool plus dedicated git wrappers. It executes tool
   batches in parallel when every requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
-  backend service. It also validates model changes before updating a session.
+  backend service. It validates model changes before updating a session and
+  exposes cancellation for the currently running turn.
 - `AgentService` holds only a per-session async lock while a turn streams, so
   different sessions can progress independently.
 - `ChatGptClient` sends typed async Responses requests to the Codex backend and
@@ -111,8 +114,9 @@ is read-only (`read_file`, `read_file_range`, `list_dir`, `search_files`, and
 `search_text`).
 `RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
 `RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution plus
-git wrappers. Persistence, cancellation, and semantic context compaction are
-intentionally out of scope until product behavior requires them.
+git wrappers. Cancellation is process-local and applies to the active turn;
+persistence and semantic context compaction remain out of scope until product
+behavior requires them.
 
 ## Related Docs
 
