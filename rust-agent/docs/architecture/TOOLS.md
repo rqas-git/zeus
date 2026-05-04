@@ -33,6 +33,19 @@ Update hunks are exact replacements. Each hunk must include context or removed
 lines so the tool can find a unique target in the current file. Add and delete
 operations are path-based.
 
+## Read and List Tools
+
+`read_file` accepts a required workspace-relative `path`. When `offset` or
+`limit` is provided, it reads line-oriented pages with 1-indexed line numbers,
+matching the large-file continuation style used by OpenCode and Pi. Paginated
+reads default to 2,000 lines, cap individual returned lines at 2,000 bytes, and
+cap the whole returned page at 64 KiB.
+
+`list_dir` accepts a required workspace-relative `path` plus optional `offset`,
+`limit`, and `depth`. Offsets are 1-indexed. Depth defaults to 1 and is capped at
+4. The default list remains capped at 200 entries for compatibility, while
+explicit `limit` values may request up to 500 entries.
+
 ## Safety
 
 - Absolute paths and paths escaping the workspace are rejected.
@@ -44,8 +57,10 @@ operations are path-based.
 - Patch input is capped at 256 KiB, and edited files are capped at 2 MiB.
 - `exec_command` runs commands through `bash -lc` from a workspace-confined
   current directory, captures stdout and stderr separately, caps retained output,
-  enforces a timeout, rejects oversized command inputs, and kills the process
-  group when total output exceeds the hard output ceiling.
+  keeps the tail of truncated streams, writes full truncated streams under
+  `target/rust-agent-tool-output/`, enforces a timeout, rejects oversized command
+  inputs, and kills the process group when total output exceeds the hard output
+  ceiling.
 - `exec_command` rejects command lines that mention a direct `git` executable
   token. Repository operations must use the dedicated git wrappers.
 - `git_commit` requires explicit workspace-relative paths and commits only those

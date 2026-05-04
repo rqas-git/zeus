@@ -77,6 +77,7 @@ const MAX_COMMAND_BYTES: usize = 16 * 1024;
 const DEFAULT_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOTAL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const COMMAND_OUTPUT_DIR: &str = "target/rust-agent-tool-output";
 const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_GIT_PATHS: usize = 128;
 const MAX_GIT_PATH_BYTES: usize = 8 * 1024;
@@ -92,6 +93,8 @@ pub(crate) const MAX_FFF_SEARCH_CONCURRENCY: usize = 16;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+static COMMAND_OUTPUT_ARTIFACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 const READ_FILE_TOOL_SPEC: ToolSpec = ToolSpec {
     name: READ_FILE_TOOL,
@@ -2064,13 +2067,20 @@ async fn run_process(
         .context("failed to capture command stderr")?;
     let output_limit_exceeded = Arc::new(AtomicBool::new(false));
     let total_output_bytes = Arc::new(AtomicUsize::new(0));
+    let output_dir = root.join(COMMAND_OUTPUT_DIR);
     let stdout_task = tokio::spawn(read_limited_output(
+        root.to_path_buf(),
+        output_dir.clone(),
+        "stdout".to_string(),
         stdout,
         max_output_bytes,
         Arc::clone(&total_output_bytes),
         Arc::clone(&output_limit_exceeded),
     ));
     let stderr_task = tokio::spawn(read_limited_output(
+        root.to_path_buf(),
+        output_dir,
+        "stderr".to_string(),
         stderr,
         max_output_bytes,
         Arc::clone(&total_output_bytes),
@@ -2145,6 +2155,9 @@ async fn kill_process(child_id: Option<u32>, child: &mut tokio::process::Child) 
 }
 
 async fn read_limited_output<R>(
+    root: PathBuf,
+    artifact_dir: PathBuf,
+    stream_name: String,
     mut reader: R,
     max_bytes: usize,
     total_output_bytes: Arc<AtomicUsize>,
@@ -2156,27 +2169,106 @@ where
     let mut output = LimitedOutput {
         bytes: Vec::with_capacity(max_bytes.min(8192)),
         total_bytes: 0,
+        artifact_path: None,
     };
     let mut buffer = [0u8; 8192];
+    let mut artifact: Option<CommandOutputArtifact> = None;
 
     loop {
         let bytes_read = reader.read(&mut buffer).await?;
         if bytes_read == 0 {
-            return Ok(output);
+            break;
         }
+        let chunk = &buffer[..bytes_read];
         output.total_bytes = output.total_bytes.saturating_add(bytes_read);
         let total_bytes = total_output_bytes.fetch_add(bytes_read, Ordering::Relaxed) + bytes_read;
+
+        if artifact.is_none() && output.total_bytes > max_bytes {
+            let mut next_artifact =
+                create_command_output_artifact(&root, &artifact_dir, &stream_name).await?;
+            next_artifact.file.write_all(&output.bytes).await?;
+            artifact = Some(next_artifact);
+        }
+        if let Some(artifact) = artifact.as_mut() {
+            artifact.file.write_all(chunk).await?;
+        }
+
+        output.bytes.extend_from_slice(chunk);
+        if output.bytes.len() > max_bytes {
+            let overflow = output.bytes.len() - max_bytes;
+            output.bytes.drain(..overflow);
+        }
+
         if total_bytes > MAX_COMMAND_TOTAL_OUTPUT_BYTES {
             output_limit_exceeded.store(true, Ordering::Relaxed);
-            return Ok(output);
-        }
-        if output.bytes.len() < max_bytes {
-            let remaining = max_bytes - output.bytes.len();
-            output
-                .bytes
-                .extend_from_slice(&buffer[..bytes_read.min(remaining)]);
+            break;
         }
     }
+
+    if let Some(mut artifact) = artifact {
+        artifact.file.flush().await?;
+        output.artifact_path = Some(artifact.display_path);
+    }
+    Ok(output)
+}
+
+struct CommandOutputArtifact {
+    display_path: String,
+    file: tokio::fs::File,
+}
+
+async fn create_command_output_artifact(
+    root: &Path,
+    artifact_dir: &Path,
+    stream_name: &str,
+) -> Result<CommandOutputArtifact> {
+    tokio::fs::create_dir_all(artifact_dir)
+        .await
+        .with_context(|| format!("failed to create {}", display_path(root, artifact_dir)))?;
+    for attempt in 0..16 {
+        let path = command_output_artifact_path(artifact_dir, stream_name, attempt);
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => {
+                return Ok(CommandOutputArtifact {
+                    display_path: display_path(root, &path),
+                    file,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to create {}", display_path(root, &path)));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to allocate command output artifact in {}",
+        display_path(root, artifact_dir)
+    )
+}
+
+fn command_output_artifact_path(artifact_dir: &Path, stream_name: &str, attempt: usize) -> PathBuf {
+    let counter = COMMAND_OUTPUT_ARTIFACT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    artifact_dir.join(format!(
+        "{}-{}-{}-{}-{attempt}.log",
+        stream_name,
+        std::process::id(),
+        timestamp_nanos(),
+        counter
+    ))
+}
+
+fn timestamp_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 #[derive(Debug)]
@@ -2195,6 +2287,7 @@ struct ProcessResult {
 struct LimitedOutput {
     bytes: Vec<u8>,
     total_bytes: usize,
+    artifact_path: Option<String>,
 }
 
 impl LimitedOutput {
@@ -2247,14 +2340,22 @@ fn format_process_result(result: &ProcessResult) -> String {
 fn push_limited_section(output: &mut String, name: &str, limited: &LimitedOutput) {
     output.push_str(name);
     output.push_str(":\n");
-    output.push_str(&String::from_utf8_lossy(&limited.bytes));
     if limited.is_truncated() {
-        output.push_str(&format!(
-            "\n[truncated: {name} captured {} of {} bytes]",
-            limited.bytes.len(),
-            limited.total_bytes
-        ));
+        if let Some(path) = limited.artifact_path.as_ref() {
+            output.push_str(&format!(
+                "[truncated: {name} showing last {} of {} bytes; full output saved to {path}]\n",
+                limited.bytes.len(),
+                limited.total_bytes
+            ));
+        } else {
+            output.push_str(&format!(
+                "[truncated: {name} showing last {} of {} bytes]\n",
+                limited.bytes.len(),
+                limited.total_bytes
+            ));
+        }
     }
+    output.push_str(&String::from_utf8_lossy(&limited.bytes));
     if !output.ends_with('\n') {
         output.push('\n');
     }
@@ -3248,6 +3349,18 @@ mod tests {
                 .to_string(),
             })
             .await;
+        let tail_preview = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_exec_tail_preview".to_string(),
+                name: EXEC_COMMAND_TOOL.to_string(),
+                arguments: json!({
+                    "command": "printf 'start\\n'; for i in $(seq 1 400); do printf 'mid-%03d\\n' \"$i\"; done; printf 'end\\n'",
+                    "max_output_bytes": 128,
+                })
+                .to_string(),
+            })
+            .await;
 
         assert!(command.success, "{}", command.output);
         assert!(command.output.contains("src"), "{}", command.output);
@@ -3270,6 +3383,39 @@ mod tests {
             capped.output.contains("output exceeded"),
             "{}",
             capped.output
+        );
+        let artifact_marker = "full output saved to ";
+        let artifact_start = capped
+            .output
+            .find(artifact_marker)
+            .expect("capped output should mention an artifact")
+            + artifact_marker.len();
+        let artifact_end = capped.output[artifact_start..]
+            .find(']')
+            .expect("artifact notice should be bracketed")
+            + artifact_start;
+        let artifact_path = temp.join(&capped.output[artifact_start..artifact_end]);
+        assert!(artifact_path.exists(), "{}", artifact_path.display());
+        assert!(
+            fs::metadata(&artifact_path).unwrap().len() > 1024,
+            "{}",
+            artifact_path.display()
+        );
+        assert!(tail_preview.success, "{}", tail_preview.output);
+        assert!(
+            tail_preview.output.contains("showing last"),
+            "{}",
+            tail_preview.output
+        );
+        assert!(
+            tail_preview.output.contains("end"),
+            "{}",
+            tail_preview.output
+        );
+        assert!(
+            !tail_preview.output.contains("mid-001"),
+            "{}",
+            tail_preview.output
         );
 
         fs::remove_dir_all(&temp).unwrap();
