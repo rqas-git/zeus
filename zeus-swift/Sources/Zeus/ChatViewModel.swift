@@ -13,12 +13,12 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isSending = false
     @Published private(set) var isLoggingIn = false
 
-    let workspace = WorkspaceMetadata.current()
+    let workspace: WorkspaceMetadata
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
-    private let server = RustAgentServer()
-    private let auth = RustAgentAuth()
-    private var client: AgentAPIClient?
+    private let server: any AgentServerProtocol
+    private let auth: any AgentAuthProtocol
+    private var client: (any AgentClientProtocol)?
     private var sessionID: UInt64?
     private var started = false
     private var currentAssistantLineID: UUID?
@@ -27,6 +27,16 @@ final class ChatViewModel: ObservableObject {
     private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
+
+    init(
+        server: any AgentServerProtocol = RustAgentServer(),
+        auth: any AgentAuthProtocol = RustAgentAuth(),
+        workspace: WorkspaceMetadata = WorkspaceMetadata.current()
+    ) {
+        self.server = server
+        self.auth = auth
+        self.workspace = workspace
+    }
 
     deinit {
         streamTask?.cancel()

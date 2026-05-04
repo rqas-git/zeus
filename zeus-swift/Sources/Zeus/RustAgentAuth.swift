@@ -7,7 +7,7 @@ enum RustAgentAuthState: Equatable {
     case unknown(String)
 }
 
-final class RustAgentAuth {
+final class RustAgentAuth: AgentAuthProtocol {
     private let lock = NSLock()
     private var loginProcess: Process?
 

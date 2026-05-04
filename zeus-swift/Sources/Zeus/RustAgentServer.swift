@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-final class RustAgentServer {
+final class RustAgentServer: AgentServerProtocol {
     let token = "zeus-swift-dev-token"
 
     private let candidates = (0..<20).map {
@@ -14,7 +14,7 @@ final class RustAgentServer {
         stop()
     }
 
-    func start() async throws -> AgentAPIClient {
+    func start() async throws -> any AgentClientProtocol {
         var failures: [String] = []
         var reusableClient: AgentAPIClient?
 

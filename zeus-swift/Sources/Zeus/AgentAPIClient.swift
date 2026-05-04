@@ -1,7 +1,7 @@
 import Foundation
 import ZeusCore
 
-struct AgentAPIClient {
+struct AgentAPIClient: AgentClientProtocol {
     let baseURL: URL
     let token: String
 
