@@ -98,6 +98,19 @@ public enum ZeusCoreChecks {
     }
 
     public static func testToolTargets() throws {
+        let read = ToolMetadata.forName("read_file")
+        try require(
+            read.target(fromArgumentsJSON: #"{"path":"Sources/Zeus/ChatWindow.swift"}"#)
+                == "Sources/Zeus/ChatWindow.swift",
+            "unexpected read_file target"
+        )
+
+        let list = ToolMetadata.forName("list_dir")
+        try require(
+            list.target(fromArgumentsJSON: #"{"path":"Sources"}"#) == "Sources",
+            "unexpected list_dir target"
+        )
+
         let exec = ToolMetadata.forName("exec_command")
         try require(
             exec.target(fromArgumentsJSON: #"{"command":"swift test"}"#) == #""swift test""#,
@@ -125,6 +138,19 @@ public enum ZeusCoreChecks {
         )
         try require(textDelta == .textDelta(sessionID: 42, delta: "hello"), "unexpected text delta")
         try require(textDelta.isAssistantOutputEvent, "text delta should be assistant output")
+
+        let toolStarted = try decodeEvent(
+            #"{"type":"tool_call_started","session_id":7,"tool_call_id":"call_read","tool_name":"read_file","args":"{\"path\":\"Cargo.toml\"}"}"#
+        )
+        try require(
+            toolStarted == .toolCallStarted(
+                sessionID: 7,
+                toolCallID: "call_read",
+                toolName: "read_file",
+                toolArguments: #"{"path":"Cargo.toml"}"#
+            ),
+            "unexpected tool call started event"
+        )
 
         let unknown = try decodeEvent(
             #"{"type":"new_event","session_id":7,"message":"later"}"#

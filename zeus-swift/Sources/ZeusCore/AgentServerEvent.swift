@@ -115,7 +115,25 @@ private struct AgentServerEventPayload: Decodable {
         case toolCallID = "tool_call_id"
         case toolName = "tool_name"
         case toolArguments = "tool_arguments"
+        case args
         case success
         case cache
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        sessionID = try container.decodeIfPresent(UInt64.self, forKey: .sessionID)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        delta = try container.decodeIfPresent(String.self, forKey: .delta)
+        role = try container.decodeIfPresent(String.self, forKey: .role)
+        text = try container.decodeIfPresent(String.self, forKey: .text)
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+        toolCallID = try container.decodeIfPresent(String.self, forKey: .toolCallID)
+        toolName = try container.decodeIfPresent(String.self, forKey: .toolName)
+        toolArguments = try container.decodeIfPresent(String.self, forKey: .toolArguments)
+            ?? container.decodeIfPresent(String.self, forKey: .args)
+        success = try container.decodeIfPresent(Bool.self, forKey: .success)
+        cache = try container.decodeIfPresent(CacheHealthPayload.self, forKey: .cache)
     }
 }
