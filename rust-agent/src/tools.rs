@@ -55,6 +55,7 @@ const EXEC_COMMAND_TOOL: &str = "exec_command";
 const GIT_STATUS_TOOL: &str = "git_status";
 const GIT_DIFF_TOOL: &str = "git_diff";
 const GIT_LOG_TOOL: &str = "git_log";
+const GIT_QUERY_TOOL: &str = "git_query";
 const GIT_COMMIT_TOOL: &str = "git_commit";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
@@ -82,6 +83,8 @@ const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_GIT_PATHS: usize = 128;
 const MAX_GIT_PATH_BYTES: usize = 8 * 1024;
 const MAX_GIT_COMMIT_MESSAGE_BYTES: usize = 8 * 1024;
+const MAX_GIT_QUERY_ARGS: usize = 64;
+const MAX_GIT_QUERY_ARG_BYTES: usize = 8 * 1024;
 const DEFAULT_GIT_LOG_COUNT: usize = 10;
 const MAX_GIT_LOG_COUNT: usize = 50;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
@@ -157,6 +160,12 @@ const GIT_LOG_TOOL_SPEC: ToolSpec = ToolSpec {
     parameters: ToolParameters::GitLog,
     supports_parallel: false,
 };
+const GIT_QUERY_TOOL_SPEC: ToolSpec = ToolSpec {
+    name: GIT_QUERY_TOOL,
+    description: "Run an allowlisted read-only git query for workspace inspection.",
+    parameters: ToolParameters::GitQuery,
+    supports_parallel: false,
+};
 const GIT_COMMIT_TOOL_SPEC: ToolSpec = ToolSpec {
     name: GIT_COMMIT_TOOL,
     description: "Create an atomic git commit for explicit workspace-relative paths.",
@@ -192,6 +201,7 @@ const WORKSPACE_EXEC_TOOL_SPECS: &[ToolSpec] = &[
     GIT_STATUS_TOOL_SPEC,
     GIT_DIFF_TOOL_SPEC,
     GIT_LOG_TOOL_SPEC,
+    GIT_QUERY_TOOL_SPEC,
     GIT_COMMIT_TOOL_SPEC,
 ];
 
@@ -271,6 +281,7 @@ enum ToolParameters {
     NoArgs,
     GitDiff,
     GitLog,
+    GitQuery,
     GitCommit,
 }
 
@@ -293,6 +304,9 @@ impl ToolParameters {
             Self::NoArgs => "no_args:no_additional_properties",
             Self::GitDiff => "git_diff:staged:boolean:path:string:max_output_bytes:integer",
             Self::GitLog => "git_log:max_count:integer",
+            Self::GitQuery => {
+                "git_query:command:string:required:args:string_array:max_output_bytes:integer"
+            }
             Self::GitCommit => "git_commit:message:string:required:paths:string_array:required",
         }
     }
@@ -381,6 +395,14 @@ impl Serialize for ToolParameters {
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &GitLogProperties)?;
                 map.serialize_entry("required", &[] as &[&str])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::GitQuery => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &GitQueryProperties)?;
+                map.serialize_entry("required", &["command"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
             }
@@ -807,6 +829,39 @@ impl Serialize for GitLogProperties {
     }
 }
 
+struct GitQueryProperties;
+
+impl Serialize for GitQueryProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry(
+            "command",
+            &StringProperty {
+                description:
+                    "Read-only git command: status, diff, log, show, blame, grep, ls-files, branch, rev-parse, merge-base, describe, worktree, or submodule.",
+            },
+        )?;
+        map.serialize_entry(
+            "args",
+            &StringArrayProperty {
+                description: "Arguments for the selected read-only git command.",
+            },
+        )?;
+        map.serialize_entry(
+            "max_output_bytes",
+            &IntegerProperty {
+                description: "Maximum stdout bytes and stderr bytes to retain separately.",
+                minimum: 1,
+                maximum: MAX_COMMAND_OUTPUT_BYTES,
+            },
+        )?;
+        map.end()
+    }
+}
+
 struct GitCommitProperties;
 
 impl Serialize for GitCommitProperties {
@@ -951,6 +1006,14 @@ impl ToolRegistry {
             }
             GIT_LOG_TOOL => {
                 return git_log(&self.root, &call.arguments)
+                    .await
+                    .map(|output| tool_execution(call, output.output, output.success))
+                    .unwrap_or_else(|error| {
+                        tool_execution(call, format!("Tool error: {error}"), false)
+                    });
+            }
+            GIT_QUERY_TOOL => {
+                return git_query(&self.root, &call.arguments)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1143,6 +1206,16 @@ struct GitDiffArguments {
 struct GitLogArguments {
     #[serde(default)]
     max_count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitQueryArguments {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1661,6 +1734,18 @@ async fn git_log(root: &Path, arguments: &str) -> Result<ToolOutput> {
     Ok(process_result_output(result))
 }
 
+async fn git_query(root: &Path, arguments: &str) -> Result<ToolOutput> {
+    let args = parse_git_query_arguments(arguments)?;
+    let max_output_bytes = bounded_limit(
+        args.max_output_bytes,
+        DEFAULT_COMMAND_OUTPUT_BYTES,
+        MAX_COMMAND_OUTPUT_BYTES,
+    );
+    let git_args = read_only_git_args(&args.command, &args.args)?;
+    let result = run_git(root, git_args, max_output_bytes).await?;
+    Ok(process_result_output(result))
+}
+
 async fn git_commit(root: &Path, arguments: &str) -> Result<ToolOutput> {
     let args = parse_git_commit_arguments(arguments)?;
     let message = trimmed_required("message", &args.message)?;
@@ -1855,6 +1940,10 @@ fn parse_git_log_arguments(arguments: &str) -> Result<GitLogArguments> {
     serde_json::from_str(arguments).context("invalid git_log arguments")
 }
 
+fn parse_git_query_arguments(arguments: &str) -> Result<GitQueryArguments> {
+    serde_json::from_str(arguments).context("invalid git_query arguments")
+}
+
 fn parse_git_commit_arguments(arguments: &str) -> Result<GitCommitArguments> {
     serde_json::from_str(arguments).context("invalid git_commit arguments")
 }
@@ -2021,6 +2110,126 @@ async fn command_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
 fn git_pathspec(path: &str) -> Result<String> {
     let relative = clean_workspace_relative_path(path)?;
     Ok(relative.to_string_lossy().into_owned())
+}
+
+fn read_only_git_args(command: &str, args: &[String]) -> Result<Vec<String>> {
+    let command = trimmed_required("command", command)?.to_ascii_lowercase();
+    validate_git_query_args(args)?;
+    let git_args = match command.as_str() {
+        "status" | "log" | "blame" | "ls-files" | "rev-parse" | "merge-base" | "describe" => {
+            let mut git_args = Vec::with_capacity(args.len() + 1);
+            git_args.push(command);
+            git_args.extend(args.iter().cloned());
+            git_args
+        }
+        "diff" | "show" => {
+            let mut git_args = Vec::with_capacity(args.len() + 2);
+            git_args.push(command);
+            git_args.push("--no-ext-diff".to_string());
+            git_args.extend(args.iter().cloned());
+            git_args
+        }
+        "grep" => {
+            ensure_git_grep_args_are_read_only(args)?;
+            let mut git_args = Vec::with_capacity(args.len() + 1);
+            git_args.push(command);
+            git_args.extend(args.iter().cloned());
+            git_args
+        }
+        "branch" => {
+            anyhow::ensure!(
+                args.is_empty()
+                    || (args.len() == 1
+                        && args.first().is_some_and(|arg| arg == "--show-current")),
+                "git_query branch only supports --show-current"
+            );
+            vec!["branch".to_string(), "--show-current".to_string()]
+        }
+        "worktree" => {
+            anyhow::ensure!(
+                matches!(args.first().map(String::as_str), Some("list")),
+                "git_query worktree only supports list"
+            );
+            ensure_git_worktree_list_args(args)?;
+            let mut git_args = Vec::with_capacity(args.len() + 1);
+            git_args.push(command);
+            git_args.extend(args.iter().cloned());
+            git_args
+        }
+        "submodule" => {
+            if args.is_empty() {
+                vec!["submodule".to_string(), "status".to_string()]
+            } else {
+                anyhow::ensure!(
+                    matches!(args.first().map(String::as_str), Some("status")),
+                    "git_query submodule only supports status"
+                );
+                let mut git_args = Vec::with_capacity(args.len() + 1);
+                git_args.push(command);
+                git_args.extend(args.iter().cloned());
+                git_args
+            }
+        }
+        _ => anyhow::bail!(
+            "unsupported git_query command {command:?}; allowed commands: status, diff, log, show, blame, grep, ls-files, branch, rev-parse, merge-base, describe, worktree, submodule"
+        ),
+    };
+    deny_git_query_output_file_args(&git_args)?;
+    Ok(git_args)
+}
+
+fn validate_git_query_args(args: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        args.len() <= MAX_GIT_QUERY_ARGS,
+        "git_query args exceed {MAX_GIT_QUERY_ARGS} entries"
+    );
+    let mut bytes = 0usize;
+    for arg in args {
+        anyhow::ensure!(
+            !arg.is_empty(),
+            "git_query args cannot contain empty strings"
+        );
+        anyhow::ensure!(
+            !arg.contains('\0'),
+            "git_query args cannot contain NUL bytes"
+        );
+        bytes = bytes.saturating_add(arg.len());
+        anyhow::ensure!(
+            bytes <= MAX_GIT_QUERY_ARG_BYTES,
+            "git_query args exceed {MAX_GIT_QUERY_ARG_BYTES} bytes"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_git_grep_args_are_read_only(args: &[String]) -> Result<()> {
+    for arg in args {
+        anyhow::ensure!(
+            arg != "-O" && !arg.starts_with("-O") && !arg.starts_with("--open-files-in-pager"),
+            "git_query grep does not support pager-opening options"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_git_worktree_list_args(args: &[String]) -> Result<()> {
+    for arg in args.iter().skip(1) {
+        anyhow::ensure!(
+            matches!(arg.as_str(), "--porcelain" | "-z" | "-v" | "--verbose"),
+            "git_query worktree list only supports --porcelain, -z, -v, and --verbose"
+        );
+    }
+    Ok(())
+}
+
+fn deny_git_query_output_file_args(args: &[String]) -> Result<()> {
+    for arg in args {
+        anyhow::ensure!(
+            arg != "--output" && !arg.starts_with("--output="),
+            "git_query does not support options that write output files"
+        );
+    }
+    Ok(())
 }
 
 async fn run_git(root: &Path, args: Vec<String>, max_output_bytes: usize) -> Result<ProcessResult> {
@@ -3145,6 +3354,7 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name() == GIT_STATUS_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_DIFF_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_LOG_TOOL));
+        assert!(specs.iter().any(|spec| spec.name() == GIT_QUERY_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == GIT_COMMIT_TOOL));
         let exec_spec = specs
             .iter()
@@ -3455,6 +3665,30 @@ mod tests {
                 arguments: json!({ "path": "README.md" }).to_string(),
             })
             .await;
+        let show = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_query_show".to_string(),
+                name: GIT_QUERY_TOOL.to_string(),
+                arguments: json!({
+                    "command": "show",
+                    "args": ["HEAD:README.md"],
+                })
+                .to_string(),
+            })
+            .await;
+        let branch_delete = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_query_branch_delete".to_string(),
+                name: GIT_QUERY_TOOL.to_string(),
+                arguments: json!({
+                    "command": "branch",
+                    "args": ["-D", "main"],
+                })
+                .to_string(),
+            })
+            .await;
         let commit = registry
             .execute(ModelToolCall {
                 item_id: None,
@@ -3481,6 +3715,16 @@ mod tests {
         assert!(diff.success, "{}", diff.output);
         assert!(diff.output.contains("-old"), "{}", diff.output);
         assert!(diff.output.contains("+new"), "{}", diff.output);
+        assert!(show.success, "{}", show.output);
+        assert!(show.output.contains("old"), "{}", show.output);
+        assert!(!branch_delete.success, "{}", branch_delete.output);
+        assert!(
+            branch_delete
+                .output
+                .contains("only supports --show-current"),
+            "{}",
+            branch_delete.output
+        );
         assert!(commit.success, "{}", commit.output);
         assert!(commit.output.contains("git commit"), "{}", commit.output);
         assert!(log.success, "{}", log.output);
