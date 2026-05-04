@@ -4,6 +4,7 @@ import ZeusCore
 protocol AgentClientProtocol {
     func models() async throws -> ModelsResponse
     func createSession() async throws -> CreateSessionResponse
+    func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse
     func streamTurn(
         sessionID: UInt64,
         message: String,

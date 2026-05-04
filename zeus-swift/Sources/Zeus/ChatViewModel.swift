@@ -6,14 +6,21 @@ final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
     @Published var draft = ""
     @Published private(set) var model = "gpt 5.5"
+    @Published private(set) var selectedModel = "gpt-5.5"
+    @Published private(set) var modelOptions = ["gpt-5.5"]
     @Published private(set) var effort = "medium"
     @Published private(set) var permissions = "allow"
     @Published private(set) var tokenUsage = "0 / 272k tokens"
     @Published private(set) var isReady = false
     @Published private(set) var isSending = false
     @Published private(set) var isLoggingIn = false
+    @Published private(set) var isSelectingModel = false
 
     let workspace: WorkspaceMetadata
+
+    var canChangeModel: Bool {
+        isReady && !isSending && !isLoggingIn && !isSelectingModel
+    }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
     private let server: any AgentServerProtocol
@@ -57,12 +64,12 @@ final class ChatViewModel: ObservableObject {
             append(kind: .status, text: "creating session...")
 
             if let models = try? await client.models() {
-                model = displayModel(models.defaultModel)
+                applyModels(models)
             }
 
             let session = try await client.createSession()
             sessionID = session.sessionID
-            model = displayModel(session.model)
+            applyModel(session.model)
             isReady = true
             append(kind: .status, text: "ready")
             await refreshAuthStatus()
@@ -153,6 +160,26 @@ final class ChatViewModel: ObservableObject {
             case let .unknown(message):
                 append(kind: .error, text: "Login status unavailable: \(message)")
             }
+        }
+    }
+
+    func selectModel(_ rawModel: String) {
+        guard rawModel != selectedModel else { return }
+        guard canChangeModel else { return }
+        guard let client, let sessionID else {
+            append(kind: .error, text: "No rust-agent session is available.")
+            return
+        }
+
+        isSelectingModel = true
+        Task {
+            do {
+                let response = try await client.setSessionModel(sessionID: sessionID, model: rawModel)
+                applyModel(response.model)
+            } catch {
+                append(kind: .error, text: error.localizedDescription)
+            }
+            isSelectingModel = false
         }
     }
 
@@ -379,8 +406,21 @@ final class ChatViewModel: ObservableObject {
         guard let client else { return }
         let session = try await client.createSession()
         sessionID = session.sessionID
-        model = displayModel(session.model)
+        applyModel(session.model)
         append(kind: .status, text: "new session ready")
+    }
+
+    private func applyModels(_ models: ModelsResponse) {
+        modelOptions = models.allowedModels
+        applyModel(models.defaultModel)
+    }
+
+    private func applyModel(_ rawModel: String) {
+        selectedModel = rawModel
+        model = displayModel(rawModel)
+        if !modelOptions.contains(rawModel) {
+            modelOptions.append(rawModel)
+        }
     }
 
     private func updateTokenUsage(_ usage: TokenUsagePayload?) {
@@ -392,7 +432,7 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func displayModel(_ raw: String) -> String {
+    func displayModel(_ raw: String) -> String {
         raw.replacingOccurrences(of: "-", with: " ")
     }
 

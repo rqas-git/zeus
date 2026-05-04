@@ -30,6 +30,15 @@ struct AgentAPIClient: AgentClientProtocol {
         return try JSONDecoder().decode(CreateSessionResponse.self, from: data)
     }
 
+    func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/model")
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(SetModelRequest(model: model))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(SessionModelResponse.self, from: data)
+    }
+
     func streamTurn(
         sessionID: UInt64,
         message: String,
@@ -195,6 +204,14 @@ struct CreateSessionResponse: Decodable {
         case sessionID = "session_id"
         case model
     }
+}
+
+struct SessionModelResponse: Decodable {
+    let model: String
+}
+
+private struct SetModelRequest: Encodable {
+    let model: String
 }
 
 struct TurnRequest: Encodable {
