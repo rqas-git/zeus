@@ -2,12 +2,7 @@ import AppKit
 import SwiftUI
 
 struct WindowConfigurator: NSViewRepresentable {
-    private let backgroundColor = NSColor(
-        calibratedRed: 0.025,
-        green: 0.032,
-        blue: 0.034,
-        alpha: 1
-    )
+    private let backgroundColor = NSColor(TerminalPalette.background)
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()

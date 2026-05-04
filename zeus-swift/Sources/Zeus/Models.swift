@@ -1,4 +1,5 @@
 import Foundation
+import ZeusCore
 
 enum TranscriptKind: Equatable {
     case user
@@ -54,7 +55,7 @@ struct WorkspaceMetadata {
         return WorkspaceMetadata(
             name: url.lastPathComponent,
             branch: branch.isEmpty ? "main" : branch,
-            displayPath: abbreviateHome(in: url.path)
+            displayPath: PathDisplay.abbreviatingHome(in: url.path)
         )
     }
 
@@ -83,12 +84,6 @@ struct WorkspaceMetadata {
 
     private static func isSwiftPackageRoot(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path)
-    }
-
-    private static func abbreviateHome(in path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        guard path.hasPrefix(home) else { return path }
-        return "~" + path.dropFirst(home.count)
     }
 
     private static func runGit(_ arguments: [String], at url: URL) -> String? {

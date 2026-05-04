@@ -1,4 +1,5 @@
 import Foundation
+import ZeusCore
 
 enum RustAgentAuthState: Equatable {
     case loggedIn(String)
@@ -24,7 +25,7 @@ final class RustAgentAuth {
                 .standardizedFileURL
                 .path
         }
-        return abbreviateHome(path)
+        return PathDisplay.abbreviatingHome(in: path)
     }
 
     func status() async -> RustAgentAuthState {
@@ -40,12 +41,6 @@ final class RustAgentAuth {
         } catch {
             return .unknown(error.localizedDescription)
         }
-    }
-
-    private func abbreviateHome(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        guard path.hasPrefix(home) else { return path }
-        return "~" + path.dropFirst(home.count)
     }
 
     func runDeviceLogin(onLine: @escaping @MainActor (String) -> Void) async throws {

@@ -129,7 +129,7 @@ private struct CodeBlockView: View {
         }
         .background(
             Rectangle()
-                .fill(Color(red: 0.015, green: 0.020, blue: 0.022).opacity(0.94))
+                .fill(TerminalPalette.codeBackground.opacity(0.94))
         )
         .overlay(
             Rectangle()

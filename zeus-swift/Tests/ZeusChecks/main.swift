@@ -10,6 +10,7 @@ struct ZeusChecks {
         checks.run("ToolMetadata maps known tools", testToolMetadata)
         checks.run("ToolMetadata summarizes arguments", testToolTargets)
         checks.run("AgentServerEvent decodes typed events", testAgentServerEvents)
+        checks.run("PathDisplay abbreviates home paths", testPathDisplay)
         checks.finish()
     }
 }
@@ -199,4 +200,28 @@ private func testAgentServerEvents() throws {
 
 private func decodeEvent(_ json: String) throws -> AgentServerEvent {
     try JSONDecoder().decode(AgentServerEvent.self, from: Data(json.utf8))
+}
+
+private func testPathDisplay() throws {
+    try require(
+        PathDisplay.abbreviatingHome(
+            in: "/Users/example/project",
+            homeDirectory: "/Users/example"
+        ) == "~/project",
+        "expected home path abbreviation"
+    )
+    try require(
+        PathDisplay.abbreviatingHome(
+            in: "/Volumes/work/project",
+            homeDirectory: "/Users/example"
+        ) == "/Volumes/work/project",
+        "expected external path to remain unchanged"
+    )
+    try require(
+        PathDisplay.abbreviatingHome(
+            in: "/Users/example-other/project",
+            homeDirectory: "/Users/example"
+        ) == "/Users/example-other/project",
+        "expected sibling path to remain unchanged"
+    )
 }

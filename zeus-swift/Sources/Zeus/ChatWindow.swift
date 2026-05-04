@@ -48,11 +48,11 @@ struct ChatWindow: View {
 private struct TerminalBackground: View {
     var body: some View {
         ZStack {
-            Color(red: 0.025, green: 0.032, blue: 0.034)
+            TerminalPalette.background
             LinearGradient(
                 colors: [
-                    Color(red: 0.05, green: 0.075, blue: 0.078).opacity(0.75),
-                    Color(red: 0.015, green: 0.019, blue: 0.02)
+                    TerminalPalette.backgroundHighlight.opacity(0.75),
+                    TerminalPalette.backgroundLow
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -135,7 +135,7 @@ private struct SettingsDropdown: View {
         .frame(width: 142)
         .background(
             Rectangle()
-                .fill(Color(red: 0.025, green: 0.032, blue: 0.034))
+                .fill(TerminalPalette.background)
         )
         .overlay(
             Rectangle()
