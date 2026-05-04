@@ -134,10 +134,16 @@ private struct TerminalLineView: View {
     }
 
     private var lineText: some View {
-        Text(line.text.isEmpty ? " " : line.text)
-            .foregroundStyle(textColor)
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
+        Group {
+            if line.kind == .tool, let toolCall = line.toolCall {
+                ToolCallLine(toolCall: toolCall)
+            } else {
+                Text(line.text.isEmpty ? " " : line.text)
+                    .foregroundStyle(textColor)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
@@ -168,6 +174,133 @@ private struct TerminalLineView: View {
             return TerminalColors.red
         default:
             return TerminalColors.primaryText
+        }
+    }
+}
+
+private struct ToolCallLine: View {
+    let toolCall: ToolCallTranscript
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 7) {
+            Image(systemName: iconName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(iconColor)
+                .frame(width: 13, height: 13)
+
+            Text(statusText)
+                .foregroundStyle(statusColor)
+
+            Rectangle()
+                .fill(TerminalColors.dimText.opacity(0.35))
+                .frame(width: 1, height: 11)
+
+            Text(toolCall.name)
+                .foregroundStyle(TerminalColors.cyan)
+                .fontWeight(.semibold)
+
+            if let target = toolCall.target, !target.isEmpty {
+                Text(":")
+                    .foregroundStyle(TerminalColors.dimText)
+
+                Text(target)
+                    .foregroundStyle(TerminalColors.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(TerminalColors.cyan.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(borderColor, lineWidth: 1)
+        )
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(statusColor.opacity(0.9))
+                .frame(width: 2)
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 5,
+                        bottomLeadingRadius: 5
+                    )
+                )
+        }
+    }
+
+    private var statusText: String {
+        switch toolCall.status {
+        case .running:
+            return toolCall.action
+        case .completed:
+            return "completed"
+        case .failed:
+            return "failed"
+        }
+    }
+
+    private var iconName: String {
+        switch toolCall.name {
+        case "read_file", "read_file_range":
+            return "doc.text"
+        case "list_dir":
+            return "folder"
+        case "search_files", "search_text":
+            return "magnifyingglass"
+        case "apply_patch":
+            return "square.and.pencil"
+        case "exec_command":
+            return "terminal"
+        case "git_add":
+            return "plus.square"
+        case "git_restore":
+            return "arrow.uturn.backward.square"
+        case "git_diff":
+            return "arrow.left.arrow.right"
+        case "git_log":
+            return "clock"
+        case "git_query", "git_status":
+            return "checklist"
+        case "git_commit":
+            return "arrow.trianglehead.branch"
+        default:
+            return "wrench.and.screwdriver"
+        }
+    }
+
+    private var iconColor: Color {
+        switch toolCall.status {
+        case .failed:
+            return TerminalColors.red
+        default:
+            return TerminalColors.cyan
+        }
+    }
+
+    private var borderColor: Color {
+        switch toolCall.status {
+        case .running:
+            return TerminalColors.dimText.opacity(0.32)
+        case .completed:
+            return TerminalColors.green.opacity(0.45)
+        case .failed:
+            return TerminalColors.red.opacity(0.55)
+        }
+    }
+
+    private var statusColor: Color {
+        switch toolCall.status {
+        case .running:
+            return TerminalColors.dimText
+        case .completed:
+            return TerminalColors.green
+        case .failed:
+            return TerminalColors.red
         }
     }
 }
