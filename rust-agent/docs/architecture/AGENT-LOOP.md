@@ -72,7 +72,8 @@ transport, and session state separate.
   `RUST_AGENT_TOOL_SEARCH_CONCURRENCY`. If an FFF tool call arrives while the
   index is still scanning, that blocking worker waits for the scan to finish
   before running the search. `read_file` reads only one byte past its output cap
-  before truncating, so large files do not allocate unbounded memory.
+  before truncating, and paged reads bound each line before building returned
+  strings.
 - `apply_patch` is sequential, parses bounded patch input, validates all touched
   paths before writing, caps target file size, and replaces individual files via
   temporary-file rename.

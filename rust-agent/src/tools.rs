@@ -35,6 +35,7 @@ use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::io::AsyncBufRead;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
@@ -1518,7 +1519,7 @@ async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String
     let file = tokio::fs::File::open(&path)
         .await
         .with_context(|| format!("failed to read {}", display_path(root, &path)))?;
-    let mut lines = BufReader::new(file).lines();
+    let mut reader = BufReader::new(file);
     let start = offset - 1;
     let mut raw = Vec::new();
     let mut retained_bytes = 0usize;
@@ -1526,22 +1527,26 @@ async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String
     let mut cut_by_bytes = false;
     let mut has_more = false;
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .with_context(|| format!("failed to read {}", display_path(root, &path)))?
-    {
+    for _ in 0..start {
+        let Some(_) = read_bounded_line(&mut reader, 0)
+            .await
+            .with_context(|| format!("failed to read {}", display_path(root, &path)))?
+        else {
+            anyhow::bail!("offset exceeds file length");
+        };
         line_count = line_count.saturating_add(1);
-        if line_count <= start {
-            continue;
-        }
+    }
 
-        if raw.len() >= limit {
-            has_more = true;
-            continue;
-        }
+    while raw.len() < limit {
+        let Some(line) = read_bounded_line(&mut reader, MAX_READ_LINE_BYTES)
+            .await
+            .with_context(|| format!("failed to read {}", display_path(root, &path)))?
+        else {
+            break;
+        };
+        line_count = line_count.saturating_add(1);
 
-        let line = truncate_read_line(&line);
+        let line = line.into_string();
         let line_bytes = line.len() + usize::from(!raw.is_empty());
         if retained_bytes.saturating_add(line_bytes) > MAX_FILE_BYTES {
             cut_by_bytes = true;
@@ -1551,6 +1556,14 @@ async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String
 
         retained_bytes = retained_bytes.saturating_add(line_bytes);
         raw.push(line);
+    }
+
+    if raw.len() == limit && !cut_by_bytes {
+        has_more = !reader
+            .fill_buf()
+            .await
+            .with_context(|| format!("failed to read {}", display_path(root, &path)))?
+            .is_empty();
     }
 
     if raw.is_empty() && offset > line_count.saturating_add(usize::from(line_count == 0)) {
@@ -2112,18 +2125,65 @@ fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
     }
 }
 
-fn truncate_read_line(line: &str) -> String {
-    if line.len() <= MAX_READ_LINE_BYTES {
-        return line.to_string();
-    }
+struct BoundedReadLine {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
 
-    let mut end = MAX_READ_LINE_BYTES;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
+impl BoundedReadLine {
+    fn into_string(self) -> String {
+        let mut line = String::from_utf8_lossy(&self.bytes).into_owned();
+        if self.truncated {
+            line.push_str(READ_LINE_TRUNCATION_SUFFIX);
+        }
+        line
     }
-    let mut truncated = line[..end].to_string();
-    truncated.push_str(READ_LINE_TRUNCATION_SUFFIX);
-    truncated
+}
+
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<BoundedReadLine>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(max_bytes);
+    let mut truncated = false;
+    let mut read_any = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !read_any {
+                return Ok(None);
+            }
+            if bytes.last().is_some_and(|byte| *byte == b'\r') {
+                bytes.pop();
+            }
+            return Ok(Some(BoundedReadLine { bytes, truncated }));
+        }
+
+        read_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consume = newline.map_or(available.len(), |index| index + 1);
+        let content = newline.map_or(consume, |_| consume - 1);
+        if bytes.len() < max_bytes {
+            let remaining = max_bytes - bytes.len();
+            let copy = content.min(remaining);
+            bytes.extend_from_slice(&available[..copy]);
+            truncated |= content > remaining;
+        } else {
+            truncated |= content > 0;
+        }
+        reader.consume(consume);
+
+        if newline.is_some() {
+            if bytes.last().is_some_and(|byte| *byte == b'\r') {
+                bytes.pop();
+            }
+            return Ok(Some(BoundedReadLine { bytes, truncated }));
+        }
+    }
 }
 
 fn format_line_read_result(
@@ -2156,7 +2216,7 @@ fn format_line_read_result(
     } else if has_more {
         let next_offset = last_line.saturating_add(1);
         output.push_str(&format!(
-            "\n(Showing lines {offset}-{last_line} of {line_count}. Use offset={next_offset} to continue.)"
+            "\n(Showing lines {offset}-{last_line}. Use offset={next_offset} to continue.)"
         ));
     } else {
         output.push_str(&format!("\n(End of file - total {line_count} lines)"));
@@ -3695,6 +3755,77 @@ mod tests {
         assert!(read.output.contains("3: gamma"));
         assert!(!read.output.contains("1: alpha"));
         assert!(read.output.contains("Use offset=4 to continue."));
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_file_line_pages_do_not_decode_after_limit() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-read-lines-invalid-tail-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("notes.txt"), b"alpha\n\xff").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        let read = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_read_lines".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: r#"{"path":"notes.txt","offset":1,"limit":1}"#.to_string(),
+            })
+            .await;
+
+        assert!(read.success, "{}", read.output);
+        assert!(read.output.contains("1: alpha"), "{}", read.output);
+        assert!(read.output.contains("Use offset=2 to continue."));
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_file_line_pages_cap_long_lines_before_string_allocation() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-read-lines-long-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let long = "x".repeat(MAX_READ_LINE_BYTES + 1024);
+        fs::write(temp.join("notes.txt"), format!("{long}\ntarget\n")).unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        let first = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_read_long_line".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: r#"{"path":"notes.txt","offset":1,"limit":1}"#.to_string(),
+            })
+            .await;
+        let second = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_read_after_long_line".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: r#"{"path":"notes.txt","offset":2,"limit":1}"#.to_string(),
+            })
+            .await;
+
+        assert!(first.success, "{}", first.output);
+        assert!(
+            first.output.contains(READ_LINE_TRUNCATION_SUFFIX),
+            "{}",
+            first.output
+        );
+        assert!(first.output.len() < MAX_READ_LINE_BYTES + 512);
+        assert!(second.success, "{}", second.output);
+        assert!(second.output.contains("2: target"), "{}", second.output);
 
         fs::remove_dir_all(&temp).unwrap();
     }

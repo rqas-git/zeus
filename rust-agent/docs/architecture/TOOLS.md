@@ -39,7 +39,8 @@ operations are path-based.
 `limit` is provided, it reads line-oriented pages with 1-indexed line numbers,
 matching the large-file continuation style used by OpenCode and Pi. Paginated
 reads default to 2,000 lines, cap individual returned lines at 2,000 bytes, and
-cap the whole returned page at 64 KiB.
+cap the whole returned page at 64 KiB. They stop after the requested page, and
+they skip or truncate long lines before converting bytes into returned text.
 
 `list_dir` accepts a required workspace-relative `path` plus optional `offset`,
 `limit`, and `depth`. Offsets are 1-indexed. Depth defaults to 1 and is capped at
