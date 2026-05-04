@@ -72,7 +72,7 @@ private struct HeaderBar: View {
         ZStack(alignment: .topTrailing) {
             HStack {
                 Text("zeus")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .foregroundStyle(TerminalColors.dimText)
                     .padding(.leading, 66)
                     .allowsHitTesting(false)
