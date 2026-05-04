@@ -211,7 +211,7 @@ final class ChatViewModel: ObservableObject {
                 append(kind: .status, text: "type /login to authorize rust-agent")
             }
         case .turnCompleted:
-            isSending = false
+            break
         case .unknown:
             break
         }
@@ -219,12 +219,14 @@ final class ChatViewModel: ObservableObject {
 
     private func finishTurn() {
         isSending = false
+        streamTask = nil
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
     }
 
     private func failTurn(_ error: Error) {
         isSending = false
+        streamTask = nil
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
