@@ -1,4 +1,5 @@
 import Foundation
+import ZeusCore
 
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -328,20 +329,12 @@ final class ChatViewModel: ObservableObject {
         arguments: String?,
         status: ToolCallStatus
     ) -> ToolCallTranscript {
-        let name = name ?? "tool"
-        let action = toolAction(name)
-        guard let arguments,
-              let data = arguments.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let json = object as? [String: Any] else {
-            return ToolCallTranscript(name: name, action: action, target: nil, status: status)
-        }
-
-        let target = primaryToolTarget(name: name, json: json)
+        let metadata = ToolMetadata.forName(name)
         return ToolCallTranscript(
-            name: name,
-            action: action,
-            target: target?.isEmpty == true ? nil : target,
+            name: metadata.name,
+            action: metadata.action,
+            iconName: metadata.iconName,
+            target: metadata.target(fromArgumentsJSON: arguments),
             status: status
         )
     }
@@ -356,101 +349,6 @@ final class ChatViewModel: ObservableObject {
         case .failed:
             return "\(display.name)\(target) failed"
         }
-    }
-
-    private func toolAction(_ name: String) -> String {
-        switch name {
-        case "read_file", "read_file_range":
-            return "reading"
-        case "list_dir":
-            return "listing"
-        case "search_files", "search_text":
-            return "searching"
-        case "apply_patch":
-            return "patching"
-        case "exec_command":
-            return "running"
-        case "git_add":
-            return "staging"
-        case "git_restore":
-            return "restoring"
-        case "git_diff":
-            return "diffing"
-        case "git_log":
-            return "reading log"
-        case "git_query", "git_status":
-            return "checking"
-        case "git_commit":
-            return "committing"
-        default:
-            return "running"
-        }
-    }
-
-    private func primaryToolTarget(name: String, json: [String: Any]) -> String? {
-        switch name {
-        case "read_file", "read_file_range", "list_dir", "git_diff":
-            return stringValue(json["path"])
-        case "search_files", "search_text":
-            return quoted(stringValue(json["query"]))
-        case "exec_command":
-            return quoted(stringValue(json["command"]))
-        case "apply_patch":
-            return patchSummary(stringValue(json["patch"]))
-        case "git_add", "git_restore":
-            return pathsSummary(json["paths"])
-        case "git_log":
-            return stringValue(json["path"]) ?? maxCountSummary(json["max_count"])
-        case "git_query":
-            return stringArray(json["args"])?.joined(separator: " ")
-        default:
-            return stringValue(json["path"])
-                ?? stringValue(json["query"])
-                ?? pathsSummary(json["paths"])
-        }
-    }
-
-    private func stringValue(_ value: Any?) -> String? {
-        value as? String
-    }
-
-    private func stringArray(_ value: Any?) -> [String]? {
-        value as? [String]
-    }
-
-    private func quoted(_ value: String?) -> String? {
-        guard let value, !value.isEmpty else { return nil }
-        return "\"\(value)\""
-    }
-
-    private func pathsSummary(_ value: Any?) -> String? {
-        guard let paths = stringArray(value), !paths.isEmpty else { return nil }
-        if paths.count == 1 {
-            return paths[0]
-        }
-        return "\(paths[0]) +\(paths.count - 1)"
-    }
-
-    private func maxCountSummary(_ value: Any?) -> String? {
-        guard let value else { return nil }
-        return "max \(value)"
-    }
-
-    private func patchSummary(_ patch: String?) -> String? {
-        guard let patch, !patch.isEmpty else { return nil }
-        var files: [String] = []
-        for line in patch.split(separator: "\n") {
-            let text = String(line)
-            for prefix in ["*** Add File: ", "*** Update File: ", "*** Delete File: "] {
-                guard text.hasPrefix(prefix) else { continue }
-                files.append(String(text.dropFirst(prefix.count)))
-            }
-        }
-        guard let first = files.first else { return "workspace" }
-        if files.count == 1 {
-            return first
-        }
-        return "\(first) +\(files.count - 1)"
     }
 
     private func refreshAuthStatus() async {

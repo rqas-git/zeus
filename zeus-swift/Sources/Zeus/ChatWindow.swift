@@ -357,32 +357,7 @@ private struct ToolCallLine: View {
     }
 
     private var iconName: String {
-        switch toolCall.name {
-        case "read_file", "read_file_range":
-            return "doc.text"
-        case "list_dir":
-            return "folder"
-        case "search_files", "search_text":
-            return "magnifyingglass"
-        case "apply_patch":
-            return "square.and.pencil"
-        case "exec_command":
-            return "terminal"
-        case "git_add":
-            return "plus.square"
-        case "git_restore":
-            return "arrow.uturn.backward.square"
-        case "git_diff":
-            return "arrow.left.arrow.right"
-        case "git_log":
-            return "clock"
-        case "git_query", "git_status":
-            return "checklist"
-        case "git_commit":
-            return "arrow.trianglehead.branch"
-        default:
-            return "wrench.and.screwdriver"
-        }
+        toolCall.iconName
     }
 
     private var iconColor: Color {

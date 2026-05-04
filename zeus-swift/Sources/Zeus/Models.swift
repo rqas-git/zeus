@@ -30,6 +30,7 @@ struct TranscriptLine: Identifiable, Equatable {
 struct ToolCallTranscript: Equatable {
     var name: String
     var action: String
+    var iconName: String
     var target: String?
     var status: ToolCallStatus
 }

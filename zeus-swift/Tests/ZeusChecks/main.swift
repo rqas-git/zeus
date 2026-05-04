@@ -7,6 +7,8 @@ struct ZeusChecks {
         var checks = CheckRunner()
         checks.run("TerminalMarkdownParser parses common blocks", testCommonMarkdownBlocks)
         checks.run("TerminalMarkdownParser stops paragraphs at block starts", testParagraphBoundaries)
+        checks.run("ToolMetadata maps known tools", testToolMetadata)
+        checks.run("ToolMetadata summarizes arguments", testToolTargets)
         checks.finish()
     }
 }
@@ -139,4 +141,34 @@ private func testParagraphBoundaries() throws {
     }
     try require(level == 2, "expected heading level 2")
     try require(text == "Next", "expected heading text")
+}
+
+private func testToolMetadata() throws {
+    let metadata = ToolMetadata.forName("git_commit")
+
+    try require(metadata.name == "git_commit", "unexpected tool name")
+    try require(metadata.action == "committing", "unexpected action")
+    try require(metadata.iconName == "arrow.trianglehead.branch", "unexpected icon")
+}
+
+private func testToolTargets() throws {
+    let exec = ToolMetadata.forName("exec_command")
+    try require(
+        exec.target(fromArgumentsJSON: #"{"command":"swift test"}"#) == #""swift test""#,
+        "unexpected exec target"
+    )
+
+    let add = ToolMetadata.forName("git_add")
+    try require(
+        add.target(fromArgumentsJSON: #"{"paths":["a.swift","b.swift"]}"#) == "a.swift +1",
+        "unexpected paths summary"
+    )
+
+    let patch = ToolMetadata.forName("apply_patch")
+    try require(
+        patch.target(
+            fromArgumentsJSON: #"{"patch":"*** Begin Patch\n*** Update File: Sources/App.swift\n*** End Patch"}"#
+        ) == "Sources/App.swift",
+        "unexpected patch summary"
+    )
 }
