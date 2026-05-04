@@ -27,9 +27,14 @@ struct ChatWindow: View {
                 FooterBar(
                     workspace: viewModel.workspace,
                     model: viewModel.model,
+                    modelOptions: viewModel.modelOptions,
+                    selectedModel: viewModel.selectedModel,
+                    isModelMenuEnabled: viewModel.canChangeModel,
                     effort: viewModel.effort,
                     permissions: viewModel.permissions,
-                    tokenUsage: viewModel.tokenUsage
+                    tokenUsage: viewModel.tokenUsage,
+                    modelTitle: { viewModel.displayModel($0) },
+                    onSelectModel: viewModel.selectModel
                 )
                 .padding(.top, 11)
             }
@@ -406,9 +411,14 @@ private struct InputPrompt: View {
 private struct FooterBar: View {
     let workspace: WorkspaceMetadata
     let model: String
+    let modelOptions: [String]
+    let selectedModel: String
+    let isModelMenuEnabled: Bool
     let effort: String
     let permissions: String
     let tokenUsage: String
+    let modelTitle: (String) -> String
+    let onSelectModel: (String) -> Void
     private let itemSpacing: CGFloat = 22
     private let pathSpacing: CGFloat = 32
 
@@ -417,7 +427,14 @@ private struct FooterBar: View {
             HStack(spacing: itemSpacing) {
                 footerText(workspace.name, color: TerminalPalette.dimText)
                 footerText(workspace.branch, color: TerminalPalette.green)
-                footerText(model, color: TerminalPalette.cyan)
+                ModelFooterMenu(
+                    title: model,
+                    options: modelOptions,
+                    selectedModel: selectedModel,
+                    isEnabled: isModelMenuEnabled,
+                    modelTitle: modelTitle,
+                    onSelect: onSelectModel
+                )
                 footerText(effort, color: TerminalPalette.primaryText)
                 footerText(permissions, color: TerminalPalette.primaryText)
                 footerText(tokenUsage, color: TerminalPalette.dimText)
@@ -440,5 +457,113 @@ private struct FooterBar: View {
             .foregroundStyle(color)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+private struct ModelFooterMenu: View {
+    let title: String
+    let options: [String]
+    let selectedModel: String
+    let isEnabled: Bool
+    let modelTitle: (String) -> String
+    let onSelect: (String) -> Void
+    @State private var isOpen = false
+
+    private var menuOptions: [String] {
+        options.isEmpty ? [selectedModel] : options
+    }
+
+    var body: some View {
+        Text(title)
+            .foregroundStyle(isEnabled ? TerminalPalette.cyan : TerminalPalette.dimText)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(height: 18, alignment: .center)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard isEnabled else { return }
+                isOpen.toggle()
+            }
+            .help("Model")
+            .overlay(alignment: .bottom) {
+                if isOpen {
+                    ModelDropdown(
+                        options: menuOptions,
+                        selectedModel: selectedModel,
+                        modelTitle: modelTitle
+                    ) { model in
+                        isOpen = false
+                        onSelect(model)
+                    }
+                    .offset(y: -23)
+                    .zIndex(30)
+                }
+            }
+            .onChange(of: isEnabled) { newValue in
+                if !newValue {
+                    isOpen = false
+                }
+            }
+            .zIndex(isOpen ? 30 : 0)
+    }
+}
+
+private struct ModelDropdown: View {
+    let options: [String]
+    let selectedModel: String
+    let modelTitle: (String) -> String
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(options, id: \.self) { option in
+                    Button {
+                        onSelect(option)
+                    } label: {
+                        HStack(spacing: 7) {
+                            if option == selectedModel {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(TerminalPalette.cyan)
+                                    .frame(width: 12)
+                            } else {
+                                Color.clear
+                                    .frame(width: 12, height: 10)
+                            }
+
+                            Text(modelTitle(option))
+                                .foregroundStyle(
+                                    option == selectedModel
+                                        ? TerminalPalette.cyan
+                                        : TerminalPalette.primaryText
+                                )
+                                .lineLimit(1)
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(TerminalMenuButtonStyle())
+                }
+            }
+            .frame(width: 178)
+            .background(Rectangle().fill(TerminalPalette.background))
+            .overlay(
+                Rectangle()
+                    .stroke(TerminalPalette.dimText.opacity(0.48), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 6)
+
+            Rectangle()
+                .fill(TerminalPalette.background)
+                .frame(width: 10, height: 10)
+                .rotationEffect(.degrees(45))
+                .offset(y: -5)
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .fixedSize(horizontal: true, vertical: true)
     }
 }
