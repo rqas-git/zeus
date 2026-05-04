@@ -734,6 +734,7 @@ impl AgentLoop {
     ///
     /// # Errors
     /// Returns an error if the session is already running, model streaming fails, or event publishing fails.
+    #[cfg(test)]
     pub(crate) async fn submit_user_message(
         &mut self,
         text: impl Into<String>,

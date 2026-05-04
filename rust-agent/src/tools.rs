@@ -1056,6 +1056,7 @@ impl ToolRegistry {
     }
 
     /// Executes a borrowed model tool call and converts failures into model-visible output.
+    #[cfg(test)]
     pub(crate) async fn execute_ref(&self, call: &ModelToolCall) -> ToolExecution {
         self.execute_ref_with_cancellation(call, &TurnCancellation::new())
             .await
