@@ -56,8 +56,14 @@ final class RustAgentServer {
 
     private func launch(_ candidate: ServerCandidate) throws {
         let rustAgentRoot = RustAgentLocator.rootURL()
+        let workingDirectory = RustAgentLocator.launchDirectoryURL()
         let process = Process()
-        RustAgentLocator.configure(process, rootURL: rustAgentRoot, arguments: ["serve"])
+        RustAgentLocator.configure(
+            process,
+            rootURL: rustAgentRoot,
+            arguments: ["serve"],
+            workingDirectoryURL: workingDirectory
+        )
         process.environment = serverEnvironment(candidate)
 
         let stdout = Pipe()

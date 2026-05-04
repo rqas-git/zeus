@@ -62,8 +62,7 @@ struct WorkspaceMetadata {
             return URL(fileURLWithPath: configured).standardizedFileURL
         }
 
-        let current = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .standardizedFileURL
+        let current = RustAgentLocator.launchDirectoryURL()
         if isSwiftPackageRoot(current) {
             return current
         }
