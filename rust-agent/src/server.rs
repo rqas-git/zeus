@@ -51,6 +51,7 @@ use crate::service::AgentService;
 const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const GENERATED_TOKEN_BYTES: usize = 32;
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 
@@ -83,6 +84,7 @@ where
     );
     let app = router(state);
     let http_addr = config.http_addr();
+    let parent_pid = config.parent_pid();
     let http_app = app.clone();
     let h3_app = app;
 
@@ -92,10 +94,34 @@ where
     tokio::select! {
         result = http_task => result.context("HTTP listener task failed")??,
         result = h3_task => result.context("H3 listener task failed")??,
+        result = wait_for_parent_process(parent_pid) => result?,
         result = tokio::signal::ctrl_c() => result.context("failed to listen for shutdown signal")?,
     }
 
     Ok(())
+}
+
+async fn wait_for_parent_process(parent_pid: Option<libc::pid_t>) -> Result<()> {
+    let Some(parent_pid) = parent_pid else {
+        return futures_util::future::pending::<Result<()>>().await;
+    };
+
+    loop {
+        if !process_is_running(parent_pid) {
+            eprintln!("rust-agent parent process {parent_pid} exited; shutting down");
+            return Ok(());
+        }
+        tokio::time::sleep(PARENT_WATCH_INTERVAL).await;
+    }
+}
+
+fn process_is_running(pid: libc::pid_t) -> bool {
+    let status = unsafe { libc::kill(pid, 0) };
+    if status == 0 {
+        return true;
+    }
+
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn router<M>(state: ServerState<M>) -> Router

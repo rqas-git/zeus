@@ -11,7 +11,7 @@ router through both HTTP compatibility and native HTTP/3 transports.
    before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
    identity, bearer token, session bounds, event queue capacity, QUIC stream
-   limits, and idle timeout.
+   limits, idle timeout, and optional parent process to watch for shutdown.
 4. One Axum router is built with shared `ServerState`.
 5. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
 6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
@@ -100,4 +100,6 @@ per-user authorization, and multi-process coordination are not implemented. Use
 `workspace-write` and `workspace-exec` only for trusted local deployments because
 any bearer-token holder can ask the model to edit workspace files or run local
 commands. WebSocket endpoints are not implemented because SSE matches the
-current server-to-client event flow with less protocol overhead.
+current server-to-client event flow with less protocol overhead. Set
+`RUST_AGENT_PARENT_PID` only when another local supervisor process should control
+server lifetime.

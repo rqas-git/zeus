@@ -418,6 +418,7 @@ pub(crate) struct ServerConfig {
     max_event_channels: usize,
     h3_max_concurrent_streams: u32,
     h3_idle_timeout: Duration,
+    parent_pid: Option<libc::pid_t>,
 }
 
 impl ServerConfig {
@@ -459,6 +460,7 @@ impl ServerConfig {
                 "RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS",
                 DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS,
             )?),
+            parent_pid: env_optional_parent_pid("RUST_AGENT_PARENT_PID")?,
         })
     }
 
@@ -476,6 +478,7 @@ impl ServerConfig {
             max_event_channels: DEFAULT_SERVER_MAX_EVENT_CHANNELS,
             h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
             h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
+            parent_pid: None,
         }
     }
 
@@ -528,6 +531,11 @@ impl ServerConfig {
     pub(crate) const fn h3_idle_timeout(&self) -> Duration {
         self.h3_idle_timeout
     }
+
+    /// Returns the optional parent process to watch for server shutdown.
+    pub(crate) const fn parent_pid(&self) -> Option<libc::pid_t> {
+        self.parent_pid
+    }
 }
 
 impl Default for ServerConfig {
@@ -547,6 +555,7 @@ impl Default for ServerConfig {
             max_event_channels: DEFAULT_SERVER_MAX_EVENT_CHANNELS,
             h3_max_concurrent_streams: DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS,
             h3_idle_timeout: Duration::from_secs(DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS),
+            parent_pid: None,
         }
     }
 }
@@ -638,6 +647,28 @@ fn env_optional_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn env_optional_parent_pid(name: &str) -> Result<Option<libc::pid_t>> {
+    let Some(raw) = std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    parse_parent_pid(name, &raw).map(Some)
+}
+
+fn parse_parent_pid(name: &str, raw: &str) -> Result<libc::pid_t> {
+    let pid = raw
+        .trim()
+        .parse::<libc::pid_t>()
+        .map_err(|error| anyhow::anyhow!("failed to parse {name}={raw:?}: {error}"))?;
+    anyhow::ensure!(
+        pid > 1,
+        "failed to parse {name}={raw:?}: expected process id greater than 1"
+    );
+    Ok(pid)
 }
 
 fn env_parse_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {
@@ -769,5 +800,13 @@ mod tests {
         );
         assert!(validate_tool_search_concurrency(0).is_err());
         assert!(validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).is_err());
+    }
+
+    #[test]
+    fn validates_parent_pid() {
+        assert_eq!(parse_parent_pid("RUST_AGENT_PARENT_PID", "2").unwrap(), 2);
+        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "1").is_err());
+        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "0").is_err());
+        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "not-a-pid").is_err());
     }
 }

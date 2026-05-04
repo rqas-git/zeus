@@ -43,6 +43,7 @@ configuration.
 - `RUST_AGENT_SERVER_MAX_EVENT_CHANNELS`
 - `RUST_AGENT_SERVER_H3_MAX_CONCURRENT_STREAMS`
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
+- `RUST_AGENT_PARENT_PID`
 - `RUST_AGENT_CACHE_HEALTH`
 - `RUST_AGENT_TOOL_MODE`
 
@@ -61,7 +62,8 @@ configuration.
 - Model changes validate against an in-memory allowlist.
 - Prompt, history, and output limits are plain copyable values.
 - Server bind addresses, bearer token, session bounds, queue capacity, stream
-  limits, and idle timeout are loaded once before listeners start.
+  limits, idle timeout, and optional parent-process watch are loaded once before
+  listeners start.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
