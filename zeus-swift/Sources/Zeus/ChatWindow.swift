@@ -61,25 +61,92 @@ private struct TerminalBackground: View {
 
 private struct HeaderBar: View {
     let onLoginStatus: () -> Void
+    @State private var isShowingSettings = false
 
     var body: some View {
-        HStack {
-            Spacer()
-            Menu {
-                Button("Login Status", action: onLoginStatus)
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 10, weight: .regular))
+        ZStack(alignment: .topTrailing) {
+            HStack {
+                Text("zeus")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(TerminalColors.dimText)
-                    .frame(width: 16, height: 14)
-                    .contentShape(Rectangle())
+                    .padding(.leading, 66)
+                    .allowsHitTesting(false)
+
+                Spacer()
+
+                Button {
+                    isShowingSettings.toggle()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(
+                            isShowingSettings ? TerminalColors.cyan : TerminalColors.dimText
+                        )
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Settings")
+
+            if isShowingSettings {
+                SettingsDropdown {
+                    isShowingSettings = false
+                    onLoginStatus()
+                }
+                .offset(y: 20)
+                .zIndex(20)
+            }
         }
-        .frame(height: 14)
+        .frame(height: 16)
+        .zIndex(20)
+    }
+}
+
+private struct SettingsDropdown: View {
+    let onLoginStatus: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: onLoginStatus) {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(TerminalColors.cyan)
+                        .frame(width: 12)
+
+                    Text("Login Status")
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .foregroundStyle(TerminalColors.primaryText)
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(TerminalMenuButtonStyle())
+        }
+        .frame(width: 142)
+        .background(
+            Rectangle()
+                .fill(Color(red: 0.025, green: 0.032, blue: 0.034))
+        )
+        .overlay(
+            Rectangle()
+                .stroke(TerminalColors.dimText.opacity(0.48), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 6)
+    }
+}
+
+private struct TerminalMenuButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Rectangle()
+                    .fill(configuration.isPressed ? TerminalColors.cyan.opacity(0.12) : .clear)
+            )
     }
 }
 
