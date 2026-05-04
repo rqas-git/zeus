@@ -2,6 +2,7 @@
 
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -63,6 +64,11 @@ const MAX_READ_LINE_LIMIT: usize = 2000;
 const MAX_READ_LINE_BYTES: usize = 2000;
 const READ_LINE_TRUNCATION_SUFFIX: &str = "... (line truncated to 2000 bytes)";
 const MAX_DIR_ENTRIES: usize = 200;
+const DEFAULT_LIST_DIR_LIMIT: usize = MAX_DIR_ENTRIES;
+const MAX_LIST_DIR_LIMIT: usize = 500;
+const DEFAULT_LIST_DIR_DEPTH: usize = 1;
+const MAX_LIST_DIR_DEPTH: usize = 4;
+const MAX_LIST_DIR_PAGE_WINDOW: usize = 10_000;
 const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
@@ -101,10 +107,8 @@ const READ_FILE_RANGE_TOOL_SPEC: ToolSpec = ToolSpec {
 };
 const LIST_DIR_TOOL_SPEC: ToolSpec = ToolSpec {
     name: LIST_DIR_TOOL,
-    description: "List files and directories under a workspace directory.",
-    parameters: ToolParameters::Path {
-        description: "Workspace-relative directory path. Use . for the workspace root.",
-    },
+    description: "List workspace directory entries with pagination and optional depth.",
+    parameters: ToolParameters::ListDir,
     supports_parallel: true,
 };
 const SEARCH_FILES_TOOL_SPEC: ToolSpec = ToolSpec {
@@ -254,9 +258,9 @@ impl Serialize for ToolSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolParameters {
-    Path { description: &'static str },
     ReadFile,
     ReadFileRange,
+    ListDir,
     SearchFiles,
     SearchText,
     ApplyPatch,
@@ -270,11 +274,11 @@ enum ToolParameters {
 impl ToolParameters {
     const fn cache_key(self) -> &'static str {
         match self {
-            Self::Path { .. } => "path:string:required:no_additional_properties",
             Self::ReadFile => "read_file:path:string:required:offset:integer:limit:integer",
             Self::ReadFileRange => {
                 "read_file_range:path:string:required:offset:integer:max_bytes:integer"
             }
+            Self::ListDir => "list_dir:path:string:required:offset:integer:limit:integer:depth:integer",
             Self::SearchFiles => "search_files:query:string:required:limit:integer:offset:integer",
             Self::SearchText => {
                 "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:context:integer"
@@ -297,14 +301,6 @@ impl Serialize for ToolParameters {
         S: serde::Serializer,
     {
         match self {
-            Self::Path { description } => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &PathProperties { description })?;
-                map.serialize_entry("required", &["path"])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
             Self::ReadFile => {
                 let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "object")?;
@@ -317,6 +313,14 @@ impl Serialize for ToolParameters {
                 let mut map = serializer.serialize_map(Some(4))?;
                 map.serialize_entry("type", "object")?;
                 map.serialize_entry("properties", &ReadFileRangeProperties)?;
+                map.serialize_entry("required", &["path"])?;
+                map.serialize_entry("additionalProperties", &false)?;
+                map.end()
+            }
+            Self::ListDir => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "object")?;
+                map.serialize_entry("properties", &ListDirProperties)?;
                 map.serialize_entry("required", &["path"])?;
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
@@ -386,26 +390,6 @@ impl Serialize for ToolParameters {
                 map.end()
             }
         }
-    }
-}
-
-struct PathProperties {
-    description: &'static str,
-}
-
-impl Serialize for PathProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(
-            "path",
-            &StringProperty {
-                description: self.description,
-            },
-        )?;
-        map.end()
     }
 }
 
@@ -526,6 +510,48 @@ impl Serialize for ReadFileProperties {
                 description: "Maximum number of lines to read.",
                 minimum: 1,
                 maximum: MAX_READ_LINE_LIMIT,
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct ListDirProperties;
+
+impl Serialize for ListDirProperties {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(4))?;
+        map.serialize_entry(
+            "path",
+            &StringProperty {
+                description: "Workspace-relative directory path. Use . for the workspace root.",
+            },
+        )?;
+        map.serialize_entry(
+            "offset",
+            &IntegerProperty {
+                description: "1-indexed entry number to start listing from.",
+                minimum: 1,
+                maximum: MAX_LIST_DIR_PAGE_WINDOW,
+            },
+        )?;
+        map.serialize_entry(
+            "limit",
+            &IntegerProperty {
+                description: "Maximum number of entries to return.",
+                minimum: 1,
+                maximum: MAX_LIST_DIR_LIMIT,
+            },
+        )?;
+        map.serialize_entry(
+            "depth",
+            &IntegerProperty {
+                description: "Maximum directory depth to traverse.",
+                minimum: 1,
+                maximum: MAX_LIST_DIR_DEPTH,
             },
         )?;
         map.end()
@@ -1020,18 +1046,24 @@ where
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PathArguments {
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReadFileArguments {
     path: String,
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListDirArguments {
+    path: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    depth: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1395,8 +1427,26 @@ async fn read_file_range(root: &Path, arguments: &str) -> Result<String> {
 }
 
 async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
-    let args = parse_path_arguments(arguments)?;
+    let args = parse_list_dir_arguments(arguments)?;
     let path = resolve_workspace_path(root, &args.path)?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "{} is not a directory",
+        display_path(root, &path)
+    );
+
+    let offset = args.offset.unwrap_or(1);
+    anyhow::ensure!(offset > 0, "offset must be a 1-indexed entry number");
+    let limit = bounded_limit(args.limit, DEFAULT_LIST_DIR_LIMIT, MAX_LIST_DIR_LIMIT);
+    let depth = bounded_limit(args.depth, DEFAULT_LIST_DIR_DEPTH, MAX_LIST_DIR_DEPTH);
+    let desired_end = list_dir_page_end(offset, limit)?;
+    if depth > 1 {
+        return list_dir_deep(root, &path, offset, limit, desired_end, depth).await;
+    }
+
     let mut entries = tokio::fs::read_dir(&path)
         .await
         .with_context(|| format!("failed to list {}", display_path(root, &path)))?;
@@ -1416,7 +1466,7 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
             name.push('/');
         }
         total_entries = total_entries.saturating_add(1);
-        if names.len() < MAX_DIR_ENTRIES {
+        if names.len() < desired_end {
             names.push(name);
         } else if names.peek().is_some_and(|largest| &name < largest) {
             names.pop();
@@ -1424,13 +1474,107 @@ async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
         }
     }
 
-    let truncated = total_entries > MAX_DIR_ENTRIES;
     let mut names = names.into_vec();
     names.sort_unstable();
-    if truncated {
-        names.push("[truncated: directory has more than 200 entries]".to_string());
+    if names.is_empty() {
+        return Ok(String::new());
     }
-    Ok(names.join("\n"))
+    let start = offset - 1;
+    if start >= names.len() {
+        anyhow::bail!("offset exceeds directory entry count");
+    }
+    let end = desired_end.min(names.len());
+    let mut page = names[start..end].to_vec();
+    if total_entries > desired_end {
+        page.push(format!(
+            "[truncated: directory has more than {desired_end} entries; use offset={}]",
+            desired_end + 1
+        ));
+    }
+    Ok(page.join("\n"))
+}
+
+async fn list_dir_deep(
+    root: &Path,
+    path: &Path,
+    offset: usize,
+    limit: usize,
+    desired_end: usize,
+    depth: usize,
+) -> Result<String> {
+    let mut entries = Vec::new();
+    let truncated = collect_deep_dir_entries(root, path, depth, &mut entries).await?;
+    entries.sort_unstable();
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+    let start = offset - 1;
+    if start >= entries.len() {
+        anyhow::bail!("offset exceeds directory entry count");
+    }
+
+    let end = start.saturating_add(limit).min(entries.len());
+    let mut page = entries[start..end].to_vec();
+    if end < entries.len() || truncated || entries.len() > desired_end {
+        page.push(format!(
+            "[truncated: directory has more entries; use offset={}]",
+            end + 1
+        ));
+    }
+    Ok(page.join("\n"))
+}
+
+async fn collect_deep_dir_entries(
+    root: &Path,
+    path: &Path,
+    depth: usize,
+    entries: &mut Vec<String>,
+) -> Result<bool> {
+    let mut queue = VecDeque::new();
+    queue.push_back((path.to_path_buf(), PathBuf::new(), depth));
+    let mut truncated = false;
+
+    'scan: while let Some((current_dir, prefix, remaining_depth)) = queue.pop_front() {
+        let mut read_dir = tokio::fs::read_dir(&current_dir)
+            .await
+            .with_context(|| format!("failed to list {}", display_path(root, &current_dir)))?;
+        let mut current_entries = Vec::new();
+
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read {}", display_path(root, &current_dir)))?
+        {
+            let file_type = entry.file_type().await.with_context(|| {
+                format!("failed to inspect {}", entry.file_name().to_string_lossy())
+            })?;
+            let file_name = entry.file_name();
+            let relative_path = if prefix.as_os_str().is_empty() {
+                PathBuf::from(&file_name)
+            } else {
+                prefix.join(&file_name)
+            };
+            let mut display = relative_path.to_string_lossy().replace('\\', "/");
+            if file_type.is_dir() {
+                display.push('/');
+            }
+            current_entries.push((display, entry.path(), relative_path, file_type.is_dir()));
+        }
+
+        current_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        for (display, entry_path, relative_path, is_dir) in current_entries {
+            if entries.len() >= MAX_LIST_DIR_PAGE_WINDOW {
+                truncated = true;
+                break 'scan;
+            }
+            if is_dir && remaining_depth > 1 {
+                queue.push_back((entry_path, relative_path, remaining_depth - 1));
+            }
+            entries.push(display);
+        }
+    }
+
+    Ok(truncated)
 }
 
 async fn exec_command(root: &Path, arguments: &str) -> Result<ToolOutput> {
@@ -1668,12 +1812,12 @@ async fn prepare_patch_change(
     }
 }
 
-fn parse_path_arguments(arguments: &str) -> Result<PathArguments> {
-    serde_json::from_str(arguments).context("invalid path arguments")
-}
-
 fn parse_read_file_arguments(arguments: &str) -> Result<ReadFileArguments> {
     serde_json::from_str(arguments).context("invalid read_file arguments")
+}
+
+fn parse_list_dir_arguments(arguments: &str) -> Result<ListDirArguments> {
+    serde_json::from_str(arguments).context("invalid list_dir arguments")
 }
 
 fn parse_read_file_range_arguments(arguments: &str) -> Result<ReadFileRangeArguments> {
@@ -1724,6 +1868,20 @@ fn bounded_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
 
 fn bounded_u64(value: Option<u64>, default: u64, max: u64) -> u64 {
     value.unwrap_or(default).clamp(1, max)
+}
+
+fn list_dir_page_end(offset: usize, limit: usize) -> Result<usize> {
+    let start = offset
+        .checked_sub(1)
+        .context("offset must be a 1-indexed entry number")?;
+    let end = start
+        .checked_add(limit)
+        .context("list_dir pagination window overflowed")?;
+    anyhow::ensure!(
+        end <= MAX_LIST_DIR_PAGE_WINDOW,
+        "list_dir pagination window exceeds {MAX_LIST_DIR_PAGE_WINDOW} entries"
+    );
+    Ok(end)
 }
 
 fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
@@ -2744,13 +2902,31 @@ mod tests {
                 {
                     "type": "function",
                     "name": "list_dir",
-                    "description": "List files and directories under a workspace directory.",
+                    "description": "List workspace directory entries with pagination and optional depth.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
                                 "description": "Workspace-relative directory path. Use . for the workspace root.",
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "1-indexed entry number to start listing from.",
+                                "minimum": 1,
+                                "maximum": MAX_LIST_DIR_PAGE_WINDOW,
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of entries to return.",
+                                "minimum": 1,
+                                "maximum": MAX_LIST_DIR_LIMIT,
+                            },
+                            "depth": {
+                                "type": "integer",
+                                "description": "Maximum directory depth to traverse.",
+                                "minimum": 1,
+                                "maximum": MAX_LIST_DIR_DEPTH,
                             },
                         },
                         "required": ["path"],
@@ -2980,6 +3156,42 @@ mod tests {
         assert!(read.output.contains("3: gamma"));
         assert!(!read.output.contains("1: alpha"));
         assert!(read.output.contains("Use offset=4 to continue."));
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_dir_supports_pagination_and_depth() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-list-page-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("src").join("bin")).unwrap();
+        fs::write(temp.join("Cargo.toml"), "").unwrap();
+        fs::write(temp.join("src").join("lib.rs"), "").unwrap();
+        fs::write(temp.join("src").join("bin").join("cli.rs"), "").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        let page = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_list_page".to_string(),
+                name: LIST_DIR_TOOL.to_string(),
+                arguments: r#"{"path":".","offset":2,"limit":2,"depth":3}"#.to_string(),
+            })
+            .await;
+
+        assert!(page.success, "{}", page.output);
+        assert!(!page.output.contains("Cargo.toml"), "{}", page.output);
+        assert!(page.output.contains("src/"), "{}", page.output);
+        assert!(page.output.contains("src/bin/"), "{}", page.output);
+        assert!(
+            page.output.contains("use offset=4") || page.output.contains("src/bin/cli.rs"),
+            "{}",
+            page.output
+        );
 
         fs::remove_dir_all(&temp).unwrap();
     }
