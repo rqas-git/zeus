@@ -21,6 +21,7 @@ final class ChatViewModel: ObservableObject {
     private var sessionID: UInt64?
     private var started = false
     private var currentAssistantLineID: UUID?
+    private var assistantPlaceholderLineID: UUID?
     private var toolLineIDsByCallID: [String: UUID] = [:]
     private var toolLabelsByCallID: [String: String] = [:]
     private var streamTask: Task<Void, Never>?
@@ -84,10 +85,11 @@ final class ChatViewModel: ObservableObject {
         draft = ""
         isSending = true
         currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolLabelsByCallID.removeAll(keepingCapacity: true)
         append(kind: .user, text: message)
-        replaceAssistantText("sending...")
+        showAssistantPlaceholder("sending...")
 
         streamTask = Task {
             var receivedEvent = false
@@ -169,7 +171,7 @@ final class ChatViewModel: ObservableObject {
         switch event.type {
         case "status_changed":
             if event.status == "running" {
-                replaceAssistantText("thinking...")
+                showAssistantPlaceholder("thinking...")
             }
         case "text_delta":
             appendAssistantDelta(event.delta ?? "")
@@ -210,11 +212,14 @@ final class ChatViewModel: ObservableObject {
     private func finishTurn() {
         isSending = false
         currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
     }
 
     private func failTurn(_ error: Error) {
         isSending = false
+        removeAssistantPlaceholder()
         currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
         append(kind: .error, text: error.localizedDescription)
     }
 
@@ -222,6 +227,10 @@ final class ChatViewModel: ObservableObject {
         guard !delta.isEmpty else { return }
         let id = ensureAssistantLine()
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
+        if assistantPlaceholderLineID == id {
+            lines[index].text = ""
+            assistantPlaceholderLineID = nil
+        }
         lines[index].text += delta
     }
 
@@ -229,6 +238,24 @@ final class ChatViewModel: ObservableObject {
         let id = ensureAssistantLine()
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         lines[index].text = text
+        assistantPlaceholderLineID = nil
+    }
+
+    private func showAssistantPlaceholder(_ text: String) {
+        let id = ensureAssistantLine()
+        guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
+        guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
+        lines[index].text = text
+        assistantPlaceholderLineID = id
+    }
+
+    private func removeAssistantPlaceholder() {
+        guard let assistantPlaceholderLineID,
+              let index = lines.firstIndex(where: { $0.id == assistantPlaceholderLineID }) else {
+            return
+        }
+        lines.remove(at: index)
+        self.assistantPlaceholderLineID = nil
     }
 
     private func ensureAssistantLine() -> UUID {
