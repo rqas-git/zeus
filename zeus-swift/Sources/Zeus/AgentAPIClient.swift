@@ -208,7 +208,9 @@ struct AgentServerEvent: Decodable {
     let role: String?
     let text: String?
     let message: String?
+    let toolCallID: String?
     let toolName: String?
+    let toolArguments: String?
     let success: Bool?
     let cache: CacheHealthPayload?
 
@@ -220,7 +222,9 @@ struct AgentServerEvent: Decodable {
         case role
         case text
         case message
+        case toolCallID = "tool_call_id"
         case toolName = "tool_name"
+        case toolArguments = "tool_arguments"
         case success
         case cache
     }
