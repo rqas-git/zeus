@@ -31,6 +31,7 @@ use fff_search::QueryParser;
 use fff_search::SharedFrecency;
 use fff_search::SharedPicker;
 use fff_search::SharedQueryTracker;
+use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -187,39 +188,34 @@ const GIT_COMMIT_TOOL_SPEC: ToolSpec = ToolSpec {
     supports_parallel: false,
 };
 
-const READ_ONLY_TOOL_SPECS: &[ToolSpec] = &[
-    READ_FILE_TOOL_SPEC,
-    READ_FILE_RANGE_TOOL_SPEC,
-    LIST_DIR_TOOL_SPEC,
-    SEARCH_FILES_TOOL_SPEC,
-    SEARCH_TEXT_TOOL_SPEC,
+const TOOL_DEFINITIONS: &[ToolDefinition] = &[
+    ToolDefinition::new(ToolPolicy::ReadOnly, READ_FILE_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::ReadOnly, READ_FILE_RANGE_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::ReadOnly, LIST_DIR_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::ReadOnly, SEARCH_FILES_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::ReadOnly, SEARCH_TEXT_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceWrite, APPLY_PATCH_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, EXEC_COMMAND_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_STATUS_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_DIFF_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_LOG_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_QUERY_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_ADD_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_RESTORE_TOOL_SPEC),
+    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_COMMIT_TOOL_SPEC),
 ];
 
-const WORKSPACE_WRITE_TOOL_SPECS: &[ToolSpec] = &[
-    READ_FILE_TOOL_SPEC,
-    READ_FILE_RANGE_TOOL_SPEC,
-    LIST_DIR_TOOL_SPEC,
-    SEARCH_FILES_TOOL_SPEC,
-    SEARCH_TEXT_TOOL_SPEC,
-    APPLY_PATCH_TOOL_SPEC,
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToolDefinition {
+    min_policy: ToolPolicy,
+    spec: ToolSpec,
+}
 
-const WORKSPACE_EXEC_TOOL_SPECS: &[ToolSpec] = &[
-    READ_FILE_TOOL_SPEC,
-    READ_FILE_RANGE_TOOL_SPEC,
-    LIST_DIR_TOOL_SPEC,
-    SEARCH_FILES_TOOL_SPEC,
-    SEARCH_TEXT_TOOL_SPEC,
-    APPLY_PATCH_TOOL_SPEC,
-    EXEC_COMMAND_TOOL_SPEC,
-    GIT_STATUS_TOOL_SPEC,
-    GIT_DIFF_TOOL_SPEC,
-    GIT_LOG_TOOL_SPEC,
-    GIT_QUERY_TOOL_SPEC,
-    GIT_ADD_TOOL_SPEC,
-    GIT_RESTORE_TOOL_SPEC,
-    GIT_COMMIT_TOOL_SPEC,
-];
+impl ToolDefinition {
+    const fn new(min_policy: ToolPolicy, spec: ToolSpec) -> Self {
+        Self { min_policy, spec }
+    }
+}
 
 /// Permission set controlling which built-in tools are exposed and executable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -231,13 +227,25 @@ pub(crate) enum ToolPolicy {
 }
 
 impl ToolPolicy {
-    const fn specs(self) -> &'static [ToolSpec] {
+    const fn allows(self, required: Self) -> bool {
+        self.rank() >= required.rank()
+    }
+
+    const fn rank(self) -> u8 {
         match self {
-            Self::ReadOnly => READ_ONLY_TOOL_SPECS,
-            Self::WorkspaceWrite => WORKSPACE_WRITE_TOOL_SPECS,
-            Self::WorkspaceExec => WORKSPACE_EXEC_TOOL_SPECS,
+            Self::ReadOnly => 0,
+            Self::WorkspaceWrite => 1,
+            Self::WorkspaceExec => 2,
         }
     }
+}
+
+fn tool_specs_for_policy(policy: ToolPolicy) -> Vec<ToolSpec> {
+    TOOL_DEFINITIONS
+        .iter()
+        .filter(|definition| policy.allows(definition.min_policy))
+        .map(|definition| definition.spec)
+        .collect()
 }
 
 /// Model-visible tool declaration.
@@ -313,7 +321,7 @@ impl ToolParameters {
             Self::ListDir => "list_dir:path:string:required:offset:integer:limit:integer:depth:integer",
             Self::SearchFiles => "search_files:query:string:required:limit:integer:offset:integer",
             Self::SearchText => {
-                "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:context:integer"
+                "search_text:query:string:required:mode:string:limit:integer:file_offset:integer:before_context:integer:after_context:integer"
             }
             Self::ApplyPatch => "apply_patch:patch:string:required:no_additional_properties",
             Self::ExecCommand => {
@@ -967,7 +975,7 @@ impl Serialize for GitCommitProperties {
 /// Registry for built-in tools.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolRegistry {
-    policy: ToolPolicy,
+    specs: Vec<ToolSpec>,
     root: Arc<PathBuf>,
     search: FffSearchIndex,
     search_permits: Arc<Semaphore>,
@@ -1014,7 +1022,7 @@ impl ToolRegistry {
         let root = root.canonicalize().unwrap_or(root);
         let search_concurrency = search_concurrency.clamp(1, MAX_FFF_SEARCH_CONCURRENCY);
         Self {
-            policy,
+            specs: tool_specs_for_policy(policy),
             search: FffSearchIndex::new(root.clone()),
             search_permits: Arc::new(Semaphore::new(search_concurrency)),
             root: Arc::new(root),
@@ -1028,8 +1036,8 @@ impl ToolRegistry {
     }
 
     /// Returns the stable model-visible tool specs.
-    pub(crate) fn specs(&self) -> &'static [ToolSpec] {
-        self.policy.specs()
+    pub(crate) fn specs(&self) -> &[ToolSpec] {
+        &self.specs
     }
 
     /// Returns `true` when every named tool can execute in parallel.
@@ -2048,59 +2056,66 @@ async fn prepare_patch_change(
 }
 
 fn parse_read_file_arguments(arguments: &str) -> Result<ReadFileArguments> {
-    serde_json::from_str(arguments).context("invalid read_file arguments")
+    parse_tool_arguments(READ_FILE_TOOL, arguments)
 }
 
 fn parse_list_dir_arguments(arguments: &str) -> Result<ListDirArguments> {
-    serde_json::from_str(arguments).context("invalid list_dir arguments")
+    parse_tool_arguments(LIST_DIR_TOOL, arguments)
 }
 
 fn parse_read_file_range_arguments(arguments: &str) -> Result<ReadFileRangeArguments> {
-    serde_json::from_str(arguments).context("invalid read_file_range arguments")
+    parse_tool_arguments(READ_FILE_RANGE_TOOL, arguments)
 }
 
 fn parse_search_files_arguments(arguments: &str) -> Result<SearchFilesArguments> {
-    serde_json::from_str(arguments).context("invalid search_files arguments")
+    parse_tool_arguments(SEARCH_FILES_TOOL, arguments)
 }
 
 fn parse_search_text_arguments(arguments: &str) -> Result<SearchTextArguments> {
-    serde_json::from_str(arguments).context("invalid search_text arguments")
+    parse_tool_arguments(SEARCH_TEXT_TOOL, arguments)
 }
 
 fn parse_apply_patch_arguments(arguments: &str) -> Result<ApplyPatchArguments> {
-    serde_json::from_str(arguments).context("invalid apply_patch arguments")
+    parse_tool_arguments(APPLY_PATCH_TOOL, arguments)
 }
 
 fn parse_exec_command_arguments(arguments: &str) -> Result<ExecCommandArguments> {
-    serde_json::from_str(arguments).context("invalid exec_command arguments")
+    parse_tool_arguments(EXEC_COMMAND_TOOL, arguments)
 }
 
 fn parse_git_status_arguments(arguments: &str) -> Result<GitStatusArguments> {
-    serde_json::from_str(arguments).context("invalid git_status arguments")
+    parse_tool_arguments(GIT_STATUS_TOOL, arguments)
 }
 
 fn parse_git_diff_arguments(arguments: &str) -> Result<GitDiffArguments> {
-    serde_json::from_str(arguments).context("invalid git_diff arguments")
+    parse_tool_arguments(GIT_DIFF_TOOL, arguments)
 }
 
 fn parse_git_log_arguments(arguments: &str) -> Result<GitLogArguments> {
-    serde_json::from_str(arguments).context("invalid git_log arguments")
+    parse_tool_arguments(GIT_LOG_TOOL, arguments)
 }
 
 fn parse_git_query_arguments(arguments: &str) -> Result<GitQueryArguments> {
-    serde_json::from_str(arguments).context("invalid git_query arguments")
+    parse_tool_arguments(GIT_QUERY_TOOL, arguments)
 }
 
 fn parse_git_add_arguments(arguments: &str) -> Result<GitAddArguments> {
-    serde_json::from_str(arguments).context("invalid git_add arguments")
+    parse_tool_arguments(GIT_ADD_TOOL, arguments)
 }
 
 fn parse_git_restore_arguments(arguments: &str) -> Result<GitRestoreArguments> {
-    serde_json::from_str(arguments).context("invalid git_restore arguments")
+    parse_tool_arguments(GIT_RESTORE_TOOL, arguments)
 }
 
 fn parse_git_commit_arguments(arguments: &str) -> Result<GitCommitArguments> {
-    serde_json::from_str(arguments).context("invalid git_commit arguments")
+    parse_tool_arguments(GIT_COMMIT_TOOL, arguments)
+}
+
+fn parse_tool_arguments<T>(tool_name: &str, arguments: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_str(arguments).with_context(|| format!("invalid {tool_name} arguments"))
 }
 
 fn trimmed_required<'a>(name: &str, value: &'a str) -> Result<&'a str> {
@@ -3416,8 +3431,10 @@ mod tests {
 
     #[test]
     fn serializes_tool_specs_without_allocating_json_values() {
+        let specs = tool_specs_for_policy(ToolPolicy::ReadOnly);
+
         assert_eq!(
-            serde_json::to_value(READ_ONLY_TOOL_SPECS).unwrap(),
+            serde_json::to_value(&specs).unwrap(),
             json!([
                 {
                     "type": "function",
@@ -3586,8 +3603,17 @@ mod tests {
     }
 
     #[test]
+    fn search_text_cache_key_tracks_context_arguments() {
+        let cache_key = SEARCH_TEXT_TOOL_SPEC.parameters_cache_key();
+
+        assert!(cache_key.contains("before_context:integer"));
+        assert!(cache_key.contains("after_context:integer"));
+        assert!(!cache_key.contains(":context:integer"));
+    }
+
+    #[test]
     fn workspace_write_policy_exposes_apply_patch() {
-        let specs = ToolPolicy::WorkspaceWrite.specs();
+        let specs = tool_specs_for_policy(ToolPolicy::WorkspaceWrite);
 
         assert!(specs.iter().any(|spec| spec.name() == APPLY_PATCH_TOOL));
         assert_eq!(
@@ -3613,7 +3639,7 @@ mod tests {
 
     #[test]
     fn workspace_exec_policy_exposes_command_and_git_tools() {
-        let specs = ToolPolicy::WorkspaceExec.specs();
+        let specs = tool_specs_for_policy(ToolPolicy::WorkspaceExec);
 
         assert!(specs.iter().any(|spec| spec.name() == APPLY_PATCH_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == EXEC_COMMAND_TOOL));
