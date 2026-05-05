@@ -5,6 +5,7 @@ import ZeusCore
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
     @Published var draft = ""
+    @Published private(set) var isTerminalPassthroughEnabled = false
     @Published private(set) var workspace: WorkspaceMetadata
     @Published private(set) var branchOptions: [String]
     @Published private(set) var model = "gpt 5.5"
@@ -26,6 +27,7 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isSelectingModel = false
     @Published private(set) var isSelectingPermissions = false
     @Published private(set) var isSwitchingBranch = false
+    @Published private(set) var isRunningTerminalCommand = false
 
     var canChangeModel: Bool {
         isReady && !isLoggingIn
@@ -40,7 +42,15 @@ final class ChatViewModel: ObservableObject {
     }
 
     var canChangeBranch: Bool {
-        !isSending && !isLoggingIn && !isSwitchingBranch
+        !isSending && !isLoggingIn && !isSwitchingBranch && !isRunningTerminalCommand
+    }
+
+    var inputPrompt: String {
+        isTerminalPassthroughEnabled ? "$" : ">"
+    }
+
+    var inputPlaceholder: String {
+        isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
     }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
@@ -56,6 +66,7 @@ final class ChatViewModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
     private var branchSwitchTask: Task<Void, Never>?
+    private var terminalTask: Task<Void, Never>?
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
 
@@ -74,6 +85,7 @@ final class ChatViewModel: ObservableObject {
         streamTask?.cancel()
         loginTask?.cancel()
         branchSwitchTask?.cancel()
+        terminalTask?.cancel()
         auth.cancelLogin()
         server.stop()
     }
@@ -114,6 +126,11 @@ final class ChatViewModel: ObservableObject {
     func sendDraft() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+
+        if isTerminalPassthroughEnabled {
+            runTerminalCommand(message)
+            return
+        }
 
         if message == "/login" {
             draft = ""
@@ -184,6 +201,8 @@ final class ChatViewModel: ObservableObject {
         loginTask = nil
         branchSwitchTask?.cancel()
         branchSwitchTask = nil
+        terminalTask?.cancel()
+        terminalTask = nil
         auth.cancelLogin()
         server.stop()
     }
@@ -227,6 +246,14 @@ final class ChatViewModel: ObservableObject {
         draft = ""
     }
 
+    func toggleTerminalPassthrough() {
+        isTerminalPassthroughEnabled.toggle()
+        append(
+            kind: .status,
+            text: "terminal passthrough \(isTerminalPassthroughEnabled ? "on" : "off")"
+        )
+    }
+
     func selectBranch(_ rawBranch: String) {
         guard rawBranch != workspace.branch else { return }
         guard canChangeBranch else { return }
@@ -258,6 +285,41 @@ final class ChatViewModel: ObservableObject {
             }
             isSwitchingBranch = false
             branchSwitchTask = nil
+        }
+    }
+
+    private func runTerminalCommand(_ command: String) {
+        guard !isRunningTerminalCommand else {
+            append(kind: .status, text: "terminal command already running")
+            return
+        }
+
+        draft = ""
+        isRunningTerminalCommand = true
+        append(kind: .user, text: "$ \(command)")
+        let rootURL = workspace.url
+        terminalTask = Task {
+            do {
+                let result = try await Task.detached {
+                    try BashPassthrough.run(command, at: rootURL)
+                }.value
+                appendTerminalResult(result)
+                workspace = WorkspaceMetadata.current(at: rootURL)
+                refreshBranchOptions()
+            } catch {
+                append(kind: .error, text: error.localizedDescription)
+            }
+            isRunningTerminalCommand = false
+            terminalTask = nil
+        }
+    }
+
+    private func appendTerminalResult(_ result: BashCommandResult) {
+        let output = result.output.isEmpty ? "exit \(result.exitCode)" : result.output
+        if result.exitCode == 0 {
+            append(kind: .status, text: output)
+        } else {
+            append(kind: .error, text: "\(output)\nexit \(result.exitCode)")
         }
     }
 

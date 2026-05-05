@@ -41,6 +41,8 @@ struct ChatWindow: View {
 
                 InputPrompt(
                     text: $viewModel.draft,
+                    prompt: viewModel.inputPrompt,
+                    placeholder: viewModel.inputPlaceholder,
                     onSubmit: viewModel.sendDraft
                 )
                 .padding(.top, 8)
@@ -114,6 +116,10 @@ struct ChatWindow: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if isTerminalPassthroughShortcut(event) {
+            viewModel.toggleTerminalPassthrough()
+            return true
+        }
         if isClearInputShortcut(event) {
             viewModel.clearDraft()
             return true
@@ -168,6 +174,10 @@ struct ChatWindow: View {
 
     private func isPermissionsShortcut(_ event: NSEvent) -> Bool {
         isCommandShortcut(event, key: "p")
+    }
+
+    private func isTerminalPassthroughShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "t")
     }
 
     private func isClearInputShortcut(_ event: NSEvent) -> Bool {
@@ -703,17 +713,19 @@ private struct ToolCallLine: View {
 
 private struct InputPrompt: View {
     @Binding var text: String
+    let prompt: String
+    let placeholder: String
     let onSubmit: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: TerminalLayout.markerTextSpacing) {
-            Text(">")
+            Text(prompt)
                 .foregroundStyle(TerminalPalette.cyan)
                 .frame(width: TerminalLayout.markerWidth, alignment: .leading)
 
             PromptTextField(
                 text: $text,
-                placeholder: "type a command or ask anything...",
+                placeholder: placeholder,
                 onSubmit: onSubmit
             )
                 .frame(height: 18)
