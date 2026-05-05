@@ -2,17 +2,20 @@ import Foundation
 
 public struct ToolMetadata: Equatable {
     public let name: String
+    public let displayName: String
     public let action: String
     public let iconName: String
 
     public static func forName(_ rawName: String?) -> ToolMetadata {
         let name = rawName ?? "tool"
         let definition = definitions[name] ?? ToolDefinition(
+            displayName: name,
             action: "running",
             iconName: "wrench.and.screwdriver"
         )
         return ToolMetadata(
             name: name,
+            displayName: definition.displayName,
             action: definition.action,
             iconName: definition.iconName
         )
@@ -97,24 +100,25 @@ public struct ToolMetadata: Equatable {
     }
 
     private static let definitions: [String: ToolDefinition] = [
-        "read_file": ToolDefinition(action: "reading", iconName: "doc.text"),
-        "read_file_range": ToolDefinition(action: "reading", iconName: "doc.text"),
-        "list_dir": ToolDefinition(action: "listing", iconName: "folder"),
-        "search_files": ToolDefinition(action: "searching", iconName: "magnifyingglass"),
-        "search_text": ToolDefinition(action: "searching", iconName: "magnifyingglass"),
-        "apply_patch": ToolDefinition(action: "patching", iconName: "square.and.pencil"),
-        "exec_command": ToolDefinition(action: "running", iconName: "terminal"),
-        "git_add": ToolDefinition(action: "staging", iconName: "plus.square"),
-        "git_restore": ToolDefinition(action: "restoring", iconName: "arrow.uturn.backward.square"),
-        "git_diff": ToolDefinition(action: "diffing", iconName: "arrow.left.arrow.right"),
-        "git_log": ToolDefinition(action: "reading log", iconName: "clock"),
-        "git_query": ToolDefinition(action: "checking", iconName: "checklist"),
-        "git_status": ToolDefinition(action: "checking", iconName: "checklist"),
-        "git_commit": ToolDefinition(action: "committing", iconName: "arrow.trianglehead.branch")
+        "read_file": ToolDefinition(displayName: "read", action: "reading", iconName: "doc.text"),
+        "read_file_range": ToolDefinition(displayName: "read", action: "reading", iconName: "doc.text"),
+        "list_dir": ToolDefinition(displayName: "list", action: "listing", iconName: "folder"),
+        "search_files": ToolDefinition(displayName: "find", action: "searching", iconName: "magnifyingglass"),
+        "search_text": ToolDefinition(displayName: "find", action: "searching", iconName: "magnifyingglass"),
+        "apply_patch": ToolDefinition(displayName: "edit", action: "patching", iconName: "square.and.pencil"),
+        "exec_command": ToolDefinition(displayName: "bash", action: "running", iconName: "terminal"),
+        "git_add": ToolDefinition(displayName: "git_add", action: "staging", iconName: "plus.square"),
+        "git_restore": ToolDefinition(displayName: "git_restore", action: "restoring", iconName: "arrow.uturn.backward.square"),
+        "git_diff": ToolDefinition(displayName: "git_diff", action: "diffing", iconName: "arrow.left.arrow.right"),
+        "git_log": ToolDefinition(displayName: "git_log", action: "reading log", iconName: "clock"),
+        "git_query": ToolDefinition(displayName: "git_query", action: "checking", iconName: "checklist"),
+        "git_status": ToolDefinition(displayName: "git_status", action: "checking", iconName: "checklist"),
+        "git_commit": ToolDefinition(displayName: "git_commit", action: "committing", iconName: "arrow.trianglehead.branch")
     ]
 }
 
 private struct ToolDefinition {
+    let displayName: String
     let action: String
     let iconName: String
 }

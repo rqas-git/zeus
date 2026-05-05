@@ -359,7 +359,7 @@ final class ChatViewModel: ObservableObject {
     ) -> ToolCallTranscript {
         let metadata = ToolMetadata.forName(name)
         return ToolCallTranscript(
-            name: metadata.name,
+            name: metadata.displayName,
             action: metadata.action,
             iconName: metadata.iconName,
             target: metadata.target(fromArgumentsJSON: arguments),

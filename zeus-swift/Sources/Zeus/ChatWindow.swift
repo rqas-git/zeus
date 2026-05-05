@@ -288,7 +288,7 @@ private struct ToolCallLine: View {
                     .foregroundStyle(statusColor)
             }
 
-            toolCell(width: 118) {
+            toolCell(width: 42) {
                 Text(toolCall.name)
                     .foregroundStyle(TerminalPalette.cyan)
                     .fontWeight(.semibold)
