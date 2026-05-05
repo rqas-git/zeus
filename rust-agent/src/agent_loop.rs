@@ -465,7 +465,7 @@ pub(crate) struct ModelToolCall {
 }
 
 /// Streams a prompt window into an assistant response.
-pub(crate) trait ModelStreamer {
+pub(crate) trait ModelStreamer: Sync {
     /// Sends the prompt window and streams assistant text deltas.
     fn stream_conversation<'a>(
         &'a self,
@@ -476,6 +476,31 @@ pub(crate) trait ModelStreamer {
         model: &'a str,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> impl Future<Output = Result<ModelResponse>> + Send + 'a;
+
+    /// Sends the prompt window with an optional reasoning effort override.
+    fn stream_conversation_with_reasoning<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> impl Future<Output = Result<ModelResponse>> + Send + 'a {
+        let _ = reasoning_effort;
+        async move {
+            self.stream_conversation(
+                messages,
+                tools,
+                parallel_tool_calls,
+                session_id,
+                model,
+                on_delta,
+            )
+            .await
+        }
+    }
 }
 
 /// Per-session runtime settings.
@@ -844,8 +869,14 @@ impl AgentLoop {
         model: &impl ModelStreamer,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
-        self.submit_user_message_with_cancellation(text, model, TurnCancellation::new(), &mut emit)
-            .await
+        self.submit_user_message_with_cancellation(
+            text,
+            model,
+            TurnCancellation::new(),
+            None,
+            &mut emit,
+        )
+        .await
     }
 
     /// Appends a user message and runs the turn with a cancellation signal.
@@ -857,6 +888,7 @@ impl AgentLoop {
         text: impl Into<String>,
         model: &impl ModelStreamer,
         cancellation: TurnCancellation,
+        reasoning_effort: Option<&str>,
         mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
         anyhow::ensure!(
@@ -898,7 +930,9 @@ impl AgentLoop {
             );
         }
         self.store.prune_history(self.context_window);
-        let result = self.run_until_done(model, &cancellation, &mut emit).await;
+        let result = self
+            .run_until_done(model, &cancellation, reasoning_effort, &mut emit)
+            .await;
         match result {
             Ok(()) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
@@ -996,11 +1030,14 @@ impl AgentLoop {
         &mut self,
         model: &impl ModelStreamer,
         cancellation: &TurnCancellation,
+        reasoning_effort: Option<&str>,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         for _ in 0..MAX_TOOL_ROUNDS {
             cancellation.ensure_not_cancelled()?;
-            let tool_calls = self.run_once(model, cancellation, emit).await?;
+            let tool_calls = self
+                .run_once(model, cancellation, reasoning_effort, emit)
+                .await?;
             if tool_calls.is_empty() {
                 self.store.prune_history(self.context_window);
                 return Ok(());
@@ -1018,6 +1055,7 @@ impl AgentLoop {
         &mut self,
         model: &impl ModelStreamer,
         cancellation: &TurnCancellation,
+        reasoning_effort: Option<&str>,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
         let history = self.store.conversation_window(self.context_window);
@@ -1027,12 +1065,13 @@ impl AgentLoop {
         let mut model_response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(TurnCancelled.into()),
-            response = model.stream_conversation(
+            response = model.stream_conversation_with_reasoning(
                 &history,
                 self.tools.specs(),
                 true,
                 session_id,
                 selected_model,
+                reasoning_effort,
                 &mut on_delta,
             ) => response?,
         };

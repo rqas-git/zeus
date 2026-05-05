@@ -172,6 +172,52 @@ impl ModelStreamer for ChatGptClient {
         model: &'a str,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
+        self.stream_conversation_inner(
+            messages,
+            tools,
+            parallel_tool_calls,
+            session_id,
+            model,
+            None,
+            on_delta,
+        )
+        .await
+    }
+
+    async fn stream_conversation_with_reasoning<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> Result<ModelResponse> {
+        self.stream_conversation_inner(
+            messages,
+            tools,
+            parallel_tool_calls,
+            session_id,
+            model,
+            reasoning_effort,
+            on_delta,
+        )
+        .await
+    }
+}
+
+impl ChatGptClient {
+    async fn stream_conversation_inner<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
@@ -184,6 +230,7 @@ impl ModelStreamer for ChatGptClient {
             tools,
             tool_choice: "auto",
             parallel_tool_calls,
+            reasoning: reasoning_effort.map(|effort| ResponsesReasoning { effort }),
             store: false,
             stream: true,
             prompt_cache_key: &prompt_cache_key,
@@ -313,9 +360,16 @@ struct ResponsesRequest<'a> {
     tools: &'a [ToolSpec],
     tool_choice: &'static str,
     parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponsesReasoning<'a>>,
     store: bool,
     stream: bool,
     prompt_cache_key: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ResponsesReasoning<'a> {
+    effort: &'a str,
 }
 
 fn responses_input<'a>(messages: &'a [ConversationMessage<'a>]) -> ResponsesInput<'a> {
@@ -1106,6 +1160,54 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         remove_parent(&auth_path);
     }
 
+    #[tokio::test]
+    async fn serializes_reasoning_effort_override() {
+        let auth_path = temp_auth_file("client-reasoning");
+        let access = access_token(now_unix() + 600);
+        write_auth_file(&auth_path, "account-test", &access, "refresh-test");
+        let model_server = TestServer::new(vec![TestResponse::sse(
+            200,
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+        )]);
+        let auth =
+            AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:1".to_string()).unwrap();
+        let client = ChatGptClient::new(
+            auth,
+            ClientConfig::new(
+                "instructions",
+                format!("{}/responses", model_server.url()),
+                "originator",
+                "version",
+                Duration::from_secs(5),
+                "reasoning-test",
+            ),
+            false,
+        )
+        .unwrap();
+        let messages = [ConversationMessage::user("hello")];
+
+        client
+            .stream_conversation_with_reasoning(
+                &messages,
+                &[],
+                true,
+                SessionId::new(7),
+                "gpt-test",
+                Some("xhigh"),
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap();
+
+        let requests = model_server.requests();
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+
+        remove_parent(&auth_path);
+    }
+
     #[test]
     #[ignore = "release-mode SSE parser benchmark; run explicitly with --ignored --nocapture"]
     fn benchmark_sse_parser_large_stream() {
@@ -1162,6 +1264,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
             tools: tools.specs(),
             tool_choice: "auto",
             parallel_tool_calls: true,
+            reasoning: None,
             store: false,
             stream: true,
             prompt_cache_key,

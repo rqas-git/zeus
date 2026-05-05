@@ -17,6 +17,8 @@ const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CODEX_VERSION: &str = "0.128.0";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_ALLOWED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const DEFAULT_REASONING_EFFORT: &str = "medium";
+const DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -169,6 +171,8 @@ impl Default for ClientConfig {
 pub(crate) struct ModelConfig {
     default_model: String,
     allowed_models: Vec<String>,
+    default_reasoning_effort: String,
+    reasoning_efforts: Vec<String>,
 }
 
 impl ModelConfig {
@@ -196,10 +200,15 @@ impl ModelConfig {
                 models
             }
         };
+        let (default_reasoning_effort, reasoning_efforts) =
+            load_codex_reasoning_config(&allowed_models, &default_model)
+                .unwrap_or_else(default_reasoning_config);
 
         Ok(Self {
             default_model,
             allowed_models,
+            default_reasoning_effort,
+            reasoning_efforts,
         })
     }
 
@@ -218,6 +227,8 @@ impl ModelConfig {
         Ok(Self {
             default_model,
             allowed_models,
+            default_reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
+            reasoning_efforts: default_reasoning_efforts(),
         })
     }
 
@@ -229,6 +240,16 @@ impl ModelConfig {
     /// Returns the backend allowlist for model changes.
     pub(crate) fn allowed_models(&self) -> &[String] {
         &self.allowed_models
+    }
+
+    /// Returns the default reasoning effort for new turns.
+    pub(crate) fn default_reasoning_effort(&self) -> &str {
+        &self.default_reasoning_effort
+    }
+
+    /// Returns reasoning efforts advertised by the Codex model cache.
+    pub(crate) fn reasoning_efforts(&self) -> &[String] {
+        &self.reasoning_efforts
     }
 
     /// Returns the canonical allowed model matching a requested slug.
@@ -250,6 +271,26 @@ impl ModelConfig {
                 )
             })
     }
+
+    /// Returns the canonical allowed reasoning effort matching a requested value.
+    ///
+    /// # Errors
+    /// Returns an error if the effort is empty or unsupported.
+    pub(crate) fn allowed_reasoning_effort(&self, effort: &str) -> Result<&str> {
+        let requested = effort.trim();
+        anyhow::ensure!(!requested.is_empty(), "reasoning effort cannot be empty");
+
+        self.reasoning_efforts
+            .iter()
+            .find(|candidate| candidate.as_str() == requested)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unsupported reasoning effort {requested:?}; allowed reasoning efforts: {}",
+                    self.reasoning_efforts.join(", ")
+                )
+            })
+    }
 }
 
 impl Default for ModelConfig {
@@ -257,6 +298,8 @@ impl Default for ModelConfig {
         Self {
             default_model: DEFAULT_MODEL.to_string(),
             allowed_models: default_allowed_models(),
+            default_reasoning_effort: DEFAULT_REASONING_EFFORT.to_string(),
+            reasoning_efforts: default_reasoning_efforts(),
         }
     }
 }
@@ -739,10 +782,33 @@ fn default_allowed_models() -> Vec<String> {
         .collect()
 }
 
+fn default_reasoning_config() -> (String, Vec<String>) {
+    (
+        DEFAULT_REASONING_EFFORT.to_string(),
+        default_reasoning_efforts(),
+    )
+}
+
+fn default_reasoning_efforts() -> Vec<String> {
+    DEFAULT_REASONING_EFFORTS
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn load_codex_model_allowlist() -> Option<Vec<String>> {
     let path = codex_models_cache_path()?;
     let contents = std::fs::read(path).ok()?;
     codex_model_allowlist_from_cache(&contents).ok()
+}
+
+fn load_codex_reasoning_config(
+    allowed_models: &[String],
+    default_model: &str,
+) -> Option<(String, Vec<String>)> {
+    let path = codex_models_cache_path()?;
+    let contents = std::fs::read(path).ok()?;
+    codex_reasoning_config_from_cache(&contents, allowed_models, default_model).ok()
 }
 
 fn codex_models_cache_path() -> Option<PathBuf> {
@@ -766,6 +832,46 @@ fn codex_model_allowlist_from_cache(contents: &[u8]) -> Result<Vec<String>> {
     normalized_model_list(models)
 }
 
+fn codex_reasoning_config_from_cache(
+    contents: &[u8],
+    allowed_models: &[String],
+    default_model: &str,
+) -> Result<(String, Vec<String>)> {
+    let cache: CodexModelsCache = serde_json::from_slice(contents)?;
+    let mut default_reasoning_effort = None;
+    let mut reasoning_efforts = Vec::new();
+
+    for model in cache.models {
+        if model.visibility.as_deref().unwrap_or("list") != "list"
+            || !allowed_models
+                .iter()
+                .any(|allowed_model| allowed_model == &model.slug)
+        {
+            continue;
+        }
+        if model.slug == default_model {
+            default_reasoning_effort = model.default_reasoning_level;
+        }
+        for level in model.supported_reasoning_levels {
+            reasoning_efforts.push(level.effort);
+        }
+    }
+
+    let reasoning_efforts = normalized_reasoning_effort_list(reasoning_efforts)?;
+    let default_reasoning_effort = default_reasoning_effort
+        .filter(|effort| reasoning_efforts.iter().any(|allowed| allowed == effort))
+        .or_else(|| {
+            reasoning_efforts
+                .iter()
+                .find(|effort| effort.as_str() == DEFAULT_REASONING_EFFORT)
+                .cloned()
+        })
+        .or_else(|| reasoning_efforts.first().cloned())
+        .expect("normalized reasoning effort list cannot be empty");
+
+    Ok((default_reasoning_effort, reasoning_efforts))
+}
+
 #[derive(Deserialize)]
 struct CodexModelsCache {
     models: Vec<CodexCachedModel>,
@@ -776,6 +882,15 @@ struct CodexCachedModel {
     slug: String,
     #[serde(default)]
     visibility: Option<String>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexCachedReasoningLevel>,
+}
+
+#[derive(Deserialize)]
+struct CodexCachedReasoningLevel {
+    effort: String,
 }
 
 fn normalized_model(model: impl Into<String>) -> Result<String> {
@@ -796,6 +911,30 @@ fn normalized_model_list(
         }
     }
     anyhow::ensure!(!normalized.is_empty(), "allowed models cannot be empty");
+    Ok(normalized)
+}
+
+fn normalized_reasoning_effort(effort: impl Into<String>) -> Result<String> {
+    let effort = effort.into();
+    let effort = effort.trim();
+    anyhow::ensure!(!effort.is_empty(), "reasoning effort cannot be empty");
+    Ok(effort.to_string())
+}
+
+fn normalized_reasoning_effort_list(
+    efforts: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+    for effort in efforts {
+        let effort = normalized_reasoning_effort(effort)?;
+        if !normalized.iter().any(|existing| existing == &effort) {
+            normalized.push(effort);
+        }
+    }
+    anyhow::ensure!(
+        !normalized.is_empty(),
+        "allowed reasoning efforts cannot be empty"
+    );
     Ok(normalized)
 }
 
@@ -904,5 +1043,47 @@ mod tests {
         .unwrap();
 
         assert_eq!(models, ["new-frontier", "new-fast"]);
+    }
+
+    #[test]
+    fn parses_reasoning_efforts_for_visible_allowed_models_from_cache() {
+        let allowed_models = vec!["new-frontier".to_string(), "new-fast".to_string()];
+        let (default_effort, efforts) = codex_reasoning_config_from_cache(
+            br#"{
+                "models": [
+                    {
+                        "slug":"new-frontier",
+                        "visibility":"list",
+                        "default_reasoning_level":"medium",
+                        "supported_reasoning_levels":[
+                            {"effort":"low"},
+                            {"effort":"medium"}
+                        ]
+                    },
+                    {
+                        "slug":"internal-review",
+                        "visibility":"hide",
+                        "default_reasoning_level":"high",
+                        "supported_reasoning_levels":[
+                            {"effort":"high"}
+                        ]
+                    },
+                    {
+                        "slug":"new-fast",
+                        "visibility":"list",
+                        "supported_reasoning_levels":[
+                            {"effort":"medium"},
+                            {"effort":"xhigh"}
+                        ]
+                    }
+                ]
+            }"#,
+            &allowed_models,
+            "new-frontier",
+        )
+        .unwrap();
+
+        assert_eq!(default_effort, "medium");
+        assert_eq!(efforts, ["low", "medium", "xhigh"]);
     }
 }

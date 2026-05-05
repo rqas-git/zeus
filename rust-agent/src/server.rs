@@ -644,6 +644,8 @@ where
     Json(ModelsResponse {
         default_model: state.service.default_model().to_string(),
         allowed_models: state.service.allowed_models().to_vec(),
+        default_reasoning_effort: state.service.default_reasoning_effort().to_string(),
+        reasoning_efforts: state.service.reasoning_efforts().to_vec(),
     })
 }
 
@@ -734,22 +736,34 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::NOT_FOUND, error),
     };
+    let reasoning_effort = match request.reasoning_effort.as_deref() {
+        Some(effort) => match state.service.allowed_reasoning_effort(effort) {
+            Ok(effort) => Some(effort.to_string()),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+        },
+        None => None,
+    };
     let (tx, rx) = mpsc::unbounded_channel();
     let service = Arc::clone(&state.service);
     let events = state.events.clone();
     tokio::spawn(async move {
         let mut error_forwarded = false;
         let result = service
-            .submit_user_message(session_id, request.message, |event| {
-                let event = ServerEvent::from_agent_event(event);
-                let is_error = matches!(event, ServerEvent::Error { .. });
-                events.publish(event.clone())?;
-                let _ = tx.send(event);
-                if is_error {
-                    error_forwarded = true;
-                }
-                Ok(())
-            })
+            .submit_user_message_with_reasoning_effort(
+                session_id,
+                request.message,
+                reasoning_effort.as_deref(),
+                |event| {
+                    let event = ServerEvent::from_agent_event(event);
+                    let is_error = matches!(event, ServerEvent::Error { .. });
+                    events.publish(event.clone())?;
+                    let _ = tx.send(event);
+                    if is_error {
+                        error_forwarded = true;
+                    }
+                    Ok(())
+                },
+            )
             .await;
 
         match result {
@@ -1111,6 +1125,8 @@ struct HealthResponse {
 struct ModelsResponse {
     default_model: String,
     allowed_models: Vec<String>,
+    default_reasoning_effort: String,
+    reasoning_efforts: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1142,6 +1158,7 @@ struct SetModelRequest {
 #[derive(Deserialize)]
 struct TurnRequest {
     message: String,
+    reasoning_effort: Option<String>,
 }
 
 #[cfg(test)]
@@ -1207,7 +1224,7 @@ mod tests {
         let body = to_bytes(models.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            r#"{"default_model":"test-default","allowed_models":["test-default","test-fast"]}"#
+            r#"{"default_model":"test-default","allowed_models":["test-default","test-fast"],"default_reasoning_effort":"medium","reasoning_efforts":["low","medium","high","xhigh"]}"#
         );
     }
 

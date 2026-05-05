@@ -183,6 +183,21 @@ where
         self.model_config.allowed_models()
     }
 
+    /// Returns the default reasoning effort for new turns.
+    pub(crate) fn default_reasoning_effort(&self) -> &str {
+        self.model_config.default_reasoning_effort()
+    }
+
+    /// Returns the backend allowlist for reasoning effort changes.
+    pub(crate) fn reasoning_efforts(&self) -> &[String] {
+        self.model_config.reasoning_efforts()
+    }
+
+    /// Returns the canonical allowed reasoning effort matching a requested value.
+    pub(crate) fn allowed_reasoning_effort(&self, effort: &str) -> Result<&str> {
+        self.model_config.allowed_reasoning_effort(effort)
+    }
+
     /// Returns the configured default model for new sessions.
     pub(crate) fn default_model(&self) -> &str {
         self.model_config.default_model()
@@ -235,11 +250,32 @@ where
         message: impl Into<String>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
+        self.submit_user_message_with_reasoning_effort(session_id, message, None, emit)
+            .await
+    }
+
+    /// Submits a user message to a session with an optional reasoning effort.
+    ///
+    /// # Errors
+    /// Returns an error when model streaming or event publishing fails.
+    pub(crate) async fn submit_user_message_with_reasoning_effort(
+        &self,
+        session_id: SessionId,
+        message: impl Into<String>,
+        reasoning_effort: Option<&str>,
+        emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<()> {
         let session = self.session_or_insert_default(session_id)?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn()?;
         let result = agent
-            .submit_user_message_with_cancellation(message, &self.model, cancellation, emit)
+            .submit_user_message_with_cancellation(
+                message,
+                &self.model,
+                cancellation,
+                reasoning_effort,
+                emit,
+            )
             .await;
         session.clear_turn()?;
         result
