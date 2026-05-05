@@ -17,6 +17,11 @@ func toolMetadataMapsKnownTools() throws {
 }
 
 @Test
+func toolMetadataMapsDisplayNames() throws {
+    try ZeusCoreChecks.testToolDisplayNames()
+}
+
+@Test
 func toolMetadataSummarizesArguments() throws {
     try ZeusCoreChecks.testToolTargets()
 }

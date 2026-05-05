@@ -93,8 +93,28 @@ public enum ZeusCoreChecks {
         let metadata = ToolMetadata.forName("git_commit")
 
         try require(metadata.name == "git_commit", "unexpected tool name")
+        try require(metadata.displayName == "git_commit", "unexpected display name")
         try require(metadata.action == "committing", "unexpected action")
         try require(metadata.iconName == "arrow.trianglehead.branch", "unexpected icon")
+    }
+
+    public static func testToolDisplayNames() throws {
+        let displayNames = [
+            "read_file": "read",
+            "read_file_range": "read",
+            "list_dir": "list",
+            "search_files": "find",
+            "search_text": "find",
+            "apply_patch": "edit",
+            "exec_command": "bash"
+        ]
+
+        for (tool, displayName) in displayNames {
+            try require(
+                ToolMetadata.forName(tool).displayName == displayName,
+                "unexpected display name for \(tool)"
+            )
+        }
     }
 
     public static func testToolTargets() throws {

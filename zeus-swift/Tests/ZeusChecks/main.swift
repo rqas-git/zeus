@@ -14,6 +14,7 @@ struct ZeusChecks {
             ZeusCoreChecks.testParagraphBoundaries
         )
         checks.run("ToolMetadata maps known tools", ZeusCoreChecks.testToolMetadata)
+        checks.run("ToolMetadata maps display names", ZeusCoreChecks.testToolDisplayNames)
         checks.run("ToolMetadata summarizes arguments", ZeusCoreChecks.testToolTargets)
         checks.run("AgentServerEvent decodes typed events", ZeusCoreChecks.testAgentServerEvents)
         checks.run("PathDisplay abbreviates home paths", ZeusCoreChecks.testPathDisplay)
