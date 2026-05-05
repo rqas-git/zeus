@@ -49,6 +49,7 @@ use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
 use crate::config::ServerConfig;
 use crate::service::AgentService;
+use crate::tools::ToolPolicy;
 
 const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
@@ -134,11 +135,16 @@ where
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
+        .route("/permissions", get(permissions::<M>))
         .route("/sessions", post(create_session::<M>))
         .route("/sessions/{session_id}", delete(delete_session::<M>))
         .route(
             "/sessions/{session_id}/model",
             get(session_model::<M>).put(set_session_model::<M>),
+        )
+        .route(
+            "/sessions/{session_id}/permissions",
+            get(session_permissions::<M>).put(set_session_permissions::<M>),
         )
         .route(
             "/sessions/{session_id}/turns:stream",
@@ -626,6 +632,13 @@ fn unauthorized_response() -> Response<Body> {
         .expect("unauthorized response headers must be valid")
 }
 
+fn tool_policy_strings(policies: &[ToolPolicy]) -> Vec<String> {
+    policies
+        .iter()
+        .map(|policy| policy.as_str().to_string())
+        .collect()
+}
+
 async fn root() -> impl IntoResponse {
     Json(RootResponse {
         name: SERVER_NAME,
@@ -649,6 +662,16 @@ where
     })
 }
 
+async fn permissions<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    Json(PermissionsResponse {
+        default_tool_policy: state.service.default_tool_policy().as_str().to_string(),
+        allowed_tool_policies: tool_policy_strings(state.service.tool_policies()),
+    })
+}
+
 async fn create_session<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
 where
     M: ModelStreamer + Send + Sync + 'static,
@@ -664,6 +687,7 @@ where
     Json(CreateSessionResponse {
         session_id: session_id.get(),
         model: state.service.default_model().to_string(),
+        tool_policy: state.service.default_tool_policy().as_str().to_string(),
     })
     .into_response()
 }
@@ -713,6 +737,51 @@ where
     };
     match state.service.set_session_model(session_id, &request.model) {
         Ok(model) => Json(SessionModelResponse { model }).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn session_permissions<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    match state.service.session_tool_policy(session_id).await {
+        Ok(policy) => Json(SessionPermissionsResponse {
+            tool_policy: policy.as_str().to_string(),
+        })
+        .into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn set_session_permissions<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+    Json(request): Json<SetPermissionsRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    let policy = match ToolPolicy::parse(&request.tool_policy) {
+        Ok(policy) => policy,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
+    match state.service.set_session_tool_policy(session_id, policy) {
+        Ok(policy) => Json(SessionPermissionsResponse {
+            tool_policy: policy.as_str().to_string(),
+        })
+        .into_response(),
         Err(error) => error_response(StatusCode::BAD_REQUEST, error),
     }
 }
@@ -1130,14 +1199,26 @@ struct ModelsResponse {
 }
 
 #[derive(Serialize)]
+struct PermissionsResponse {
+    default_tool_policy: String,
+    allowed_tool_policies: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct CreateSessionResponse {
     session_id: u64,
     model: String,
+    tool_policy: String,
 }
 
 #[derive(Serialize)]
 struct SessionModelResponse {
     model: String,
+}
+
+#[derive(Serialize)]
+struct SessionPermissionsResponse {
+    tool_policy: String,
 }
 
 #[derive(Serialize)]
@@ -1153,6 +1234,11 @@ struct ErrorResponse {
 #[derive(Deserialize)]
 struct SetModelRequest {
     model: String,
+}
+
+#[derive(Deserialize)]
+struct SetPermissionsRequest {
+    tool_policy: String,
 }
 
 #[derive(Deserialize)]
@@ -1212,6 +1298,7 @@ mod tests {
         );
 
         let models = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/models")
@@ -1225,6 +1312,22 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
             r#"{"default_model":"test-default","allowed_models":["test-default","test-fast"],"default_reasoning_effort":"medium","reasoning_efforts":["low","medium","high","xhigh"]}"#
+        );
+
+        let permissions = app
+            .oneshot(
+                Request::builder()
+                    .uri("/permissions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(permissions.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"default_tool_policy":"read-only","allowed_tool_policies":["read-only","workspace-write","workspace-exec"]}"#
         );
     }
 
@@ -1281,8 +1384,10 @@ mod tests {
         let session_id = created["session_id"].as_u64().unwrap();
         assert_ne!(session_id, 0);
         assert_eq!(created["model"], "test-default");
+        assert_eq!(created["tool_policy"], "read-only");
 
         let model = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/sessions/{session_id}/model"))
@@ -1297,6 +1402,41 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
             r#"{"model":"test-default"}"#
+        );
+
+        let permissions = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/sessions/{session_id}/permissions"))
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(permissions.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"tool_policy":"read-only"}"#
+        );
+
+        let permissions = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/sessions/{session_id}/permissions"))
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"tool_policy":"edit"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(permissions.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"tool_policy":"workspace-write"}"#
         );
     }
 

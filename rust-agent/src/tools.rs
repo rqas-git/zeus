@@ -142,6 +142,11 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
     ToolDefinition::new(ToolPolicy::WorkspaceWrite, APPLY_PATCH_TOOL_SPEC),
     ToolDefinition::new(ToolPolicy::WorkspaceExec, EXEC_COMMAND_TOOL_SPEC),
 ];
+const TOOL_POLICIES: &[ToolPolicy] = &[
+    ToolPolicy::ReadOnly,
+    ToolPolicy::WorkspaceWrite,
+    ToolPolicy::WorkspaceExec,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ToolDefinition {
@@ -165,6 +170,29 @@ pub(crate) enum ToolPolicy {
 }
 
 impl ToolPolicy {
+    pub(crate) fn all() -> &'static [Self] {
+        TOOL_POLICIES
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::WorkspaceExec => "workspace-exec",
+        }
+    }
+
+    pub(crate) fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "read-only" | "read_only" | "readonly" | "read" => Ok(Self::ReadOnly),
+            "workspace-write" | "workspace_write" | "write" | "edit" => Ok(Self::WorkspaceWrite),
+            "workspace-exec" | "workspace_exec" | "exec" | "bash" => Ok(Self::WorkspaceExec),
+            _ => anyhow::bail!(
+                "unsupported tool policy {raw:?}; expected read-only, workspace-write, or workspace-exec"
+            ),
+        }
+    }
+
     const fn allows(self, required: Self) -> bool {
         self.rank() >= required.rank()
     }
@@ -625,6 +653,7 @@ impl Serialize for ExecCommandProperties {
 /// Registry for built-in tools.
 #[derive(Clone, Debug)]
 pub(crate) struct ToolRegistry {
+    policy: ToolPolicy,
     specs: Vec<ToolSpec>,
     root: Arc<PathBuf>,
     search: FffSearchIndex,
@@ -672,10 +701,27 @@ impl ToolRegistry {
         let root = root.canonicalize().unwrap_or(root);
         let search_concurrency = search_concurrency.clamp(1, MAX_FFF_SEARCH_CONCURRENCY);
         Self {
+            policy,
             specs: tool_specs_for_policy(policy),
             search: FffSearchIndex::new(root.clone()),
             search_permits: Arc::new(Semaphore::new(search_concurrency)),
             root: Arc::new(root),
+        }
+    }
+
+    /// Returns the active tool permission policy.
+    pub(crate) const fn policy(&self) -> ToolPolicy {
+        self.policy
+    }
+
+    /// Returns a registry with the same root/search state and a different policy.
+    pub(crate) fn with_policy(&self, policy: ToolPolicy) -> Self {
+        Self {
+            policy,
+            specs: tool_specs_for_policy(policy),
+            root: Arc::clone(&self.root),
+            search: self.search.clone(),
+            search_permits: Arc::clone(&self.search_permits),
         }
     }
 

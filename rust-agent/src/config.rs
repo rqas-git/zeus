@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 
@@ -958,14 +959,7 @@ fn env_parse_bool(name: &str, default: bool) -> Result<bool> {
 }
 
 fn parse_tool_policy(raw: &str) -> Result<ToolPolicy> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "read-only" | "read_only" | "readonly" => Ok(ToolPolicy::ReadOnly),
-        "workspace-write" | "workspace_write" | "write" => Ok(ToolPolicy::WorkspaceWrite),
-        "workspace-exec" | "workspace_exec" | "exec" => Ok(ToolPolicy::WorkspaceExec),
-        _ => anyhow::bail!(
-            "failed to parse RUST_AGENT_TOOL_MODE={raw:?}: expected read-only, workspace-write, or workspace-exec"
-        ),
-    }
+    ToolPolicy::parse(raw).with_context(|| format!("failed to parse RUST_AGENT_TOOL_MODE={raw:?}"))
 }
 
 fn validate_tool_search_concurrency(value: usize) -> Result<usize> {
@@ -1004,6 +998,15 @@ mod tests {
         );
         assert_eq!(
             parse_tool_policy("workspace-exec").unwrap(),
+            ToolPolicy::WorkspaceExec
+        );
+        assert_eq!(parse_tool_policy("read").unwrap(), ToolPolicy::ReadOnly);
+        assert_eq!(
+            parse_tool_policy("edit").unwrap(),
+            ToolPolicy::WorkspaceWrite
+        );
+        assert_eq!(
+            parse_tool_policy("bash").unwrap(),
             ToolPolicy::WorkspaceExec
         );
         assert!(parse_tool_policy("network").is_err());

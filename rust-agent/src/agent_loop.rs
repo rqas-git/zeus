@@ -17,6 +17,7 @@ use crate::config::ContextWindowConfig;
 use crate::storage::SessionDatabase;
 use crate::storage::StoredSession;
 use crate::tools::ToolExecution;
+use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
 use crate::tools::ToolSpec;
 
@@ -835,6 +836,11 @@ impl AgentLoop {
         self.store.model()
     }
 
+    /// Returns the selected tool permission policy for future turns.
+    pub(crate) fn tool_policy(&self) -> ToolPolicy {
+        self.tools.policy()
+    }
+
     /// Returns stored messages in order.
     #[cfg(test)]
     pub(crate) fn messages(&self) -> &[AgentMessage] {
@@ -855,6 +861,19 @@ impl AgentLoop {
             database.set_session_model(self.session_id(), &model)?;
         }
         self.store.set_model(model);
+        Ok(())
+    }
+
+    /// Changes the selected tool permission policy for future turns.
+    ///
+    /// # Errors
+    /// Returns an error if a turn is currently running.
+    pub(crate) fn set_tool_policy(&mut self, policy: ToolPolicy) -> Result<()> {
+        anyhow::ensure!(
+            self.store.status() != SessionStatus::Running,
+            "cannot change tool policy while session is running"
+        );
+        self.tools = self.tools.with_policy(policy);
         Ok(())
     }
 

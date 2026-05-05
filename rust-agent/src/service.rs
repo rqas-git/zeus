@@ -17,6 +17,7 @@ use crate::agent_loop::TurnCancellation;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
 use crate::storage::SessionDatabase;
+use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
 
 /// Reuses a model client and keeps conversation state by session.
@@ -198,6 +199,16 @@ where
         self.model_config.allowed_reasoning_effort(effort)
     }
 
+    /// Returns the available tool permission policies.
+    pub(crate) fn tool_policies(&self) -> &'static [ToolPolicy] {
+        ToolPolicy::all()
+    }
+
+    /// Returns the default tool permission policy for new sessions.
+    pub(crate) fn default_tool_policy(&self) -> ToolPolicy {
+        self.tools.policy()
+    }
+
     /// Returns the configured default model for new sessions.
     pub(crate) fn default_model(&self) -> &str {
         self.model_config.default_model()
@@ -238,6 +249,49 @@ where
         };
         agent.set_model(model)?;
         Ok(agent.model().to_string())
+    }
+
+    /// Returns the tool permission policy selected for a session, or the default for a new session.
+    pub(crate) async fn session_tool_policy(&self, session_id: SessionId) -> Result<ToolPolicy> {
+        if let Some(session) = self.session(session_id)? {
+            let agent = session.agent.lock().await;
+            return Ok(agent.tool_policy());
+        }
+        Ok(self.default_tool_policy())
+    }
+
+    /// Changes the selected tool permission policy for future turns in a session.
+    ///
+    /// # Errors
+    /// Returns an error if the session is currently busy.
+    pub(crate) fn set_session_tool_policy(
+        &self,
+        session_id: SessionId,
+        policy: ToolPolicy,
+    ) -> Result<ToolPolicy> {
+        let session = {
+            let mut sessions = self.lock_sessions()?;
+            if let Some(session) = sessions.get(&session_id) {
+                Arc::clone(session)
+            } else {
+                self.ensure_can_insert_session(&sessions)?;
+                let session = Self::new_session(
+                    session_id,
+                    self.context_window,
+                    SessionConfig::new(self.model_config.default_model()),
+                    self.tools.with_policy(policy),
+                    self.database.clone(),
+                )?;
+                sessions.insert(session_id, Arc::clone(&session));
+                return Ok(policy);
+            }
+        };
+
+        let Ok(mut agent) = session.agent.try_lock() else {
+            anyhow::bail!("cannot change tool policy while session is running");
+        };
+        agent.set_tool_policy(policy)?;
+        Ok(agent.tool_policy())
     }
 
     /// Submits a user message to a session, creating the session if needed.
@@ -361,6 +415,7 @@ mod tests {
     use crate::agent_loop::is_turn_cancelled;
     use crate::agent_loop::ModelResponse;
     use crate::client::ConversationMessage;
+    use crate::tools::ToolPolicy;
     use crate::tools::ToolSpec;
 
     use super::*;
@@ -479,6 +534,62 @@ mod tests {
             service.session_model(SessionId::new(1)).await.unwrap(),
             "test-default"
         );
+    }
+
+    #[tokio::test]
+    async fn changes_session_tool_policy_for_future_turns() {
+        let turn = AtomicUsize::new(0);
+        let model = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _selected_model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                match turn.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        assert!(!tools.iter().any(|tool| tool.name() == "apply_patch"));
+                        assert!(!tools.iter().any(|tool| tool.name() == "exec_command"));
+                    }
+                    1 => {
+                        assert!(tools.iter().any(|tool| tool.name() == "apply_patch"));
+                        assert!(!tools.iter().any(|tool| tool.name() == "exec_command"));
+                    }
+                    2 => {
+                        assert!(tools.iter().any(|tool| tool.name() == "exec_command"));
+                    }
+                    _ => unreachable!("unexpected turn"),
+                }
+                Ok("ok".to_string())
+            },
+        );
+        let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config());
+
+        service
+            .submit_user_message(SessionId::new(1), "read", |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .set_session_tool_policy(SessionId::new(1), ToolPolicy::WorkspaceWrite)
+                .unwrap(),
+            ToolPolicy::WorkspaceWrite
+        );
+        service
+            .submit_user_message(SessionId::new(1), "edit", |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .set_session_tool_policy(SessionId::new(1), ToolPolicy::WorkspaceExec)
+                .unwrap(),
+            ToolPolicy::WorkspaceExec
+        );
+        service
+            .submit_user_message(SessionId::new(1), "bash", |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(turn.load(Ordering::SeqCst), 3);
     }
 
     #[test]
