@@ -223,6 +223,10 @@ final class ChatViewModel: ObservableObject {
         applySelectedPermissions(rawPermission)
     }
 
+    func clearDraft() {
+        draft = ""
+    }
+
     func selectBranch(_ rawBranch: String) {
         guard rawBranch != workspace.branch else { return }
         guard canChangeBranch else { return }

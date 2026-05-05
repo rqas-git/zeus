@@ -114,6 +114,10 @@ struct ChatWindow: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if isClearInputShortcut(event) {
+            viewModel.clearDraft()
+            return true
+        }
         if isBranchShortcut(event) {
             openBranchMenu()
             return true
@@ -164,6 +168,14 @@ struct ChatWindow: View {
 
     private func isPermissionsShortcut(_ event: NSEvent) -> Bool {
         isCommandShortcut(event, key: "p")
+    }
+
+    private func isClearInputShortcut(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let disallowed: NSEvent.ModifierFlags = [.command, .option, .shift]
+        return flags.contains(.control)
+            && flags.intersection(disallowed).isEmpty
+            && event.charactersIgnoringModifiers?.lowercased() == "c"
     }
 
     private func isCommandShortcut(_ event: NSEvent, key: String) -> Bool {
