@@ -38,9 +38,9 @@ transport, and session state separate.
   content search. In `workspace-write` mode it also exposes `apply_patch` for
   workspace-confined UTF-8 file edits. FFF index initialization is lazy by
   default, but callers can start the shared scanner on a background blocking
-  worker before any tool request. In `workspace-exec` mode it also exposes a
-  bounded shell command tool plus dedicated git wrappers. It executes tool
-  batches in parallel when every requested tool is marked parallel-safe.
+  worker before any tool request. In `workspace-exec` mode it also exposes the
+  bounded `exec_command` shell tool. It executes tool batches in parallel when
+  every requested tool is marked parallel-safe.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It validates model changes before updating a session and
   exposes cancellation for the currently running turn.
@@ -81,11 +81,11 @@ transport, and session state separate.
 - `apply_patch` is sequential, parses bounded patch input, validates all touched
   paths before writing, caps target file size, and replaces individual files via
   temporary-file rename.
-- `exec_command` and the git wrappers are sequential, timeout-bounded, and
-  return capped stdout and stderr. Oversized command output kills the process
-  group and returns a failed tool result. `exec_command` currently permits any
-  bash command string; command-level safety restrictions are intentionally
-  deferred and must be reintroduced before untrusted use.
+- `exec_command` is sequential, timeout-bounded, and returns capped stdout and
+  stderr. Oversized command output kills the process group and returns a failed
+  tool result. It currently permits any bash command string; command-level
+  safety restrictions are intentionally deferred and must be reintroduced before
+  untrusted use.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
 - The service-level session locks keep ordered turns local to one session
@@ -114,8 +114,8 @@ Conversation history is durable in SQLite and recent in memory. The default
 built-in tool set is read-only (`read_file`, `read_file_range`, `list_dir`,
 `search_files`, and `search_text`).
 `RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
-`RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution plus
-git wrappers. Cancellation is process-local and applies to the active turn;
+`RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution.
+Cancellation is process-local and applies to the active turn;
 semantic context compaction remains out of scope until product behavior requires
 it.
 

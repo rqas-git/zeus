@@ -8,9 +8,7 @@ read-only. Write access is opt-in with `RUST_AGENT_TOOL_MODE=workspace-write`.
 - `read-only` exposes `read_file`, `read_file_range`, `list_dir`,
   `search_files`, and `search_text`.
 - `workspace-write` exposes the read-only tools plus `apply_patch`.
-- `workspace-exec` exposes the workspace-write tools plus `exec_command` and
-  dedicated git wrappers: `git_status`, `git_diff`, `git_log`, `git_query`,
-  `git_add`, `git_restore`, and `git_commit`.
+- `workspace-exec` exposes the workspace-write tools plus `exec_command`.
 
 ## Patch Tool
 
@@ -65,16 +63,6 @@ explicit `limit` values may request up to 500 entries.
 - `exec_command` does not currently apply command-level allow/deny protections;
   reintroducing a command safety policy is deferred. Treat `workspace-exec` as a
   trusted-local mode until that policy exists.
-- `git_query` allows read-only inspection commands: `status`, `diff`, `log`,
-  `show`, `blame`, `grep`, `ls-files`, `branch --show-current`, `rev-parse`,
-  `merge-base`, `describe`, `worktree list`, and `submodule status`.
-- `git_add` and `git_restore` require explicit workspace-relative paths.
-  `git_restore` unstages paths when `staged` is true; otherwise it restores the
-  worktree copy for those paths.
-- `git_commit` requires explicit workspace-relative paths and commits only those
-  pathspecs. Git path lists and commit messages are bounded before execution.
-- Path-scoped git wrappers pass workspace paths as literal pathspecs, so Git
-  pathspec magic cannot widen the requested path set.
 - `list_dir` keeps only the lexicographically first capped result set in memory
   while scanning large directories.
 - `search_text` output is capped before it is returned to the model.

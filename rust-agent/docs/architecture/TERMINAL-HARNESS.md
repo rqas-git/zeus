@@ -28,7 +28,7 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 - Cache-health telemetry is opt-in and stays off stdout.
 - Tool mode is loaded once at startup; `workspace-write` exposes `apply_patch`
   to both one-shot and interactive terminal sessions. `workspace-exec` also
-  exposes bounded shell command execution and dedicated git wrappers.
+  exposes bounded shell command execution.
 - `AgentService` owns session state and model execution.
 - `ChatGptClient` owns remote model I/O.
 

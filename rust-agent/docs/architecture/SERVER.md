@@ -86,7 +86,7 @@ event shape.
 - One `AgentService` and one `ChatGptClient` are reused for all requests.
 - Tool policy is loaded once at startup. The default `read-only` mode exposes no
   write tools; `workspace-write` exposes `apply_patch`; `workspace-exec` exposes
-  trusted local shell command execution and dedicated git wrappers.
+  trusted local shell command execution.
 - Server startup initializes the shared FFF search index in the background. If a
   request reaches an FFF-backed tool before scanning completes, that tool is the
   path that waits on a blocking worker and then runs against the ready index.
