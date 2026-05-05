@@ -114,6 +114,10 @@ struct ChatWindow: View {
             openEffortMenu()
             return true
         }
+        if isPermissionsShortcut(event) {
+            openPermissionsMenu()
+            return true
+        }
 
         guard activeFooterMenu != nil else { return false }
 
@@ -142,6 +146,10 @@ struct ChatWindow: View {
         isCommandShortcut(event, key: "e")
     }
 
+    private func isPermissionsShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "p")
+    }
+
     private func isCommandShortcut(_ event: NSEvent, key: String) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let disallowed: NSEvent.ModifierFlags = [.control, .option, .shift]
@@ -166,6 +174,15 @@ struct ChatWindow: View {
             ? viewModel.effort
             : options.first
         activeFooterMenu = .effort
+    }
+
+    private func openPermissionsMenu() {
+        guard viewModel.canChangePermissions else { return }
+        let options = permissionsMenuOptions
+        permissionsMenuHighlightedOption = options.contains(viewModel.selectedPermission)
+            ? viewModel.selectedPermission
+            : options.first
+        activeFooterMenu = .permissions
     }
 
     private func moveActiveMenuHighlight(by offset: Int) {
