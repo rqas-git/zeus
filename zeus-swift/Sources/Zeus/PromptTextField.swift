@@ -78,5 +78,23 @@ struct PromptTextField: NSViewRepresentable {
             guard let textField = notification.object as? NSTextField else { return }
             text.wrappedValue = textField.stringValue
         }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)),
+                  NSApp.currentEvent?.modifierFlags
+                    .intersection(.deviceIndependentFlagsMask)
+                    .contains(.control) == true
+            else {
+                return false
+            }
+
+            textView.insertNewlineIgnoringFieldEditor(nil)
+            text.wrappedValue = textView.string
+            return true
+        }
     }
 }

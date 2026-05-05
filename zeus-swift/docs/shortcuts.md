@@ -8,6 +8,7 @@
 | `Cmd+P` | Open the permissions dropdown menu. |
 | `Cmd+T` | Toggle terminal passthrough for the input field. |
 | `Ctrl+C` | Clear the input field. |
+| `Ctrl+Enter` | Insert a newline in the input field. |
 | `Up Arrow` | Move the highlighted option up while a footer dropdown is open. |
 | `Down Arrow` | Move the highlighted option down while a footer dropdown is open. |
 | `Return` / `Enter` | Select the highlighted option while a footer dropdown is open. |
