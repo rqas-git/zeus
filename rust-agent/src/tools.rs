@@ -55,13 +55,6 @@ const SEARCH_FILES_TOOL: &str = "search_files";
 const SEARCH_TEXT_TOOL: &str = "search_text";
 const APPLY_PATCH_TOOL: &str = "apply_patch";
 const EXEC_COMMAND_TOOL: &str = "exec_command";
-const GIT_STATUS_TOOL: &str = "git_status";
-const GIT_DIFF_TOOL: &str = "git_diff";
-const GIT_LOG_TOOL: &str = "git_log";
-const GIT_QUERY_TOOL: &str = "git_query";
-const GIT_ADD_TOOL: &str = "git_add";
-const GIT_RESTORE_TOOL: &str = "git_restore";
-const GIT_COMMIT_TOOL: &str = "git_commit";
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const RANGE_TRUNCATION_MARKER: &str = "\n[truncated: range exceeds requested max_bytes]";
@@ -85,13 +78,6 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOTAL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const COMMAND_OUTPUT_DIR: &str = "target/rust-agent-tool-output";
 const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MAX_GIT_PATHS: usize = 128;
-const MAX_GIT_PATH_BYTES: usize = 8 * 1024;
-const MAX_GIT_COMMIT_MESSAGE_BYTES: usize = 8 * 1024;
-const MAX_GIT_QUERY_ARGS: usize = 64;
-const MAX_GIT_QUERY_ARG_BYTES: usize = 8 * 1024;
-const DEFAULT_GIT_LOG_COUNT: usize = 10;
-const MAX_GIT_LOG_COUNT: usize = 50;
 const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
@@ -146,48 +132,6 @@ const EXEC_COMMAND_TOOL_SPEC: ToolSpec = ToolSpec {
     parameters: ToolParameters::ExecCommand,
     supports_parallel: false,
 };
-const GIT_STATUS_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_STATUS_TOOL,
-    description: "Show concise git worktree status for the workspace repository.",
-    parameters: ToolParameters::NoArgs,
-    supports_parallel: false,
-};
-const GIT_DIFF_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_DIFF_TOOL,
-    description: "Show bounded git diff output for unstaged or staged workspace changes.",
-    parameters: ToolParameters::GitDiff,
-    supports_parallel: false,
-};
-const GIT_LOG_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_LOG_TOOL,
-    description: "Show recent git commits for the workspace repository.",
-    parameters: ToolParameters::GitLog,
-    supports_parallel: false,
-};
-const GIT_QUERY_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_QUERY_TOOL,
-    description: "Run an allowlisted read-only git query for workspace inspection.",
-    parameters: ToolParameters::GitQuery,
-    supports_parallel: false,
-};
-const GIT_ADD_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_ADD_TOOL,
-    description: "Stage explicit workspace-relative paths for the next git commit.",
-    parameters: ToolParameters::GitAdd,
-    supports_parallel: false,
-};
-const GIT_RESTORE_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_RESTORE_TOOL,
-    description: "Restore or unstage explicit workspace-relative paths.",
-    parameters: ToolParameters::GitRestore,
-    supports_parallel: false,
-};
-const GIT_COMMIT_TOOL_SPEC: ToolSpec = ToolSpec {
-    name: GIT_COMMIT_TOOL,
-    description: "Create an atomic git commit for explicit workspace-relative paths.",
-    parameters: ToolParameters::GitCommit,
-    supports_parallel: false,
-};
 
 const TOOL_DEFINITIONS: &[ToolDefinition] = &[
     ToolDefinition::new(ToolPolicy::ReadOnly, READ_FILE_TOOL_SPEC),
@@ -197,13 +141,6 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
     ToolDefinition::new(ToolPolicy::ReadOnly, SEARCH_TEXT_TOOL_SPEC),
     ToolDefinition::new(ToolPolicy::WorkspaceWrite, APPLY_PATCH_TOOL_SPEC),
     ToolDefinition::new(ToolPolicy::WorkspaceExec, EXEC_COMMAND_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_STATUS_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_DIFF_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_LOG_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_QUERY_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_ADD_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_RESTORE_TOOL_SPEC),
-    ToolDefinition::new(ToolPolicy::WorkspaceExec, GIT_COMMIT_TOOL_SPEC),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,13 +240,6 @@ enum ToolParameters {
     SearchText,
     ApplyPatch,
     ExecCommand,
-    NoArgs,
-    GitDiff,
-    GitLog,
-    GitQuery,
-    GitAdd,
-    GitRestore,
-    GitCommit,
 }
 
 impl ToolParameters {
@@ -328,15 +258,6 @@ impl ToolParameters {
             Self::ExecCommand => {
                 "exec_command:command:string:required:cwd:string:timeout_ms:integer:max_output_bytes:integer"
             }
-            Self::NoArgs => "no_args:no_additional_properties",
-            Self::GitDiff => "git_diff:staged:boolean:path:string:max_output_bytes:integer",
-            Self::GitLog => "git_log:max_count:integer",
-            Self::GitQuery => {
-                "git_query:command:string:required:args:string_array:max_output_bytes:integer"
-            }
-            Self::GitAdd => "git_add:paths:string_array:required",
-            Self::GitRestore => "git_restore:paths:string_array:required:staged:boolean",
-            Self::GitCommit => "git_commit:message:string:required:paths:string_array:required",
         }
     }
 }
@@ -403,62 +324,6 @@ impl Serialize for ToolParameters {
                 map.serialize_entry("additionalProperties", &false)?;
                 map.end()
             }
-            Self::NoArgs => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &EmptyProperties)?;
-                map.serialize_entry("required", &[] as &[&str])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitDiff => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitDiffProperties)?;
-                map.serialize_entry("required", &[] as &[&str])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitLog => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitLogProperties)?;
-                map.serialize_entry("required", &[] as &[&str])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitQuery => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitQueryProperties)?;
-                map.serialize_entry("required", &["command"])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitAdd => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitAddProperties)?;
-                map.serialize_entry("required", &["paths"])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitRestore => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitRestoreProperties)?;
-                map.serialize_entry("required", &["paths"])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
-            Self::GitCommit => {
-                let mut map = serializer.serialize_map(Some(4))?;
-                map.serialize_entry("type", "object")?;
-                map.serialize_entry("properties", &GitCommitProperties)?;
-                map.serialize_entry("required", &["message", "paths"])?;
-                map.serialize_entry("additionalProperties", &false)?;
-                map.end()
-            }
         }
     }
 }
@@ -495,59 +360,6 @@ impl Serialize for IntegerProperty {
         state.serialize_field("description", self.description)?;
         state.serialize_field("minimum", &self.minimum)?;
         state.serialize_field("maximum", &self.maximum)?;
-        state.end()
-    }
-}
-
-struct BooleanProperty {
-    description: &'static str,
-}
-
-impl Serialize for BooleanProperty {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("BooleanProperty", 2)?;
-        state.serialize_field("type", "boolean")?;
-        state.serialize_field("description", self.description)?;
-        state.end()
-    }
-}
-
-struct StringArrayProperty {
-    description: &'static str,
-}
-
-impl Serialize for StringArrayProperty {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("StringArrayProperty", 3)?;
-        state.serialize_field("type", "array")?;
-        state.serialize_field("description", self.description)?;
-        state.serialize_field(
-            "items",
-            &StringItems {
-                item_type: "string",
-            },
-        )?;
-        state.end()
-    }
-}
-
-struct StringItems {
-    item_type: &'static str,
-}
-
-impl Serialize for StringItems {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("StringItems", 1)?;
-        state.serialize_field("type", self.item_type)?;
         state.end()
     }
 }
@@ -770,17 +582,6 @@ impl Serialize for ReadFileRangeProperties {
     }
 }
 
-struct EmptyProperties;
-
-impl Serialize for EmptyProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_map(Some(0))?.end()
-    }
-}
-
 struct ExecCommandProperties;
 
 impl Serialize for ExecCommandProperties {
@@ -815,158 +616,6 @@ impl Serialize for ExecCommandProperties {
                 description: "Maximum stdout bytes and stderr bytes to retain separately.",
                 minimum: 1,
                 maximum: MAX_COMMAND_OUTPUT_BYTES,
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitDiffProperties;
-
-impl Serialize for GitDiffProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(3))?;
-        map.serialize_entry(
-            "staged",
-            &BooleanProperty {
-                description: "When true, show staged changes instead of unstaged changes.",
-            },
-        )?;
-        map.serialize_entry(
-            "path",
-            &StringProperty {
-                description: "Optional workspace-relative path to limit the diff.",
-            },
-        )?;
-        map.serialize_entry(
-            "max_output_bytes",
-            &IntegerProperty {
-                description: "Maximum stdout bytes and stderr bytes to retain separately.",
-                minimum: 1,
-                maximum: MAX_COMMAND_OUTPUT_BYTES,
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitLogProperties;
-
-impl Serialize for GitLogProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(
-            "max_count",
-            &IntegerProperty {
-                description: "Maximum number of recent commits to return.",
-                minimum: 1,
-                maximum: MAX_GIT_LOG_COUNT,
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitQueryProperties;
-
-impl Serialize for GitQueryProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(3))?;
-        map.serialize_entry(
-            "command",
-            &StringProperty {
-                description:
-                    "Read-only git command: status, diff, log, show, blame, grep, ls-files, branch, rev-parse, merge-base, describe, worktree, or submodule.",
-            },
-        )?;
-        map.serialize_entry(
-            "args",
-            &StringArrayProperty {
-                description: "Arguments for the selected read-only git command.",
-            },
-        )?;
-        map.serialize_entry(
-            "max_output_bytes",
-            &IntegerProperty {
-                description: "Maximum stdout bytes and stderr bytes to retain separately.",
-                minimum: 1,
-                maximum: MAX_COMMAND_OUTPUT_BYTES,
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitAddProperties;
-
-impl Serialize for GitAddProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(
-            "paths",
-            &StringArrayProperty {
-                description: "Workspace-relative paths to stage.",
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitRestoreProperties;
-
-impl Serialize for GitRestoreProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry(
-            "paths",
-            &StringArrayProperty {
-                description: "Workspace-relative paths to restore or unstage.",
-            },
-        )?;
-        map.serialize_entry(
-            "staged",
-            &BooleanProperty {
-                description:
-                    "When true, unstage paths. When false or omitted, discard worktree changes for paths.",
-            },
-        )?;
-        map.end()
-    }
-}
-
-struct GitCommitProperties;
-
-impl Serialize for GitCommitProperties {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry(
-            "message",
-            &StringProperty {
-                description: "Concise commit message.",
-            },
-        )?;
-        map.serialize_entry(
-            "paths",
-            &StringArrayProperty {
-                description: "Workspace-relative paths to include in this atomic commit.",
             },
         )?;
         map.end()
@@ -1080,62 +729,6 @@ impl ToolRegistry {
         match call.name.as_str() {
             EXEC_COMMAND_TOOL => {
                 return exec_command(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_STATUS_TOOL => {
-                return git_status(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_DIFF_TOOL => {
-                return git_diff(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_LOG_TOOL => {
-                return git_log(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_QUERY_TOOL => {
-                return git_query(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_ADD_TOOL => {
-                return git_add(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_RESTORE_TOOL => {
-                return git_restore(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            GIT_COMMIT_TOOL => {
-                return git_commit(&self.root, &call.arguments, cancellation)
                     .await
                     .map(|output| tool_execution(call, output.output, output.success))
                     .unwrap_or_else(|error| {
@@ -1298,59 +891,6 @@ struct ExecCommandArguments {
     timeout_ms: Option<u64>,
     #[serde(default)]
     max_output_bytes: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitStatusArguments {}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitDiffArguments {
-    #[serde(default)]
-    staged: bool,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    max_output_bytes: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitLogArguments {
-    #[serde(default)]
-    max_count: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitQueryArguments {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    max_output_bytes: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitAddArguments {
-    paths: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitRestoreArguments {
-    paths: Vec<String>,
-    #[serde(default)]
-    staged: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GitCommitArguments {
-    message: String,
-    paths: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1829,161 +1369,6 @@ async fn exec_command(
     Ok(process_result_output(result))
 }
 
-async fn git_status(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let _args = parse_git_status_arguments(arguments)?;
-    let args = vec![
-        "status".to_string(),
-        "--short".to_string(),
-        "--branch".to_string(),
-    ];
-    let result = run_git(root, args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_diff(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_diff_arguments(arguments)?;
-    let max_output_bytes = bounded_limit(
-        args.max_output_bytes,
-        DEFAULT_COMMAND_OUTPUT_BYTES,
-        MAX_COMMAND_OUTPUT_BYTES,
-    );
-    let mut git_args = vec!["diff".to_string()];
-    if args.staged {
-        git_args.push("--cached".to_string());
-    }
-    if let Some(path) = args.path.as_deref().filter(|path| !path.trim().is_empty()) {
-        git_args.push("--".to_string());
-        git_args.push(git_pathspec(path)?);
-    }
-
-    let result = run_git(root, git_args, max_output_bytes, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_log(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_log_arguments(arguments)?;
-    let max_count = bounded_limit(args.max_count, DEFAULT_GIT_LOG_COUNT, MAX_GIT_LOG_COUNT);
-    let git_args = vec![
-        "log".to_string(),
-        "--oneline".to_string(),
-        "--decorate".to_string(),
-        "-n".to_string(),
-        max_count.to_string(),
-    ];
-
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_query(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_query_arguments(arguments)?;
-    let max_output_bytes = bounded_limit(
-        args.max_output_bytes,
-        DEFAULT_COMMAND_OUTPUT_BYTES,
-        MAX_COMMAND_OUTPUT_BYTES,
-    );
-    let git_args = read_only_git_args(&args.command, &args.args)?;
-    let result = run_git(root, git_args, max_output_bytes, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_add(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_add_arguments(arguments)?;
-    let pathspecs = git_pathspecs(&args.paths)?;
-    let mut git_args = vec!["add".to_string(), "--".to_string()];
-    git_args.extend(pathspecs);
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_restore(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_restore_arguments(arguments)?;
-    let pathspecs = git_pathspecs(&args.paths)?;
-    let mut git_args = vec!["restore".to_string()];
-    if args.staged {
-        git_args.push("--staged".to_string());
-    } else {
-        git_args.push("--worktree".to_string());
-    }
-    git_args.push("--".to_string());
-    git_args.extend(pathspecs);
-    let result = run_git(root, git_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
-    Ok(process_result_output(result))
-}
-
-async fn git_commit(
-    root: &Path,
-    arguments: &str,
-    cancellation: &TurnCancellation,
-) -> Result<ToolOutput> {
-    let args = parse_git_commit_arguments(arguments)?;
-    let message = trimmed_required("message", &args.message)?;
-    anyhow::ensure!(
-        message.len() <= MAX_GIT_COMMIT_MESSAGE_BYTES,
-        "message exceeds {MAX_GIT_COMMIT_MESSAGE_BYTES} bytes"
-    );
-    let pathspecs = git_pathspecs(&args.paths)?;
-
-    let mut add_args = vec!["add".to_string(), "--".to_string()];
-    add_args.extend(pathspecs.iter().cloned());
-    let add_result = run_git(root, add_args, DEFAULT_COMMAND_OUTPUT_BYTES, cancellation).await?;
-    let add_output = process_result_output(add_result);
-    if !add_output.success {
-        return Ok(ToolOutput {
-            output: format!("git add:\n{}", add_output.output),
-            success: false,
-        });
-    }
-
-    let mut commit_args = vec![
-        "commit".to_string(),
-        "-m".to_string(),
-        message.to_string(),
-        "--".to_string(),
-    ];
-    commit_args.extend(pathspecs);
-    let commit_result = run_git(
-        root,
-        commit_args,
-        DEFAULT_COMMAND_OUTPUT_BYTES,
-        cancellation,
-    )
-    .await?;
-    let commit_output = process_result_output(commit_result);
-
-    Ok(ToolOutput {
-        success: commit_output.success,
-        output: format!(
-            "git add:\n{}\n\ngit commit:\n{}",
-            add_output.output, commit_output.output
-        ),
-    })
-}
-
 async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
     let args = parse_apply_patch_arguments(arguments)?;
     anyhow::ensure!(
@@ -2132,34 +1517,6 @@ fn parse_apply_patch_arguments(arguments: &str) -> Result<ApplyPatchArguments> {
 
 fn parse_exec_command_arguments(arguments: &str) -> Result<ExecCommandArguments> {
     parse_tool_arguments(EXEC_COMMAND_TOOL, arguments)
-}
-
-fn parse_git_status_arguments(arguments: &str) -> Result<GitStatusArguments> {
-    parse_tool_arguments(GIT_STATUS_TOOL, arguments)
-}
-
-fn parse_git_diff_arguments(arguments: &str) -> Result<GitDiffArguments> {
-    parse_tool_arguments(GIT_DIFF_TOOL, arguments)
-}
-
-fn parse_git_log_arguments(arguments: &str) -> Result<GitLogArguments> {
-    parse_tool_arguments(GIT_LOG_TOOL, arguments)
-}
-
-fn parse_git_query_arguments(arguments: &str) -> Result<GitQueryArguments> {
-    parse_tool_arguments(GIT_QUERY_TOOL, arguments)
-}
-
-fn parse_git_add_arguments(arguments: &str) -> Result<GitAddArguments> {
-    parse_tool_arguments(GIT_ADD_TOOL, arguments)
-}
-
-fn parse_git_restore_arguments(arguments: &str) -> Result<GitRestoreArguments> {
-    parse_tool_arguments(GIT_RESTORE_TOOL, arguments)
-}
-
-fn parse_git_commit_arguments(arguments: &str) -> Result<GitCommitArguments> {
-    parse_tool_arguments(GIT_COMMIT_TOOL, arguments)
 }
 
 fn parse_tool_arguments<T>(tool_name: &str, arguments: &str) -> Result<T>
@@ -2373,169 +1730,6 @@ async fn command_cwd(root: &Path, cwd: Option<&str>) -> Result<PathBuf> {
         display_path(root, &path)
     );
     Ok(path)
-}
-
-fn git_pathspec(path: &str) -> Result<String> {
-    let relative = clean_workspace_relative_path(path)?;
-    Ok(format!(":(literal){}", relative.to_string_lossy()))
-}
-
-fn git_pathspecs(paths: &[String]) -> Result<Vec<String>> {
-    anyhow::ensure!(!paths.is_empty(), "paths cannot be empty");
-    anyhow::ensure!(
-        paths.len() <= MAX_GIT_PATHS,
-        "paths exceed {MAX_GIT_PATHS} entries"
-    );
-    let mut pathspecs = Vec::with_capacity(paths.len());
-    let mut path_bytes = 0usize;
-    for path in paths {
-        let pathspec = git_pathspec(path)?;
-        path_bytes = path_bytes.saturating_add(pathspec.len());
-        anyhow::ensure!(
-            path_bytes <= MAX_GIT_PATH_BYTES,
-            "paths exceed {MAX_GIT_PATH_BYTES} bytes"
-        );
-        pathspecs.push(pathspec);
-    }
-    Ok(pathspecs)
-}
-
-fn read_only_git_args(command: &str, args: &[String]) -> Result<Vec<String>> {
-    let command = trimmed_required("command", command)?.to_ascii_lowercase();
-    validate_git_query_args(args)?;
-    let git_args = match command.as_str() {
-        "status" | "log" | "blame" | "ls-files" | "rev-parse" | "merge-base" | "describe" => {
-            let mut git_args = Vec::with_capacity(args.len() + 1);
-            git_args.push(command);
-            git_args.extend(args.iter().cloned());
-            git_args
-        }
-        "diff" | "show" => {
-            let mut git_args = Vec::with_capacity(args.len() + 2);
-            git_args.push(command);
-            git_args.push("--no-ext-diff".to_string());
-            git_args.extend(args.iter().cloned());
-            git_args
-        }
-        "grep" => {
-            ensure_git_grep_args_are_read_only(args)?;
-            let mut git_args = Vec::with_capacity(args.len() + 1);
-            git_args.push(command);
-            git_args.extend(args.iter().cloned());
-            git_args
-        }
-        "branch" => {
-            anyhow::ensure!(
-                args.is_empty()
-                    || (args.len() == 1
-                        && args.first().is_some_and(|arg| arg == "--show-current")),
-                "git_query branch only supports --show-current"
-            );
-            vec!["branch".to_string(), "--show-current".to_string()]
-        }
-        "worktree" => {
-            anyhow::ensure!(
-                matches!(args.first().map(String::as_str), Some("list")),
-                "git_query worktree only supports list"
-            );
-            ensure_git_worktree_list_args(args)?;
-            let mut git_args = Vec::with_capacity(args.len() + 1);
-            git_args.push(command);
-            git_args.extend(args.iter().cloned());
-            git_args
-        }
-        "submodule" => {
-            if args.is_empty() {
-                vec!["submodule".to_string(), "status".to_string()]
-            } else {
-                anyhow::ensure!(
-                    matches!(args.first().map(String::as_str), Some("status")),
-                    "git_query submodule only supports status"
-                );
-                let mut git_args = Vec::with_capacity(args.len() + 1);
-                git_args.push(command);
-                git_args.extend(args.iter().cloned());
-                git_args
-            }
-        }
-        _ => anyhow::bail!(
-            "unsupported git_query command {command:?}; allowed commands: status, diff, log, show, blame, grep, ls-files, branch, rev-parse, merge-base, describe, worktree, submodule"
-        ),
-    };
-    deny_git_query_output_file_args(&git_args)?;
-    Ok(git_args)
-}
-
-fn validate_git_query_args(args: &[String]) -> Result<()> {
-    anyhow::ensure!(
-        args.len() <= MAX_GIT_QUERY_ARGS,
-        "git_query args exceed {MAX_GIT_QUERY_ARGS} entries"
-    );
-    let mut bytes = 0usize;
-    for arg in args {
-        anyhow::ensure!(
-            !arg.is_empty(),
-            "git_query args cannot contain empty strings"
-        );
-        anyhow::ensure!(
-            !arg.contains('\0'),
-            "git_query args cannot contain NUL bytes"
-        );
-        bytes = bytes.saturating_add(arg.len());
-        anyhow::ensure!(
-            bytes <= MAX_GIT_QUERY_ARG_BYTES,
-            "git_query args exceed {MAX_GIT_QUERY_ARG_BYTES} bytes"
-        );
-    }
-    Ok(())
-}
-
-fn ensure_git_grep_args_are_read_only(args: &[String]) -> Result<()> {
-    for arg in args {
-        anyhow::ensure!(
-            arg != "-O" && !arg.starts_with("-O") && !arg.starts_with("--open-files-in-pager"),
-            "git_query grep does not support pager-opening options"
-        );
-    }
-    Ok(())
-}
-
-fn ensure_git_worktree_list_args(args: &[String]) -> Result<()> {
-    for arg in args.iter().skip(1) {
-        anyhow::ensure!(
-            matches!(arg.as_str(), "--porcelain" | "-z" | "-v" | "--verbose"),
-            "git_query worktree list only supports --porcelain, -z, -v, and --verbose"
-        );
-    }
-    Ok(())
-}
-
-fn deny_git_query_output_file_args(args: &[String]) -> Result<()> {
-    for arg in args {
-        anyhow::ensure!(
-            arg != "--output" && !arg.starts_with("--output="),
-            "git_query does not support options that write output files"
-        );
-    }
-    Ok(())
-}
-
-async fn run_git(
-    root: &Path,
-    args: Vec<String>,
-    max_output_bytes: usize,
-    cancellation: &TurnCancellation,
-) -> Result<ProcessResult> {
-    run_process(
-        root,
-        "git",
-        &args,
-        root,
-        DEFAULT_COMMAND_TIMEOUT_MS,
-        max_output_bytes,
-        cancellation,
-    )
-    .await
 }
 
 async fn run_process(
@@ -3490,7 +2684,6 @@ fn display_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
     use std::time::Duration;
     use std::time::Instant;
 
@@ -3708,18 +2901,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_exec_policy_exposes_command_and_git_tools() {
+    fn workspace_exec_policy_exposes_exec_command_only() {
         let specs = tool_specs_for_policy(ToolPolicy::WorkspaceExec);
 
         assert!(specs.iter().any(|spec| spec.name() == APPLY_PATCH_TOOL));
         assert!(specs.iter().any(|spec| spec.name() == EXEC_COMMAND_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_STATUS_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_DIFF_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_LOG_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_QUERY_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_ADD_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_RESTORE_TOOL));
-        assert!(specs.iter().any(|spec| spec.name() == GIT_COMMIT_TOOL));
+        assert_eq!(specs.len(), 7);
+        assert!(!specs.iter().any(|spec| spec.name().starts_with("git_")));
         let exec_spec = specs
             .iter()
             .find(|spec| spec.name() == EXEC_COMMAND_TOOL)
@@ -3759,12 +2947,6 @@ mod tests {
                 },
             })
         );
-    }
-
-    #[test]
-    fn git_pathspecs_force_literal_matching() {
-        assert_eq!(git_pathspec("README.md").unwrap(), ":(literal)README.md");
-        assert_eq!(git_pathspec(":(top)*").unwrap(), ":(literal):(top)*");
     }
 
     #[tokio::test]
@@ -4119,218 +3301,6 @@ mod tests {
             "{}",
             execution.output
         );
-        fs::remove_dir_all(&temp).unwrap();
-    }
-
-    #[tokio::test]
-    async fn executes_dedicated_git_wrappers() {
-        let temp = std::env::temp_dir().join(format!(
-            "rust-agent-tools-git-{}-{}",
-            std::process::id(),
-            unique_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
-        run_test_git(&temp, ["init"]);
-        run_test_git(&temp, ["config", "user.email", "agent@example.com"]);
-        run_test_git(&temp, ["config", "user.name", "Rust Agent"]);
-        fs::write(temp.join("README.md"), "old\n").unwrap();
-        run_test_git(&temp, ["add", "README.md"]);
-        run_test_git(&temp, ["commit", "-m", "Initial commit"]);
-        fs::write(temp.join("README.md"), "new\n").unwrap();
-        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
-
-        let status = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_status".to_string(),
-                name: GIT_STATUS_TOOL.to_string(),
-                arguments: "{}".to_string(),
-            })
-            .await;
-        let diff = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_diff".to_string(),
-                name: GIT_DIFF_TOOL.to_string(),
-                arguments: json!({ "path": "README.md" }).to_string(),
-            })
-            .await;
-        let show = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_query_show".to_string(),
-                name: GIT_QUERY_TOOL.to_string(),
-                arguments: json!({
-                    "command": "show",
-                    "args": ["HEAD:README.md"],
-                })
-                .to_string(),
-            })
-            .await;
-        let branch_delete = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_query_branch_delete".to_string(),
-                name: GIT_QUERY_TOOL.to_string(),
-                arguments: json!({
-                    "command": "branch",
-                    "args": ["-D", "main"],
-                })
-                .to_string(),
-            })
-            .await;
-        let add = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_add".to_string(),
-                name: GIT_ADD_TOOL.to_string(),
-                arguments: json!({ "paths": ["README.md"] }).to_string(),
-            })
-            .await;
-        let staged_status = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_status_staged".to_string(),
-                name: GIT_STATUS_TOOL.to_string(),
-                arguments: "{}".to_string(),
-            })
-            .await;
-        let restore_staged = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_restore_staged".to_string(),
-                name: GIT_RESTORE_TOOL.to_string(),
-                arguments: json!({
-                    "paths": ["README.md"],
-                    "staged": true,
-                })
-                .to_string(),
-            })
-            .await;
-        let unstaged_status = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_status_unstaged".to_string(),
-                name: GIT_STATUS_TOOL.to_string(),
-                arguments: "{}".to_string(),
-            })
-            .await;
-        let commit = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_commit".to_string(),
-                name: GIT_COMMIT_TOOL.to_string(),
-                arguments: json!({
-                    "message": "Update readme",
-                    "paths": ["README.md"],
-                })
-                .to_string(),
-            })
-            .await;
-        let log = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_log".to_string(),
-                name: GIT_LOG_TOOL.to_string(),
-                arguments: json!({ "max_count": 1 }).to_string(),
-            })
-            .await;
-        fs::write(temp.join("README.md"), "discard\n").unwrap();
-        let restore_worktree = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_restore_worktree".to_string(),
-                name: GIT_RESTORE_TOOL.to_string(),
-                arguments: json!({ "paths": ["README.md"] }).to_string(),
-            })
-            .await;
-
-        assert!(status.success, "{}", status.output);
-        assert!(status.output.contains(" M README.md"), "{}", status.output);
-        assert!(diff.success, "{}", diff.output);
-        assert!(diff.output.contains("-old"), "{}", diff.output);
-        assert!(diff.output.contains("+new"), "{}", diff.output);
-        assert!(show.success, "{}", show.output);
-        assert!(show.output.contains("old"), "{}", show.output);
-        assert!(!branch_delete.success, "{}", branch_delete.output);
-        assert!(
-            branch_delete
-                .output
-                .contains("only supports --show-current"),
-            "{}",
-            branch_delete.output
-        );
-        assert!(add.success, "{}", add.output);
-        assert!(staged_status.success, "{}", staged_status.output);
-        assert!(
-            staged_status.output.contains("M  README.md"),
-            "{}",
-            staged_status.output
-        );
-        assert!(restore_staged.success, "{}", restore_staged.output);
-        assert!(unstaged_status.success, "{}", unstaged_status.output);
-        assert!(
-            unstaged_status.output.contains(" M README.md"),
-            "{}",
-            unstaged_status.output
-        );
-        assert!(commit.success, "{}", commit.output);
-        assert!(commit.output.contains("git commit"), "{}", commit.output);
-        assert!(log.success, "{}", log.output);
-        assert!(log.output.contains("Update readme"), "{}", log.output);
-        assert!(restore_worktree.success, "{}", restore_worktree.output);
-        assert_eq!(fs::read_to_string(temp.join("README.md")).unwrap(), "new\n");
-
-        fs::remove_dir_all(&temp).unwrap();
-    }
-
-    #[tokio::test]
-    async fn git_wrappers_treat_magic_pathspecs_as_literal() {
-        let temp = std::env::temp_dir().join(format!(
-            "rust-agent-tools-git-magic-{}-{}",
-            std::process::id(),
-            unique_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp);
-        fs::create_dir_all(&temp).unwrap();
-        run_test_git(&temp, ["init"]);
-        run_test_git(&temp, ["config", "user.email", "agent@example.com"]);
-        run_test_git(&temp, ["config", "user.name", "Rust Agent"]);
-        fs::write(temp.join("a.txt"), "old a\n").unwrap();
-        fs::write(temp.join("b.txt"), "old b\n").unwrap();
-        run_test_git(&temp, ["add", "a.txt", "b.txt"]);
-        run_test_git(&temp, ["commit", "-m", "Initial commit"]);
-        fs::write(temp.join("a.txt"), "new a\n").unwrap();
-        fs::write(temp.join("b.txt"), "new b\n").unwrap();
-
-        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
-        let restore = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_restore_magic".to_string(),
-                name: GIT_RESTORE_TOOL.to_string(),
-                arguments: json!({ "paths": [":(top)*"] }).to_string(),
-            })
-            .await;
-        let commit = registry
-            .execute(ModelToolCall {
-                item_id: None,
-                call_id: "call_commit_magic".to_string(),
-                name: GIT_COMMIT_TOOL.to_string(),
-                arguments: json!({
-                    "message": "Try magic pathspec",
-                    "paths": [":(top)*"],
-                })
-                .to_string(),
-            })
-            .await;
-
-        assert!(!restore.success, "{}", restore.output);
-        assert_eq!(fs::read_to_string(temp.join("a.txt")).unwrap(), "new a\n");
-        assert_eq!(fs::read_to_string(temp.join("b.txt")).unwrap(), "new b\n");
-        assert!(!commit.success, "{}", commit.output);
-
         fs::remove_dir_all(&temp).unwrap();
     }
 
@@ -5166,19 +4136,5 @@ mod tests {
         }
         patch.push_str("*** End Patch\n");
         patch
-    }
-
-    fn run_test_git<const N: usize>(cwd: &Path, args: [&str; N]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("git should be available for git wrapper tests");
-        assert!(
-            output.status.success(),
-            "git failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }
