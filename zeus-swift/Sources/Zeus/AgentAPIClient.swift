@@ -42,13 +42,17 @@ struct AgentAPIClient: AgentClientProtocol {
     func streamTurn(
         sessionID: UInt64,
         message: String,
+        reasoningEffort: String,
         onEvent: @escaping (AgentServerEvent) async -> Void
     ) async throws {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/turns:stream")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("text/event-stream", forHTTPHeaderField: "accept")
-        request.httpBody = try JSONEncoder().encode(TurnRequest(message: message))
+        request.httpBody = try JSONEncoder().encode(TurnRequest(
+            message: message,
+            reasoningEffort: reasoningEffort
+        ))
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         try validate(response: response)
@@ -189,10 +193,14 @@ enum AgentClientError: LocalizedError {
 struct ModelsResponse: Decodable {
     let defaultModel: String
     let allowedModels: [String]
+    let defaultReasoningEffort: String
+    let reasoningEfforts: [String]
 
     enum CodingKeys: String, CodingKey {
         case defaultModel = "default_model"
         case allowedModels = "allowed_models"
+        case defaultReasoningEffort = "default_reasoning_effort"
+        case reasoningEfforts = "reasoning_efforts"
     }
 }
 
@@ -216,4 +224,10 @@ private struct SetModelRequest: Encodable {
 
 struct TurnRequest: Encodable {
     let message: String
+    let reasoningEffort: String
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case reasoningEffort = "reasoning_effort"
+    }
 }

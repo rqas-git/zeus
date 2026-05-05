@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private enum TerminalLayout {
@@ -5,8 +6,23 @@ private enum TerminalLayout {
     static let markerTextSpacing: CGFloat = 8
 }
 
+private enum FooterMenuID {
+    case model
+    case effort
+}
+
+private enum KeyCode {
+    static let returnKey: UInt16 = 36
+    static let escape: UInt16 = 53
+    static let keypadEnter: UInt16 = 76
+    static let downArrow: UInt16 = 125
+    static let upArrow: UInt16 = 126
+}
+
 struct ChatWindow: View {
     @ObservedObject var viewModel: ChatViewModel
+    @State private var activeFooterMenu: FooterMenuID?
+    @State private var modelMenuHighlightedOption: String?
 
     var body: some View {
         ZStack {
@@ -31,10 +47,16 @@ struct ChatWindow: View {
                     selectedModel: viewModel.selectedModel,
                     isModelMenuEnabled: viewModel.canChangeModel,
                     effort: viewModel.effort,
+                    effortOptions: viewModel.effortOptions,
+                    isEffortMenuEnabled: viewModel.canChangeEffort,
                     permissions: viewModel.permissions,
                     tokenUsage: viewModel.tokenUsage,
+                    activeMenu: $activeFooterMenu,
+                    modelHighlightedOption: modelMenuHighlightedOption,
                     modelTitle: { viewModel.displayModel($0) },
-                    onSelectModel: viewModel.selectModel
+                    onSelectModel: viewModel.selectModel,
+                    onSelectEffort: viewModel.selectEffort,
+                    onHighlightModel: { modelMenuHighlightedOption = $0 }
                 )
                 .padding(.top, 11)
             }
@@ -44,6 +66,7 @@ struct ChatWindow: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowConfigurator())
+        .background(LocalEventMonitor(onEvent: handleLocalEvent(_:)))
         .font(.system(size: 12, weight: .regular, design: .monospaced))
         .foregroundStyle(TerminalPalette.primaryText)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
@@ -52,6 +75,85 @@ struct ChatWindow: View {
         .onDisappear {
             viewModel.shutdown()
         }
+    }
+
+    private func handleLocalEvent(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .keyDown:
+            return handleKeyDown(event)
+        case .leftMouseUp, .rightMouseUp:
+            if activeFooterMenu != nil {
+                DispatchQueue.main.async {
+                    activeFooterMenu = nil
+                }
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if isModelShortcut(event) {
+            openModelMenu()
+            return true
+        }
+
+        guard activeFooterMenu != nil else { return false }
+
+        switch event.keyCode {
+        case KeyCode.escape:
+            activeFooterMenu = nil
+            return true
+        case KeyCode.downArrow:
+            guard activeFooterMenu == .model else { return false }
+            moveModelHighlight(by: 1)
+            return true
+        case KeyCode.upArrow:
+            guard activeFooterMenu == .model else { return false }
+            moveModelHighlight(by: -1)
+            return true
+        case KeyCode.returnKey, KeyCode.keypadEnter:
+            guard activeFooterMenu == .model,
+                  let model = modelMenuHighlightedOption ?? viewModel.modelOptions.first else {
+                return false
+            }
+            activeFooterMenu = nil
+            viewModel.selectModel(model)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isModelShortcut(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let disallowed: NSEvent.ModifierFlags = [.control, .option, .shift]
+        return flags.contains(.command)
+            && flags.intersection(disallowed).isEmpty
+            && event.charactersIgnoringModifiers?.lowercased() == "m"
+    }
+
+    private func openModelMenu() {
+        guard viewModel.canChangeModel else { return }
+        let options = modelMenuOptions
+        modelMenuHighlightedOption = options.contains(viewModel.selectedModel)
+            ? viewModel.selectedModel
+            : options.first
+        activeFooterMenu = .model
+    }
+
+    private func moveModelHighlight(by offset: Int) {
+        let options = modelMenuOptions
+        guard !options.isEmpty else { return }
+        let current = modelMenuHighlightedOption ?? viewModel.selectedModel
+        let currentIndex = options.firstIndex(of: current) ?? 0
+        let nextIndex = (currentIndex + offset + options.count) % options.count
+        modelMenuHighlightedOption = options[nextIndex]
+    }
+
+    private var modelMenuOptions: [String] {
+        viewModel.modelOptions.isEmpty ? [viewModel.selectedModel] : viewModel.modelOptions
     }
 }
 
@@ -162,6 +264,57 @@ private struct TerminalMenuButtonStyle: ButtonStyle {
                 Rectangle()
                     .fill(configuration.isPressed ? TerminalPalette.cyan.opacity(0.12) : .clear)
             )
+    }
+}
+
+private struct LocalEventMonitor: NSViewRepresentable {
+    let onEvent: (NSEvent) -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onEvent: onEvent)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.start()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onEvent = onEvent
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.stop()
+    }
+
+    final class Coordinator {
+        var onEvent: (NSEvent) -> Bool
+        private var monitor: Any?
+
+        init(onEvent: @escaping (NSEvent) -> Bool) {
+            self.onEvent = onEvent
+        }
+
+        deinit {
+            stop()
+        }
+
+        func start() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.keyDown, .leftMouseUp, .rightMouseUp]
+            ) { [weak self] event in
+                guard let self else { return event }
+                return self.onEvent(event) ? nil : event
+            }
+        }
+
+        func stop() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
     }
 }
 
@@ -409,10 +562,16 @@ private struct FooterBar: View {
     let selectedModel: String
     let isModelMenuEnabled: Bool
     let effort: String
+    let effortOptions: [String]
+    let isEffortMenuEnabled: Bool
     let permissions: String
     let tokenUsage: String
+    @Binding var activeMenu: FooterMenuID?
+    let modelHighlightedOption: String?
     let modelTitle: (String) -> String
     let onSelectModel: (String) -> Void
+    let onSelectEffort: (String) -> Void
+    let onHighlightModel: (String) -> Void
     private let itemSpacing: CGFloat = 22
     private let pathSpacing: CGFloat = 32
 
@@ -421,15 +580,34 @@ private struct FooterBar: View {
             HStack(spacing: itemSpacing) {
                 footerText(workspace.name, color: TerminalPalette.dimText)
                 footerText(workspace.branch, color: TerminalPalette.green)
-                ModelFooterMenu(
+                FooterMenu(
+                    id: .model,
                     title: model,
                     options: modelOptions,
-                    selectedModel: selectedModel,
+                    selectedOption: selectedModel,
+                    highlightedOption: modelHighlightedOption,
                     isEnabled: isModelMenuEnabled,
-                    modelTitle: modelTitle,
-                    onSelect: onSelectModel
+                    activeMenu: $activeMenu,
+                    optionTitle: modelTitle,
+                    menuWidth: 178,
+                    help: "Model",
+                    onSelect: onSelectModel,
+                    onHighlight: onHighlightModel
                 )
-                footerText(effort, color: TerminalPalette.primaryText)
+                FooterMenu(
+                    id: .effort,
+                    title: effort,
+                    options: effortOptions,
+                    selectedOption: effort,
+                    highlightedOption: nil,
+                    isEnabled: isEffortMenuEnabled,
+                    activeMenu: $activeMenu,
+                    optionTitle: { $0 },
+                    menuWidth: 88,
+                    help: "Reasoning Effort",
+                    onSelect: onSelectEffort,
+                    onHighlight: { _ in }
+                )
                 footerText(permissions, color: TerminalPalette.primaryText)
                 footerText(tokenUsage, color: TerminalPalette.dimText)
             }
@@ -454,17 +632,26 @@ private struct FooterBar: View {
     }
 }
 
-private struct ModelFooterMenu: View {
+private struct FooterMenu: View {
+    let id: FooterMenuID
     let title: String
     let options: [String]
-    let selectedModel: String
+    let selectedOption: String
+    let highlightedOption: String?
     let isEnabled: Bool
-    let modelTitle: (String) -> String
+    @Binding var activeMenu: FooterMenuID?
+    let optionTitle: (String) -> String
+    let menuWidth: CGFloat
+    let help: String
     let onSelect: (String) -> Void
-    @State private var isOpen = false
+    let onHighlight: (String) -> Void
 
     private var menuOptions: [String] {
-        options.isEmpty ? [selectedModel] : options
+        options.isEmpty ? [selectedOption] : options
+    }
+
+    private var isOpen: Bool {
+        activeMenu == id
     }
 
     var body: some View {
@@ -476,18 +663,28 @@ private struct ModelFooterMenu: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 guard isEnabled else { return }
-                isOpen.toggle()
+                if isOpen {
+                    activeMenu = nil
+                } else {
+                    DispatchQueue.main.async {
+                        activeMenu = id
+                    }
+                }
             }
-            .help("Model")
+            .help(help)
             .overlay(alignment: .bottom) {
                 if isOpen {
-                    ModelDropdown(
+                    FooterDropdown(
                         options: menuOptions,
-                        selectedModel: selectedModel,
-                        modelTitle: modelTitle
-                    ) { model in
-                        isOpen = false
-                        onSelect(model)
+                        selectedOption: selectedOption,
+                        highlightedOption: highlightedOption,
+                        optionTitle: optionTitle,
+                        menuWidth: menuWidth
+                    ) { option in
+                        activeMenu = nil
+                        onSelect(option)
+                    } onHighlight: { option in
+                        onHighlight(option)
                     }
                     .offset(y: -23)
                     .zIndex(30)
@@ -495,55 +692,30 @@ private struct ModelFooterMenu: View {
             }
             .onChange(of: isEnabled) { newValue in
                 if !newValue {
-                    isOpen = false
+                    activeMenu = nil
                 }
             }
             .zIndex(isOpen ? 30 : 0)
     }
 }
 
-private struct ModelDropdown: View {
+private struct FooterDropdown: View {
     let options: [String]
-    let selectedModel: String
-    let modelTitle: (String) -> String
+    let selectedOption: String
+    let highlightedOption: String?
+    let optionTitle: (String) -> String
+    let menuWidth: CGFloat
     let onSelect: (String) -> Void
+    let onHighlight: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(options, id: \.self) { option in
-                    Button {
-                        onSelect(option)
-                    } label: {
-                        HStack(spacing: 7) {
-                            if option == selectedModel {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(TerminalPalette.cyan)
-                                    .frame(width: 12)
-                            } else {
-                                Color.clear
-                                    .frame(width: 12, height: 10)
-                            }
-
-                            Text(modelTitle(option))
-                                .foregroundStyle(
-                                    option == selectedModel
-                                        ? TerminalPalette.cyan
-                                        : TerminalPalette.primaryText
-                                )
-                                .lineLimit(1)
-
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(TerminalMenuButtonStyle())
+                    dropdownButton(for: option)
                 }
             }
-            .frame(width: 178)
+            .frame(width: menuWidth)
             .background(Rectangle().fill(TerminalPalette.background))
             .overlay(
                 Rectangle()
@@ -559,5 +731,48 @@ private struct ModelDropdown: View {
         }
         .font(.system(size: 11, weight: .regular, design: .monospaced))
         .fixedSize(horizontal: true, vertical: true)
+    }
+
+    private func dropdownButton(for option: String) -> some View {
+        let isSelected = option == selectedOption
+        let isHighlighted = option == highlightedOption
+
+        return Button {
+            onSelect(option)
+        } label: {
+            HStack(spacing: 7) {
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(TerminalPalette.cyan)
+                        .frame(width: 12)
+                } else {
+                    Color.clear
+                        .frame(width: 12, height: 10)
+                }
+
+                Text(optionTitle(option))
+                    .foregroundStyle(
+                        isSelected || isHighlighted
+                            ? TerminalPalette.cyan
+                            : TerminalPalette.primaryText
+                    )
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(
+                Rectangle()
+                    .fill(isHighlighted ? TerminalPalette.cyan.opacity(0.12) : .clear)
+            )
+        }
+        .buttonStyle(TerminalMenuButtonStyle())
+        .onHover { isHovering in
+            guard isHovering else { return }
+            onHighlight(option)
+        }
     }
 }

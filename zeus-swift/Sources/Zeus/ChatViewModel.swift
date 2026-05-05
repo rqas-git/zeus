@@ -9,6 +9,7 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var selectedModel = "gpt-5.5"
     @Published private(set) var modelOptions = ["gpt-5.5"]
     @Published private(set) var effort = "medium"
+    @Published private(set) var effortOptions = ["medium"]
     @Published private(set) var permissions = "allow"
     @Published private(set) var tokenUsage = "0 / 272k tokens"
     @Published private(set) var isReady = false
@@ -19,6 +20,10 @@ final class ChatViewModel: ObservableObject {
     let workspace: WorkspaceMetadata
 
     var canChangeModel: Bool {
+        isReady && !isLoggingIn
+    }
+
+    var canChangeEffort: Bool {
         isReady && !isLoggingIn
     }
 
@@ -117,7 +122,12 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                 try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
-                try await client.streamTurn(sessionID: sessionID, message: message) { event in
+                let reasoningEffort = effort
+                try await client.streamTurn(
+                    sessionID: sessionID,
+                    message: message,
+                    reasoningEffort: reasoningEffort
+                ) { event in
                     if case let .statusChanged(_, status) = event, status == "running" {
                         try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
                     }
@@ -169,6 +179,13 @@ final class ChatViewModel: ObservableObject {
         guard rawModel != selectedModel else { return }
         guard canChangeModel else { return }
         applySelectedModel(rawModel)
+    }
+
+    func selectEffort(_ rawEffort: String) {
+        guard rawEffort != effort else { return }
+        guard canChangeEffort else { return }
+        guard effortOptions.contains(rawEffort) else { return }
+        effort = rawEffort
     }
 
     private func startLogin() {
@@ -401,6 +418,17 @@ final class ChatViewModel: ObservableObject {
     private func applyModels(_ models: ModelsResponse) {
         modelOptions = models.allowedModels
         applySelectedModel(models.defaultModel)
+        applyReasoningEfforts(models.reasoningEfforts, defaultEffort: models.defaultReasoningEffort)
+    }
+
+    private func applyReasoningEfforts(_ efforts: [String], defaultEffort: String) {
+        effortOptions = efforts.isEmpty ? [defaultEffort] : efforts
+        if !effortOptions.contains(defaultEffort) {
+            effortOptions.append(defaultEffort)
+        }
+        if !effortOptions.contains(effort) {
+            effort = defaultEffort
+        }
     }
 
     private func applySelectedModel(_ rawModel: String) {

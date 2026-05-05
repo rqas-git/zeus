@@ -8,6 +8,7 @@ protocol AgentClientProtocol {
     func streamTurn(
         sessionID: UInt64,
         message: String,
+        reasoningEffort: String,
         onEvent: @escaping (AgentServerEvent) async -> Void
     ) async throws
 }
