@@ -268,12 +268,12 @@ private struct TerminalLineView: View {
 
 private struct ToolCallLine: View {
     let toolCall: ToolCallTranscript
+    private let toolCellChromeColor = Color.clear
 
     var body: some View {
         HStack(alignment: .center, spacing: 4) {
             toolCell(
                 width: 24,
-                borderColor: iconColor.opacity(0.42),
                 horizontalPadding: 0,
                 alignment: .center
             ) {
@@ -283,12 +283,12 @@ private struct ToolCallLine: View {
                     .frame(width: 14, height: 13, alignment: .center)
             }
 
-            toolCell(width: 76, borderColor: statusColor.opacity(0.52)) {
+            toolCell(width: 76) {
                 Text(statusText)
                     .foregroundStyle(statusColor)
             }
 
-            toolCell(width: 118, borderColor: TerminalPalette.cyan.opacity(0.42)) {
+            toolCell(width: 118) {
                 Text(toolCall.name)
                     .foregroundStyle(TerminalPalette.cyan)
                     .fontWeight(.semibold)
@@ -297,7 +297,7 @@ private struct ToolCallLine: View {
             }
 
             if let target = toolCall.target, !target.isEmpty {
-                toolCell(borderColor: TerminalPalette.dimText.opacity(0.38)) {
+                toolCell {
                     Text(target)
                         .foregroundStyle(TerminalPalette.primaryText)
                         .lineLimit(1)
@@ -311,7 +311,6 @@ private struct ToolCallLine: View {
 
     private func toolCell<Content: View>(
         width: CGFloat? = nil,
-        borderColor: Color,
         horizontalPadding: CGFloat = 7,
         alignment: Alignment = .leading,
         @ViewBuilder content: () -> Content
@@ -322,32 +321,27 @@ private struct ToolCallLine: View {
                     content()
                         .padding(.horizontal, horizontalPadding)
                         .frame(width: width, alignment: alignment)
-                        .frame(minHeight: 23, alignment: .center),
-                    borderColor: borderColor
+                        .frame(minHeight: 23, alignment: .center)
                 )
             } else {
                 toolCellStyle(
                     content()
                         .padding(.horizontal, horizontalPadding)
-                        .frame(minHeight: 23, alignment: .center),
-                    borderColor: borderColor
+                        .frame(minHeight: 23, alignment: .center)
                 )
             }
         }
     }
 
-    private func toolCellStyle<Content: View>(
-        _ content: Content,
-        borderColor: Color
-    ) -> some View {
+    private func toolCellStyle<Content: View>(_ content: Content) -> some View {
         content
             .background(
                 Rectangle()
-                    .fill(TerminalPalette.cyan.opacity(0.026))
+                    .fill(toolCellChromeColor)
             )
             .overlay(
                 Rectangle()
-                    .stroke(borderColor, lineWidth: 1)
+                    .stroke(toolCellChromeColor, lineWidth: 1)
             )
     }
 
