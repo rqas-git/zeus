@@ -23,7 +23,8 @@ final class RustAgentServer: AgentServerProtocol {
         for candidate in candidates {
             let client = AgentAPIClient(baseURL: candidate.baseURL, token: token)
             if await client.healthz() {
-                if (try? await client.models()) != nil {
+                if (try? await client.models()) != nil,
+                   (try? await client.permissions()) != nil {
                     reusableClient = reusableClient ?? client
                     failures.append("\(candidate.httpAddress) already has a compatible server; trying to start a fresh server first")
                 } else {
@@ -86,7 +87,9 @@ final class RustAgentServer: AgentServerProtocol {
 
     private func waitForReady(_ client: AgentAPIClient) async throws {
         for _ in 0..<readyPolls {
-            if await client.healthz(), (try? await client.models()) != nil {
+            if await client.healthz(),
+               (try? await client.models()) != nil,
+               (try? await client.permissions()) != nil {
                 return
             }
 

@@ -10,12 +10,19 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var modelOptions = ["gpt-5.5"]
     @Published private(set) var effort = "medium"
     @Published private(set) var effortOptions = ["medium"]
-    @Published private(set) var permissions = "allow"
+    @Published private(set) var permissions = "read"
+    @Published private(set) var selectedPermission = "read-only"
+    @Published private(set) var permissionOptions = [
+        "read-only",
+        "workspace-write",
+        "workspace-exec"
+    ]
     @Published private(set) var tokenUsage = "0 / 272k tokens"
     @Published private(set) var isReady = false
     @Published private(set) var isSending = false
     @Published private(set) var isLoggingIn = false
     @Published private(set) var isSelectingModel = false
+    @Published private(set) var isSelectingPermissions = false
 
     let workspace: WorkspaceMetadata
 
@@ -24,6 +31,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     var canChangeEffort: Bool {
+        isReady && !isLoggingIn
+    }
+
+    var canChangePermissions: Bool {
         isReady && !isLoggingIn
     }
 
@@ -40,6 +51,7 @@ final class ChatViewModel: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
     private var sessionModel = "gpt-5.5"
+    private var sessionPermission = "read-only"
 
     init(
         server: any AgentServerProtocol = RustAgentServer(),
@@ -72,10 +84,14 @@ final class ChatViewModel: ObservableObject {
             if let models = try? await client.models() {
                 applyModels(models)
             }
+            if let permissions = try? await client.permissions() {
+                applyPermissions(permissions)
+            }
 
             let session = try await client.createSession()
             sessionID = session.sessionID
             applySessionModel(session.model)
+            applySessionPermissions(session.toolPolicy ?? selectedPermission)
             isReady = true
             append(kind: .status, text: "ready")
             await refreshAuthStatus()
@@ -122,6 +138,7 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                 try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
+                try await applySelectedPermissionsForNextTurn(client: client, sessionID: sessionID)
                 let reasoningEffort = effort
                 try await client.streamTurn(
                     sessionID: sessionID,
@@ -186,6 +203,13 @@ final class ChatViewModel: ObservableObject {
         guard canChangeEffort else { return }
         guard effortOptions.contains(rawEffort) else { return }
         effort = rawEffort
+    }
+
+    func selectPermissions(_ rawPermission: String) {
+        guard rawPermission != selectedPermission else { return }
+        guard canChangePermissions else { return }
+        guard permissionOptions.contains(rawPermission) else { return }
+        applySelectedPermissions(rawPermission)
     }
 
     private func startLogin() {
@@ -412,6 +436,7 @@ final class ChatViewModel: ObservableObject {
         let session = try await client.createSession()
         sessionID = session.sessionID
         applySessionModel(session.model)
+        applySessionPermissions(session.toolPolicy ?? selectedPermission)
         append(kind: .status, text: "new session ready")
     }
 
@@ -419,6 +444,18 @@ final class ChatViewModel: ObservableObject {
         modelOptions = models.allowedModels
         applySelectedModel(models.defaultModel)
         applyReasoningEfforts(models.reasoningEfforts, defaultEffort: models.defaultReasoningEffort)
+    }
+
+    private func applyPermissions(_ permissions: PermissionsResponse) {
+        permissionOptions = permissions.allowedToolPolicies.isEmpty
+            ? [permissions.defaultToolPolicy]
+            : permissions.allowedToolPolicies
+        if !permissionOptions.contains(permissions.defaultToolPolicy) {
+            permissionOptions.append(permissions.defaultToolPolicy)
+        }
+        if !permissionOptions.contains(selectedPermission) {
+            applySelectedPermissions(permissions.defaultToolPolicy)
+        }
     }
 
     private func applyReasoningEfforts(_ efforts: [String], defaultEffort: String) {
@@ -448,6 +485,23 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func applySelectedPermissions(_ rawPermission: String) {
+        selectedPermission = rawPermission
+        permissions = displayPermission(rawPermission)
+        if !permissionOptions.contains(rawPermission) {
+            permissionOptions.append(rawPermission)
+        }
+    }
+
+    private func applySessionPermissions(_ rawPermission: String, selectedTarget: String? = nil) {
+        sessionPermission = rawPermission
+        if selectedTarget == nil || selectedPermission == selectedTarget {
+            applySelectedPermissions(rawPermission)
+        } else if !permissionOptions.contains(rawPermission) {
+            permissionOptions.append(rawPermission)
+        }
+    }
+
     private func applySelectedModelForNextTurn(
         client: any AgentClientProtocol,
         sessionID: UInt64
@@ -464,6 +518,25 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func applySelectedPermissionsForNextTurn(
+        client: any AgentClientProtocol,
+        sessionID: UInt64
+    ) async throws {
+        guard selectedPermission != sessionPermission else { return }
+
+        isSelectingPermissions = true
+        defer { isSelectingPermissions = false }
+
+        while selectedPermission != sessionPermission {
+            let target = selectedPermission
+            let response = try await client.setSessionPermissions(
+                sessionID: sessionID,
+                toolPolicy: target
+            )
+            applySessionPermissions(response.toolPolicy, selectedTarget: target)
+        }
+    }
+
     private func updateTokenUsage(_ usage: TokenUsagePayload?) {
         guard let usage else { return }
         if let total = usage.totalTokens {
@@ -475,6 +548,19 @@ final class ChatViewModel: ObservableObject {
 
     func displayModel(_ raw: String) -> String {
         raw.replacingOccurrences(of: "-", with: " ")
+    }
+
+    func displayPermission(_ raw: String) -> String {
+        switch raw {
+        case "workspace-exec":
+            return "bash"
+        case "workspace-write":
+            return "edit"
+        case "read-only":
+            return "read"
+        default:
+            return raw
+        }
     }
 
     private func compactNumber(_ value: UInt64) -> String {

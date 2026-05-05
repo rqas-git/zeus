@@ -3,8 +3,13 @@ import ZeusCore
 
 protocol AgentClientProtocol {
     func models() async throws -> ModelsResponse
+    func permissions() async throws -> PermissionsResponse
     func createSession() async throws -> CreateSessionResponse
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse
+    func setSessionPermissions(
+        sessionID: UInt64,
+        toolPolicy: String
+    ) async throws -> SessionPermissionsResponse
     func streamTurn(
         sessionID: UInt64,
         message: String,

@@ -9,6 +9,7 @@ private enum TerminalLayout {
 private enum FooterMenuID {
     case model
     case effort
+    case permissions
 }
 
 private enum KeyCode {
@@ -24,6 +25,7 @@ struct ChatWindow: View {
     @State private var activeFooterMenu: FooterMenuID?
     @State private var modelMenuHighlightedOption: String?
     @State private var effortMenuHighlightedOption: String?
+    @State private var permissionsMenuHighlightedOption: String?
 
     var body: some View {
         ZStack {
@@ -51,15 +53,22 @@ struct ChatWindow: View {
                     effortOptions: viewModel.effortOptions,
                     isEffortMenuEnabled: viewModel.canChangeEffort,
                     permissions: viewModel.permissions,
+                    permissionOptions: viewModel.permissionOptions,
+                    selectedPermission: viewModel.selectedPermission,
+                    isPermissionsMenuEnabled: viewModel.canChangePermissions,
                     tokenUsage: viewModel.tokenUsage,
                     activeMenu: $activeFooterMenu,
                     modelHighlightedOption: modelMenuHighlightedOption,
                     effortHighlightedOption: effortMenuHighlightedOption,
+                    permissionsHighlightedOption: permissionsMenuHighlightedOption,
                     modelTitle: { viewModel.displayModel($0) },
+                    permissionTitle: { viewModel.displayPermission($0) },
                     onSelectModel: viewModel.selectModel,
                     onSelectEffort: viewModel.selectEffort,
+                    onSelectPermissions: viewModel.selectPermissions,
                     onHighlightModel: { modelMenuHighlightedOption = $0 },
-                    onHighlightEffort: { effortMenuHighlightedOption = $0 }
+                    onHighlightEffort: { effortMenuHighlightedOption = $0 },
+                    onHighlightPermissions: { permissionsMenuHighlightedOption = $0 }
                 )
                 .padding(.top, 11)
             }
@@ -165,6 +174,8 @@ struct ChatWindow: View {
             moveModelHighlight(by: offset)
         case .effort:
             moveEffortHighlight(by: offset)
+        case .permissions:
+            movePermissionsHighlight(by: offset)
         case nil:
             break
         }
@@ -186,6 +197,13 @@ struct ChatWindow: View {
             activeFooterMenu = nil
             viewModel.selectEffort(effort)
             return true
+        case .permissions:
+            guard let permissions = permissionsMenuHighlightedOption ?? permissionsMenuOptions.first else {
+                return false
+            }
+            activeFooterMenu = nil
+            viewModel.selectPermissions(permissions)
+            return true
         case nil:
             return false
         }
@@ -203,6 +221,16 @@ struct ChatWindow: View {
         effortMenuHighlightedOption = nextMenuOption(in: options, current: current, offset: offset)
     }
 
+    private func movePermissionsHighlight(by offset: Int) {
+        let options = permissionsMenuOptions
+        let current = permissionsMenuHighlightedOption ?? viewModel.selectedPermission
+        permissionsMenuHighlightedOption = nextMenuOption(
+            in: options,
+            current: current,
+            offset: offset
+        )
+    }
+
     private func nextMenuOption(in options: [String], current: String, offset: Int) -> String? {
         guard !options.isEmpty else { return nil }
         let currentIndex = options.firstIndex(of: current) ?? 0
@@ -216,6 +244,10 @@ struct ChatWindow: View {
 
     private var effortMenuOptions: [String] {
         viewModel.effortOptions.isEmpty ? [viewModel.effort] : viewModel.effortOptions
+    }
+
+    private var permissionsMenuOptions: [String] {
+        viewModel.permissionOptions.isEmpty ? [viewModel.selectedPermission] : viewModel.permissionOptions
     }
 }
 
@@ -627,15 +659,22 @@ private struct FooterBar: View {
     let effortOptions: [String]
     let isEffortMenuEnabled: Bool
     let permissions: String
+    let permissionOptions: [String]
+    let selectedPermission: String
+    let isPermissionsMenuEnabled: Bool
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
     let modelHighlightedOption: String?
     let effortHighlightedOption: String?
+    let permissionsHighlightedOption: String?
     let modelTitle: (String) -> String
+    let permissionTitle: (String) -> String
     let onSelectModel: (String) -> Void
     let onSelectEffort: (String) -> Void
+    let onSelectPermissions: (String) -> Void
     let onHighlightModel: (String) -> Void
     let onHighlightEffort: (String) -> Void
+    let onHighlightPermissions: (String) -> Void
     private let itemSpacing: CGFloat = 22
     private let pathSpacing: CGFloat = 32
 
@@ -672,7 +711,20 @@ private struct FooterBar: View {
                     onSelect: onSelectEffort,
                     onHighlight: onHighlightEffort
                 )
-                footerText(permissions, color: TerminalPalette.primaryText)
+                FooterMenu(
+                    id: .permissions,
+                    title: permissions,
+                    options: permissionOptions,
+                    selectedOption: selectedPermission,
+                    highlightedOption: permissionsHighlightedOption,
+                    isEnabled: isPermissionsMenuEnabled,
+                    activeMenu: $activeMenu,
+                    optionTitle: permissionTitle,
+                    menuWidth: 88,
+                    help: "Permissions",
+                    onSelect: onSelectPermissions,
+                    onHighlight: onHighlightPermissions
+                )
                 footerText(tokenUsage, color: TerminalPalette.dimText)
             }
             .layoutPriority(1)

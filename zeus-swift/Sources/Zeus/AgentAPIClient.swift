@@ -23,6 +23,13 @@ struct AgentAPIClient: AgentClientProtocol {
         return try JSONDecoder().decode(ModelsResponse.self, from: data)
     }
 
+    func permissions() async throws -> PermissionsResponse {
+        var request = authenticatedRequest(path: "permissions")
+        request.httpMethod = "GET"
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(PermissionsResponse.self, from: data)
+    }
+
     func createSession() async throws -> CreateSessionResponse {
         var request = authenticatedRequest(path: "sessions")
         request.httpMethod = "POST"
@@ -37,6 +44,18 @@ struct AgentAPIClient: AgentClientProtocol {
         request.httpBody = try JSONEncoder().encode(SetModelRequest(model: model))
         let data = try await data(for: request)
         return try JSONDecoder().decode(SessionModelResponse.self, from: data)
+    }
+
+    func setSessionPermissions(
+        sessionID: UInt64,
+        toolPolicy: String
+    ) async throws -> SessionPermissionsResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/permissions")
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(SetPermissionsRequest(toolPolicy: toolPolicy))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(SessionPermissionsResponse.self, from: data)
     }
 
     func streamTurn(
@@ -204,13 +223,25 @@ struct ModelsResponse: Decodable {
     }
 }
 
+struct PermissionsResponse: Decodable {
+    let defaultToolPolicy: String
+    let allowedToolPolicies: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case defaultToolPolicy = "default_tool_policy"
+        case allowedToolPolicies = "allowed_tool_policies"
+    }
+}
+
 struct CreateSessionResponse: Decodable {
     let sessionID: UInt64
     let model: String
+    let toolPolicy: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
         case model
+        case toolPolicy = "tool_policy"
     }
 }
 
@@ -218,8 +249,24 @@ struct SessionModelResponse: Decodable {
     let model: String
 }
 
+struct SessionPermissionsResponse: Decodable {
+    let toolPolicy: String
+
+    enum CodingKeys: String, CodingKey {
+        case toolPolicy = "tool_policy"
+    }
+}
+
 private struct SetModelRequest: Encodable {
     let model: String
+}
+
+private struct SetPermissionsRequest: Encodable {
+    let toolPolicy: String
+
+    enum CodingKeys: String, CodingKey {
+        case toolPolicy = "tool_policy"
+    }
 }
 
 struct TurnRequest: Encodable {
