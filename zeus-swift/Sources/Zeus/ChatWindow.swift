@@ -23,6 +23,7 @@ struct ChatWindow: View {
     @ObservedObject var viewModel: ChatViewModel
     @State private var activeFooterMenu: FooterMenuID?
     @State private var modelMenuHighlightedOption: String?
+    @State private var effortMenuHighlightedOption: String?
 
     var body: some View {
         ZStack {
@@ -53,10 +54,12 @@ struct ChatWindow: View {
                     tokenUsage: viewModel.tokenUsage,
                     activeMenu: $activeFooterMenu,
                     modelHighlightedOption: modelMenuHighlightedOption,
+                    effortHighlightedOption: effortMenuHighlightedOption,
                     modelTitle: { viewModel.displayModel($0) },
                     onSelectModel: viewModel.selectModel,
                     onSelectEffort: viewModel.selectEffort,
-                    onHighlightModel: { modelMenuHighlightedOption = $0 }
+                    onHighlightModel: { modelMenuHighlightedOption = $0 },
+                    onHighlightEffort: { effortMenuHighlightedOption = $0 }
                 )
                 .padding(.top, 11)
             }
@@ -98,6 +101,10 @@ struct ChatWindow: View {
             openModelMenu()
             return true
         }
+        if isEffortShortcut(event) {
+            openEffortMenu()
+            return true
+        }
 
         guard activeFooterMenu != nil else { return false }
 
@@ -106,32 +113,32 @@ struct ChatWindow: View {
             activeFooterMenu = nil
             return true
         case KeyCode.downArrow:
-            guard activeFooterMenu == .model else { return false }
-            moveModelHighlight(by: 1)
+            moveActiveMenuHighlight(by: 1)
             return true
         case KeyCode.upArrow:
-            guard activeFooterMenu == .model else { return false }
-            moveModelHighlight(by: -1)
+            moveActiveMenuHighlight(by: -1)
             return true
         case KeyCode.returnKey, KeyCode.keypadEnter:
-            guard activeFooterMenu == .model,
-                  let model = modelMenuHighlightedOption ?? viewModel.modelOptions.first else {
-                return false
-            }
-            activeFooterMenu = nil
-            viewModel.selectModel(model)
-            return true
+            return selectActiveMenuOption()
         default:
             return false
         }
     }
 
     private func isModelShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "m")
+    }
+
+    private func isEffortShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "e")
+    }
+
+    private func isCommandShortcut(_ event: NSEvent, key: String) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let disallowed: NSEvent.ModifierFlags = [.control, .option, .shift]
         return flags.contains(.command)
             && flags.intersection(disallowed).isEmpty
-            && event.charactersIgnoringModifiers?.lowercased() == "m"
+            && event.charactersIgnoringModifiers?.lowercased() == key
     }
 
     private func openModelMenu() {
@@ -143,17 +150,72 @@ struct ChatWindow: View {
         activeFooterMenu = .model
     }
 
+    private func openEffortMenu() {
+        guard viewModel.canChangeEffort else { return }
+        let options = effortMenuOptions
+        effortMenuHighlightedOption = options.contains(viewModel.effort)
+            ? viewModel.effort
+            : options.first
+        activeFooterMenu = .effort
+    }
+
+    private func moveActiveMenuHighlight(by offset: Int) {
+        switch activeFooterMenu {
+        case .model:
+            moveModelHighlight(by: offset)
+        case .effort:
+            moveEffortHighlight(by: offset)
+        case nil:
+            break
+        }
+    }
+
+    private func selectActiveMenuOption() -> Bool {
+        switch activeFooterMenu {
+        case .model:
+            guard let model = modelMenuHighlightedOption ?? modelMenuOptions.first else {
+                return false
+            }
+            activeFooterMenu = nil
+            viewModel.selectModel(model)
+            return true
+        case .effort:
+            guard let effort = effortMenuHighlightedOption ?? effortMenuOptions.first else {
+                return false
+            }
+            activeFooterMenu = nil
+            viewModel.selectEffort(effort)
+            return true
+        case nil:
+            return false
+        }
+    }
+
     private func moveModelHighlight(by offset: Int) {
         let options = modelMenuOptions
-        guard !options.isEmpty else { return }
         let current = modelMenuHighlightedOption ?? viewModel.selectedModel
+        modelMenuHighlightedOption = nextMenuOption(in: options, current: current, offset: offset)
+    }
+
+    private func moveEffortHighlight(by offset: Int) {
+        let options = effortMenuOptions
+        let current = effortMenuHighlightedOption ?? viewModel.effort
+        effortMenuHighlightedOption = nextMenuOption(in: options, current: current, offset: offset)
+    }
+
+    private func nextMenuOption(in options: [String], current: String, offset: Int) -> String? {
+        guard !options.isEmpty else { return nil }
         let currentIndex = options.firstIndex(of: current) ?? 0
         let nextIndex = (currentIndex + offset + options.count) % options.count
-        modelMenuHighlightedOption = options[nextIndex]
+        return options[nextIndex]
     }
 
     private var modelMenuOptions: [String] {
         viewModel.modelOptions.isEmpty ? [viewModel.selectedModel] : viewModel.modelOptions
+    }
+
+    private var effortMenuOptions: [String] {
+        viewModel.effortOptions.isEmpty ? [viewModel.effort] : viewModel.effortOptions
     }
 }
 
@@ -568,10 +630,12 @@ private struct FooterBar: View {
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
     let modelHighlightedOption: String?
+    let effortHighlightedOption: String?
     let modelTitle: (String) -> String
     let onSelectModel: (String) -> Void
     let onSelectEffort: (String) -> Void
     let onHighlightModel: (String) -> Void
+    let onHighlightEffort: (String) -> Void
     private let itemSpacing: CGFloat = 22
     private let pathSpacing: CGFloat = 32
 
@@ -599,14 +663,14 @@ private struct FooterBar: View {
                     title: effort,
                     options: effortOptions,
                     selectedOption: effort,
-                    highlightedOption: nil,
+                    highlightedOption: effortHighlightedOption,
                     isEnabled: isEffortMenuEnabled,
                     activeMenu: $activeMenu,
                     optionTitle: { $0 },
                     menuWidth: 88,
                     help: "Reasoning Effort",
                     onSelect: onSelectEffort,
-                    onHighlight: { _ in }
+                    onHighlight: onHighlightEffort
                 )
                 footerText(permissions, color: TerminalPalette.primaryText)
                 footerText(tokenUsage, color: TerminalPalette.dimText)
