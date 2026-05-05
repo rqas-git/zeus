@@ -1306,6 +1306,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_database_rolls_back_user_message_when_publish_fails() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(7);
+        let mut agent = AgentLoop::with_context_window_tools_and_database(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            ToolRegistry::default(),
+            database.clone(),
+        )
+        .unwrap();
+        let streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                Ok("ok".to_string())
+            },
+        );
+
+        let error = agent
+            .submit_user_message("hello", &streamer, |event| {
+                if matches!(
+                    event,
+                    AgentEvent::MessageCompleted {
+                        role: MessageRole::User,
+                        ..
+                    }
+                ) {
+                    anyhow::bail!("publish failed");
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("publish failed"));
+        let stored = database.load_session(session_id).unwrap().unwrap();
+        assert!(stored.messages.is_empty());
+        assert_eq!(stored.status, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn sqlite_database_restores_cache_observation() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(7);
+        let streamer = CacheStreamer {
+            turn: AtomicUsize::new(0),
+        };
+        let mut first = AgentLoop::with_context_window_tools_and_database(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            ToolRegistry::default(),
+            database.clone(),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+
+        first
+            .submit_user_message("first", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut restored = AgentLoop::with_context_window_tools_and_database(
+            session_id,
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            ToolRegistry::default(),
+            database,
+        )
+        .unwrap();
+        restored
+            .submit_user_message("second", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(events.contains(&"cache:first_request".to_string()));
+        assert!(events.contains(&"cache:reused_prefix".to_string()));
+    }
+
+    #[tokio::test]
     async fn sends_bounded_recent_history() {
         let mut agent = AgentLoop::with_context_window(
             SessionId::new(7),

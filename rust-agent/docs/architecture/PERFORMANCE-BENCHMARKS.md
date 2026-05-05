@@ -18,6 +18,9 @@ counter. They assert correctness but do not enforce timing thresholds.
 - `agent_loop::tests::benchmark_tool_round_large_outputs`
   Measures a full tool round that reads many capped large files and stores the
   resulting tool transcript.
+- `storage::tests::benchmark_sqlite_session_database_large_history`
+  Measures SQLite session-message insert throughput and full-history load
+  latency over a large persisted transcript.
 - `client::tests::benchmark_sse_parser_large_stream`
   Measures SSE parser throughput over a synthetic 20,000-event model stream.
 - `client::tests::benchmark_responses_request_serialization_large_history`

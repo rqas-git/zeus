@@ -495,6 +495,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_database_survives_service_recreation_and_delete() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let first_service = AgentService::new(
+            FnStreamer::new(
+                |history: &[ConversationMessage<'_>],
+                 _tools: &[ToolSpec],
+                 _parallel_tool_calls: bool,
+                 _selected_model: &str,
+                 _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                    assert_eq!(history, &[ConversationMessage::user("hello")]);
+                    Ok("one".to_string())
+                },
+            ),
+            ContextWindowConfig::default(),
+            test_model_config(),
+        )
+        .with_database(database.clone());
+
+        first_service
+            .submit_user_message(SessionId::new(1), "hello", |_| Ok(()))
+            .await
+            .unwrap();
+        drop(first_service);
+
+        let second_service = AgentService::new(
+            FnStreamer::new(
+                |history: &[ConversationMessage<'_>],
+                 _tools: &[ToolSpec],
+                 _parallel_tool_calls: bool,
+                 _selected_model: &str,
+                 _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                    assert_eq!(
+                        history,
+                        &[
+                            ConversationMessage::user("hello"),
+                            ConversationMessage::assistant("one"),
+                            ConversationMessage::user("again"),
+                        ]
+                    );
+                    Ok("two".to_string())
+                },
+            ),
+            ContextWindowConfig::default(),
+            test_model_config(),
+        )
+        .with_database(database.clone());
+
+        second_service
+            .submit_user_message(SessionId::new(1), "again", |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(
+            database
+                .load_session(SessionId::new(1))
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            4
+        );
+
+        assert!(second_service.delete_session(SessionId::new(1)).unwrap());
+        assert!(database.load_session(SessionId::new(1)).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn runs_different_sessions_concurrently() {
         let barrier = Arc::new(Barrier::new(2));
         let active = Arc::new(AtomicUsize::new(0));

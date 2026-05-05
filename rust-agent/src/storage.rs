@@ -807,6 +807,13 @@ pub(crate) fn default_database_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::Instant;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    use crate::bench_support::DurationSummary;
+
     use super::*;
 
     #[test]
@@ -850,6 +857,95 @@ mod tests {
     }
 
     #[test]
+    fn stores_function_calls_and_session_metadata() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(11);
+        database.ensure_session(session_id, "first-model").unwrap();
+        database
+            .set_session_model(session_id, "second-model")
+            .unwrap();
+        database
+            .set_session_status(session_id, SessionStatus::Failed)
+            .unwrap();
+        database
+            .record_cache_observation(
+                session_id,
+                &CacheObservation {
+                    prompt_cache_key: "cache-key".to_string(),
+                    stable_prefix_hash: 42,
+                },
+            )
+            .unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::FunctionCall {
+                        item_id: Some("item_1".to_string()),
+                        call_id: "call_1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let loaded = database.load_session(session_id).unwrap().unwrap();
+
+        assert_eq!(loaded.config.model(), "second-model");
+        assert_eq!(loaded.status, SessionStatus::Failed);
+        assert_eq!(
+            loaded.last_cache_observation,
+            Some(CacheObservation {
+                prompt_cache_key: "cache-key".to_string(),
+                stable_prefix_hash: 42,
+            })
+        );
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].text(), r#"{"path":"Cargo.toml"}"#);
+        assert!(matches!(
+            loaded.messages[0].item(),
+            AgentItem::FunctionCall {
+                item_id: Some(item_id),
+                call_id,
+                name,
+                ..
+            } if item_id == "item_1" && call_id == "call_1" && name == "read_file"
+        ));
+    }
+
+    #[test]
+    fn deletes_single_messages_without_removing_session() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(13);
+        database.ensure_session(session_id, "test-model").unwrap();
+        for id in 1..=3 {
+            database
+                .insert_message(
+                    session_id,
+                    &AgentMessage::from_parts(
+                        MessageId::new(id),
+                        AgentItem::Message {
+                            role: MessageRole::User,
+                            text: format!("message {id}"),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+
+        database
+            .delete_message(session_id, MessageId::new(2))
+            .unwrap();
+        let loaded = database.load_session(session_id).unwrap().unwrap();
+
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].text(), "message 1");
+        assert_eq!(loaded.messages[1].text(), "message 3");
+    }
+
+    #[test]
     fn deletes_sessions_with_messages() {
         let database = SessionDatabase::in_memory().unwrap();
         let session_id = SessionId::new(9);
@@ -869,5 +965,81 @@ mod tests {
 
         assert!(database.delete_session(session_id).unwrap());
         assert!(database.load_session(session_id).unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "release-mode SQLite session storage benchmark; run explicitly with --ignored --nocapture"]
+    fn benchmark_sqlite_session_database_large_history() {
+        const MESSAGES: u64 = 2_000;
+        const LOAD_SAMPLES: usize = 15;
+
+        let (temp_dir, database_path) = temp_database_path("large-history");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let database = SessionDatabase::open(&database_path).unwrap();
+        let session_id = SessionId::new(21);
+        database.ensure_session(session_id, "bench-model").unwrap();
+
+        let write_started = Instant::now();
+        for id in 1..=MESSAGES {
+            let role = if id % 2 == 0 {
+                MessageRole::Assistant
+            } else {
+                MessageRole::User
+            };
+            database
+                .insert_message(
+                    session_id,
+                    &AgentMessage::from_parts(
+                        MessageId::new(id),
+                        AgentItem::Message {
+                            role,
+                            text: format!("benchmark message {id} {}", "x".repeat(96)),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+        let write_elapsed = write_started.elapsed();
+
+        let mut load_samples = Vec::with_capacity(LOAD_SAMPLES);
+        let mut loaded_messages = 0usize;
+        for _ in 0..LOAD_SAMPLES {
+            let started = Instant::now();
+            let loaded = database.load_session(session_id).unwrap().unwrap();
+            let elapsed = started.elapsed();
+
+            loaded_messages = loaded.messages.len();
+            std::hint::black_box(loaded);
+            load_samples.push(elapsed);
+        }
+
+        let load = DurationSummary::from_samples(&mut load_samples);
+        println!(
+            "sqlite_session_database_large_history messages={MESSAGES} loaded_messages={loaded_messages} load_samples={LOAD_SAMPLES} write_ms={:.3} write_messages_per_sec={:.0} load_min_ms={:.3} load_median_ms={:.3} load_max_ms={:.3}",
+            crate::bench_support::duration_ms(write_elapsed),
+            MESSAGES as f64 / write_elapsed.as_secs_f64(),
+            load.min_ms(),
+            load.median_ms(),
+            load.max_ms(),
+        );
+
+        fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    fn temp_database_path(label: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "rust-agent-storage-{label}-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let path = dir.join("sessions.db");
+        (dir, path)
+    }
+
+    fn unique_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
