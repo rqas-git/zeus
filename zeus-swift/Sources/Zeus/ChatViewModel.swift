@@ -5,6 +5,8 @@ import ZeusCore
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
     @Published var draft = ""
+    @Published private(set) var workspace: WorkspaceMetadata
+    @Published private(set) var branchOptions: [String]
     @Published private(set) var model = "gpt 5.5"
     @Published private(set) var selectedModel = "gpt-5.5"
     @Published private(set) var modelOptions = ["gpt-5.5"]
@@ -23,8 +25,7 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isLoggingIn = false
     @Published private(set) var isSelectingModel = false
     @Published private(set) var isSelectingPermissions = false
-
-    let workspace: WorkspaceMetadata
+    @Published private(set) var isSwitchingBranch = false
 
     var canChangeModel: Bool {
         isReady && !isLoggingIn
@@ -36,6 +37,10 @@ final class ChatViewModel: ObservableObject {
 
     var canChangePermissions: Bool {
         isReady && !isLoggingIn
+    }
+
+    var canChangeBranch: Bool {
+        !isSending && !isLoggingIn && !isSwitchingBranch
     }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
@@ -50,6 +55,7 @@ final class ChatViewModel: ObservableObject {
     private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
+    private var branchSwitchTask: Task<Void, Never>?
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
 
@@ -61,11 +67,13 @@ final class ChatViewModel: ObservableObject {
         self.server = server
         self.auth = auth
         self.workspace = workspace
+        self.branchOptions = Self.branchOptions(at: workspace.url, currentBranch: workspace.branch)
     }
 
     deinit {
         streamTask?.cancel()
         loginTask?.cancel()
+        branchSwitchTask?.cancel()
         auth.cancelLogin()
         server.stop()
     }
@@ -87,6 +95,7 @@ final class ChatViewModel: ObservableObject {
             if let permissions = try? await client.permissions() {
                 applyPermissions(permissions)
             }
+            refreshBranchOptions()
 
             let session = try await client.createSession()
             sessionID = session.sessionID
@@ -173,6 +182,8 @@ final class ChatViewModel: ObservableObject {
         streamTask = nil
         loginTask?.cancel()
         loginTask = nil
+        branchSwitchTask?.cancel()
+        branchSwitchTask = nil
         auth.cancelLogin()
         server.stop()
     }
@@ -210,6 +221,40 @@ final class ChatViewModel: ObservableObject {
         guard canChangePermissions else { return }
         guard permissionOptions.contains(rawPermission) else { return }
         applySelectedPermissions(rawPermission)
+    }
+
+    func selectBranch(_ rawBranch: String) {
+        guard rawBranch != workspace.branch else { return }
+        guard canChangeBranch else { return }
+        guard branchOptions.contains(rawBranch) else { return }
+
+        isSwitchingBranch = true
+        append(kind: .status, text: "switching branch to \(rawBranch)...")
+
+        let rootURL = workspace.url
+        let previousBranch = workspace.branch
+        branchSwitchTask = Task {
+            do {
+                let result = try await Task.detached {
+                    try GitWorkspace.switchBranch(
+                        to: rawBranch,
+                        at: rootURL,
+                        currentBranch: previousBranch
+                    )
+                }.value
+                workspace = WorkspaceMetadata.current(at: rootURL)
+                refreshBranchOptions()
+                let stashStatus = result.stashedChanges
+                    ? "stashed changes on \(result.previousBranch); "
+                    : ""
+                append(kind: .status, text: "\(stashStatus)switched to \(result.branch)")
+            } catch {
+                refreshBranchOptions()
+                append(kind: .error, text: error.localizedDescription)
+            }
+            isSwitchingBranch = false
+            branchSwitchTask = nil
+        }
     }
 
     private func startLogin() {
@@ -444,6 +489,18 @@ final class ChatViewModel: ObservableObject {
         modelOptions = models.allowedModels
         applySelectedModel(models.defaultModel)
         applyReasoningEfforts(models.reasoningEfforts, defaultEffort: models.defaultReasoningEffort)
+    }
+
+    private func refreshBranchOptions() {
+        branchOptions = Self.branchOptions(at: workspace.url, currentBranch: workspace.branch)
+    }
+
+    private static func branchOptions(at url: URL, currentBranch: String) -> [String] {
+        let branches = (try? GitWorkspace.branches(at: url)) ?? []
+        if branches.contains(currentBranch) {
+            return branches
+        }
+        return branches.isEmpty ? [currentBranch] : branches + [currentBranch]
     }
 
     private func applyPermissions(_ permissions: PermissionsResponse) {

@@ -7,6 +7,7 @@ private enum TerminalLayout {
 }
 
 private enum FooterMenuID {
+    case branch
     case model
     case effort
     case permissions
@@ -23,6 +24,7 @@ private enum KeyCode {
 struct ChatWindow: View {
     @ObservedObject var viewModel: ChatViewModel
     @State private var activeFooterMenu: FooterMenuID?
+    @State private var branchMenuHighlightedOption: String?
     @State private var modelMenuHighlightedOption: String?
     @State private var effortMenuHighlightedOption: String?
     @State private var permissionsMenuHighlightedOption: String?
@@ -45,6 +47,9 @@ struct ChatWindow: View {
 
                 FooterBar(
                     workspace: viewModel.workspace,
+                    branchOptions: viewModel.branchOptions,
+                    selectedBranch: viewModel.workspace.branch,
+                    isBranchMenuEnabled: viewModel.canChangeBranch,
                     model: viewModel.model,
                     modelOptions: viewModel.modelOptions,
                     selectedModel: viewModel.selectedModel,
@@ -58,14 +63,17 @@ struct ChatWindow: View {
                     isPermissionsMenuEnabled: viewModel.canChangePermissions,
                     tokenUsage: viewModel.tokenUsage,
                     activeMenu: $activeFooterMenu,
+                    branchHighlightedOption: branchMenuHighlightedOption,
                     modelHighlightedOption: modelMenuHighlightedOption,
                     effortHighlightedOption: effortMenuHighlightedOption,
                     permissionsHighlightedOption: permissionsMenuHighlightedOption,
                     modelTitle: { viewModel.displayModel($0) },
                     permissionTitle: { viewModel.displayPermission($0) },
+                    onSelectBranch: viewModel.selectBranch,
                     onSelectModel: viewModel.selectModel,
                     onSelectEffort: viewModel.selectEffort,
                     onSelectPermissions: viewModel.selectPermissions,
+                    onHighlightBranch: { branchMenuHighlightedOption = $0 },
                     onHighlightModel: { modelMenuHighlightedOption = $0 },
                     onHighlightEffort: { effortMenuHighlightedOption = $0 },
                     onHighlightPermissions: { permissionsMenuHighlightedOption = $0 }
@@ -106,6 +114,10 @@ struct ChatWindow: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if isBranchShortcut(event) {
+            openBranchMenu()
+            return true
+        }
         if isModelShortcut(event) {
             openModelMenu()
             return true
@@ -142,6 +154,10 @@ struct ChatWindow: View {
         isCommandShortcut(event, key: "m")
     }
 
+    private func isBranchShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "b")
+    }
+
     private func isEffortShortcut(_ event: NSEvent) -> Bool {
         isCommandShortcut(event, key: "e")
     }
@@ -167,6 +183,15 @@ struct ChatWindow: View {
         activeFooterMenu = .model
     }
 
+    private func openBranchMenu() {
+        guard viewModel.canChangeBranch else { return }
+        let options = branchMenuOptions
+        branchMenuHighlightedOption = options.contains(viewModel.workspace.branch)
+            ? viewModel.workspace.branch
+            : options.first
+        activeFooterMenu = .branch
+    }
+
     private func openEffortMenu() {
         guard viewModel.canChangeEffort else { return }
         let options = effortMenuOptions
@@ -187,6 +212,8 @@ struct ChatWindow: View {
 
     private func moveActiveMenuHighlight(by offset: Int) {
         switch activeFooterMenu {
+        case .branch:
+            moveBranchHighlight(by: offset)
         case .model:
             moveModelHighlight(by: offset)
         case .effort:
@@ -200,6 +227,13 @@ struct ChatWindow: View {
 
     private func selectActiveMenuOption() -> Bool {
         switch activeFooterMenu {
+        case .branch:
+            guard let branch = branchMenuHighlightedOption ?? branchMenuOptions.first else {
+                return false
+            }
+            activeFooterMenu = nil
+            viewModel.selectBranch(branch)
+            return true
         case .model:
             guard let model = modelMenuHighlightedOption ?? modelMenuOptions.first else {
                 return false
@@ -232,6 +266,12 @@ struct ChatWindow: View {
         modelMenuHighlightedOption = nextMenuOption(in: options, current: current, offset: offset)
     }
 
+    private func moveBranchHighlight(by offset: Int) {
+        let options = branchMenuOptions
+        let current = branchMenuHighlightedOption ?? viewModel.workspace.branch
+        branchMenuHighlightedOption = nextMenuOption(in: options, current: current, offset: offset)
+    }
+
     private func moveEffortHighlight(by offset: Int) {
         let options = effortMenuOptions
         let current = effortMenuHighlightedOption ?? viewModel.effort
@@ -257,6 +297,10 @@ struct ChatWindow: View {
 
     private var modelMenuOptions: [String] {
         viewModel.modelOptions.isEmpty ? [viewModel.selectedModel] : viewModel.modelOptions
+    }
+
+    private var branchMenuOptions: [String] {
+        viewModel.branchOptions.isEmpty ? [viewModel.workspace.branch] : viewModel.branchOptions
     }
 
     private var effortMenuOptions: [String] {
@@ -668,6 +712,9 @@ private struct InputPrompt: View {
 
 private struct FooterBar: View {
     let workspace: WorkspaceMetadata
+    let branchOptions: [String]
+    let selectedBranch: String
+    let isBranchMenuEnabled: Bool
     let model: String
     let modelOptions: [String]
     let selectedModel: String
@@ -681,14 +728,17 @@ private struct FooterBar: View {
     let isPermissionsMenuEnabled: Bool
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
+    let branchHighlightedOption: String?
     let modelHighlightedOption: String?
     let effortHighlightedOption: String?
     let permissionsHighlightedOption: String?
     let modelTitle: (String) -> String
     let permissionTitle: (String) -> String
+    let onSelectBranch: (String) -> Void
     let onSelectModel: (String) -> Void
     let onSelectEffort: (String) -> Void
     let onSelectPermissions: (String) -> Void
+    let onHighlightBranch: (String) -> Void
     let onHighlightModel: (String) -> Void
     let onHighlightEffort: (String) -> Void
     let onHighlightPermissions: (String) -> Void
@@ -699,7 +749,21 @@ private struct FooterBar: View {
         HStack(spacing: 0) {
             HStack(spacing: itemSpacing) {
                 footerText(workspace.name, color: TerminalPalette.dimText)
-                footerText(workspace.branch, color: TerminalPalette.green)
+                FooterMenu(
+                    id: .branch,
+                    title: workspace.branch,
+                    options: branchOptions,
+                    selectedOption: selectedBranch,
+                    highlightedOption: branchHighlightedOption,
+                    isEnabled: isBranchMenuEnabled,
+                    enabledColor: TerminalPalette.green,
+                    activeMenu: $activeMenu,
+                    optionTitle: { $0 },
+                    menuWidth: 164,
+                    help: "Branch",
+                    onSelect: onSelectBranch,
+                    onHighlight: onHighlightBranch
+                )
                 FooterMenu(
                     id: .model,
                     title: model,
@@ -772,6 +836,7 @@ private struct FooterMenu: View {
     let selectedOption: String
     let highlightedOption: String?
     let isEnabled: Bool
+    var enabledColor = TerminalPalette.cyan
     @Binding var activeMenu: FooterMenuID?
     let optionTitle: (String) -> String
     let menuWidth: CGFloat
@@ -789,7 +854,7 @@ private struct FooterMenu: View {
 
     var body: some View {
         Text(title)
-            .foregroundStyle(isEnabled ? TerminalPalette.cyan : TerminalPalette.dimText)
+            .foregroundStyle(isEnabled ? enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .frame(height: 18, alignment: .center)

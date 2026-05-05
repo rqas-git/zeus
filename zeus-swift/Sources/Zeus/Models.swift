@@ -46,16 +46,22 @@ struct WorkspaceMetadata {
     let name: String
     let branch: String
     let displayPath: String
+    let url: URL
 
     static func current() -> WorkspaceMetadata {
         let environment = ProcessInfo.processInfo.environment
         let url = workspaceURL(environment: environment)
-        let branch = runGit(["branch", "--show-current"], at: url) ?? "main"
+        return current(at: url)
+    }
+
+    static func current(at url: URL) -> WorkspaceMetadata {
+        let branch = (try? GitWorkspace.currentBranch(at: url)) ?? "main"
 
         return WorkspaceMetadata(
             name: url.lastPathComponent,
             branch: branch.isEmpty ? "main" : branch,
-            displayPath: PathDisplay.abbreviatingHome(in: url.path)
+            displayPath: PathDisplay.abbreviatingHome(in: url.path),
+            url: url
         )
     }
 
@@ -84,28 +90,5 @@ struct WorkspaceMetadata {
 
     private static func isSwiftPackageRoot(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("Package.swift").path)
-    }
-
-    private static func runGit(_ arguments: [String], at url: URL) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git"] + arguments
-        process.currentDirectoryURL = url
-
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-
-        guard process.terminationStatus == 0 else { return nil }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
