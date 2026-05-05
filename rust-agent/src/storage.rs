@@ -171,7 +171,8 @@ impl SessionDatabase {
                 |statement| {
                     statement.bind_i64(1, session_id_i64(session_id)?)?;
                     statement.bind_text(2, &observation.prompt_cache_key)?;
-                    statement.bind_i64(3, u64_to_i64(observation.stable_prefix_hash)?)?;
+                    statement
+                        .bind_i64(3, stable_prefix_hash_i64(observation.stable_prefix_hash))?;
                     statement.bind_i64(4, now)
                 },
             )
@@ -253,7 +254,7 @@ fn load_session_header(
             ) {
                 (Some(prompt_cache_key), Some(stable_prefix_hash)) => Some(CacheObservation {
                     prompt_cache_key,
-                    stable_prefix_hash: i64_to_u64(stable_prefix_hash, "stable prefix hash")?,
+                    stable_prefix_hash: stable_prefix_hash_from_i64(stable_prefix_hash),
                 }),
                 _ => None,
             };
@@ -743,6 +744,14 @@ fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
         .with_context(|| format!("stored {label} is negative"))
 }
 
+fn stable_prefix_hash_i64(value: u64) -> i64 {
+    i64::from_be_bytes(value.to_be_bytes())
+}
+
+fn stable_prefix_hash_from_i64(value: i64) -> u64 {
+    u64::from_be_bytes(value.to_be_bytes())
+}
+
 fn now_millis() -> Result<i64> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -872,7 +881,7 @@ mod tests {
                 session_id,
                 &CacheObservation {
                     prompt_cache_key: "cache-key".to_string(),
-                    stable_prefix_hash: 42,
+                    stable_prefix_hash: 0xfedc_ba98_7654_3210,
                 },
             )
             .unwrap();
@@ -899,7 +908,7 @@ mod tests {
             loaded.last_cache_observation,
             Some(CacheObservation {
                 prompt_cache_key: "cache-key".to_string(),
-                stable_prefix_hash: 42,
+                stable_prefix_hash: 0xfedc_ba98_7654_3210,
             })
         );
         assert_eq!(loaded.messages.len(), 1);
