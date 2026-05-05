@@ -2,6 +2,7 @@
 
 | Shortcut | Action |
 | --- | --- |
+| `Cmd+B` | Open the branch dropdown menu. |
 | `Cmd+M` | Open the model dropdown menu. |
 | `Cmd+E` | Open the reasoning effort dropdown menu. |
 | `Cmd+P` | Open the permissions dropdown menu. |
