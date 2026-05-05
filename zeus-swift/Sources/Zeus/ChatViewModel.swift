@@ -19,7 +19,7 @@ final class ChatViewModel: ObservableObject {
     let workspace: WorkspaceMetadata
 
     var canChangeModel: Bool {
-        isReady && !isSending && !isLoggingIn && !isSelectingModel
+        isReady && !isLoggingIn
     }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
@@ -34,6 +34,7 @@ final class ChatViewModel: ObservableObject {
     private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     private var streamTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
+    private var sessionModel = "gpt-5.5"
 
     init(
         server: any AgentServerProtocol = RustAgentServer(),
@@ -69,7 +70,7 @@ final class ChatViewModel: ObservableObject {
 
             let session = try await client.createSession()
             sessionID = session.sessionID
-            applyModel(session.model)
+            applySessionModel(session.model)
             isReady = true
             append(kind: .status, text: "ready")
             await refreshAuthStatus()
@@ -115,6 +116,7 @@ final class ChatViewModel: ObservableObject {
             var receivedAssistantOutput = false
             do {
                 try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
+                try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
                 try await client.streamTurn(sessionID: sessionID, message: message) { event in
                     if case let .statusChanged(_, status) = event, status == "running" {
                         try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
@@ -166,21 +168,7 @@ final class ChatViewModel: ObservableObject {
     func selectModel(_ rawModel: String) {
         guard rawModel != selectedModel else { return }
         guard canChangeModel else { return }
-        guard let client, let sessionID else {
-            append(kind: .error, text: "No rust-agent session is available.")
-            return
-        }
-
-        isSelectingModel = true
-        Task {
-            do {
-                let response = try await client.setSessionModel(sessionID: sessionID, model: rawModel)
-                applyModel(response.model)
-            } catch {
-                append(kind: .error, text: error.localizedDescription)
-            }
-            isSelectingModel = false
-        }
+        applySelectedModel(rawModel)
     }
 
     private func startLogin() {
@@ -406,20 +394,45 @@ final class ChatViewModel: ObservableObject {
         guard let client else { return }
         let session = try await client.createSession()
         sessionID = session.sessionID
-        applyModel(session.model)
+        applySessionModel(session.model)
         append(kind: .status, text: "new session ready")
     }
 
     private func applyModels(_ models: ModelsResponse) {
         modelOptions = models.allowedModels
-        applyModel(models.defaultModel)
+        applySelectedModel(models.defaultModel)
     }
 
-    private func applyModel(_ rawModel: String) {
+    private func applySelectedModel(_ rawModel: String) {
         selectedModel = rawModel
         model = displayModel(rawModel)
         if !modelOptions.contains(rawModel) {
             modelOptions.append(rawModel)
+        }
+    }
+
+    private func applySessionModel(_ rawModel: String, selectedTarget: String? = nil) {
+        sessionModel = rawModel
+        if selectedTarget == nil || selectedModel == selectedTarget {
+            applySelectedModel(rawModel)
+        } else if !modelOptions.contains(rawModel) {
+            modelOptions.append(rawModel)
+        }
+    }
+
+    private func applySelectedModelForNextTurn(
+        client: any AgentClientProtocol,
+        sessionID: UInt64
+    ) async throws {
+        guard selectedModel != sessionModel else { return }
+
+        isSelectingModel = true
+        defer { isSelectingModel = false }
+
+        while selectedModel != sessionModel {
+            let target = selectedModel
+            let response = try await client.setSessionModel(sessionID: sessionID, model: target)
+            applySessionModel(response.model, selectedTarget: target)
         }
     }
 
