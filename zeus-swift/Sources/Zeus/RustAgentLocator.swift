@@ -45,7 +45,7 @@ enum RustAgentLocator {
     ) {
         let workingDirectoryURL = workingDirectoryURL ?? rootURL
         let debugBinary = rootURL.appendingPathComponent("target/debug/rust-agent")
-        if FileManager.default.isExecutableFile(atPath: debugBinary.path) {
+        if shouldUseDebugBinary(debugBinary, rootURL: rootURL) {
             process.executableURL = debugBinary
             process.arguments = arguments
         } else {
@@ -63,5 +63,45 @@ enum RustAgentLocator {
 
     private static func isRustAgentRoot(_ url: URL) -> Bool {
         FileManager.default.fileExists(atPath: url.appendingPathComponent("Cargo.toml").path)
+    }
+
+    private static func shouldUseDebugBinary(_ binaryURL: URL, rootURL: URL) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: binaryURL.path),
+              let binaryDate = modificationDate(of: binaryURL) else {
+            return false
+        }
+
+        return !rustAgentInputs(rootURL: rootURL).contains { inputURL in
+            guard let inputDate = modificationDate(of: inputURL) else { return false }
+            return inputDate > binaryDate
+        }
+    }
+
+    private static func rustAgentInputs(rootURL: URL) -> [URL] {
+        var inputs = [
+            rootURL.appendingPathComponent("Cargo.toml"),
+            rootURL.appendingPathComponent("Cargo.lock")
+        ]
+
+        let sourceRoot = rootURL.appendingPathComponent("src")
+        let enumerator = FileManager.default.enumerator(
+            at: sourceRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        while let fileURL = enumerator?.nextObject() as? URL {
+            guard fileURL.pathExtension == "rs",
+                  (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+                continue
+            }
+            inputs.append(fileURL)
+        }
+
+        return inputs
+    }
+
+    private static func modificationDate(of url: URL) -> Date? {
+        try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
 }

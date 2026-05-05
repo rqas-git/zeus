@@ -9,6 +9,8 @@ final class RustAgentServer: AgentServerProtocol {
     }
     private var process: Process?
     private let outputCapture = ProcessOutputCapture()
+    private let readyPolls = 600
+    private let readyPollNanoseconds: UInt64 = 100_000_000
 
     deinit {
         stop()
@@ -83,7 +85,7 @@ final class RustAgentServer: AgentServerProtocol {
     }
 
     private func waitForReady(_ client: AgentAPIClient) async throws {
-        for _ in 0..<80 {
+        for _ in 0..<readyPolls {
             if await client.healthz(), (try? await client.models()) != nil {
                 return
             }
@@ -92,7 +94,7 @@ final class RustAgentServer: AgentServerProtocol {
                 throw RustAgentServerError.exitedEarly(outputCapture.snapshot())
             }
 
-            try await Task.sleep(nanoseconds: 100_000_000)
+            try await Task.sleep(nanoseconds: readyPollNanoseconds)
         }
 
         throw RustAgentServerError.timedOut(outputCapture.snapshot())
