@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
+use serde::Deserialize;
 
 use crate::storage::default_database_path;
 use crate::tools::ToolPolicy;
@@ -16,6 +17,7 @@ const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CODEX_VERSION: &str = "0.128.0";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_ALLOWED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
+const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
@@ -186,7 +188,8 @@ impl ModelConfig {
                 models
             }
             None => {
-                let mut models = default_allowed_models();
+                let mut models =
+                    load_codex_model_allowlist().unwrap_or_else(default_allowed_models);
                 if !models.iter().any(|model| model == &default_model) {
                     models.push(default_model.clone());
                 }
@@ -736,6 +739,45 @@ fn default_allowed_models() -> Vec<String> {
         .collect()
 }
 
+fn load_codex_model_allowlist() -> Option<Vec<String>> {
+    let path = codex_models_cache_path()?;
+    let contents = std::fs::read(path).ok()?;
+    codex_model_allowlist_from_cache(&contents).ok()
+}
+
+fn codex_models_cache_path() -> Option<PathBuf> {
+    if let Some(home) = env_optional_path("CODEX_HOME") {
+        return Some(home.join(CODEX_MODELS_CACHE_FILE));
+    }
+
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".codex").join(CODEX_MODELS_CACHE_FILE))
+}
+
+fn codex_model_allowlist_from_cache(contents: &[u8]) -> Result<Vec<String>> {
+    let cache: CodexModelsCache = serde_json::from_slice(contents)?;
+    let models = cache
+        .models
+        .into_iter()
+        .filter(|model| model.visibility.as_deref().unwrap_or("list") == "list")
+        .map(|model| model.slug);
+    normalized_model_list(models)
+}
+
+#[derive(Deserialize)]
+struct CodexModelsCache {
+    models: Vec<CodexCachedModel>,
+}
+
+#[derive(Deserialize)]
+struct CodexCachedModel {
+    slug: String,
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
 fn normalized_model(model: impl Into<String>) -> Result<String> {
     let model = model.into();
     let model = model.trim();
@@ -845,5 +887,22 @@ mod tests {
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "1").is_err());
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "0").is_err());
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "not-a-pid").is_err());
+    }
+
+    #[test]
+    fn parses_visible_codex_models_from_cache() {
+        let models = codex_model_allowlist_from_cache(
+            br#"{
+                "models": [
+                    {"slug":"new-frontier","visibility":"list"},
+                    {"slug":"internal-review","visibility":"hide"},
+                    {"slug":"new-frontier","visibility":"list"},
+                    {"slug":"new-fast","visibility":"list"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(models, ["new-frontier", "new-fast"]);
     }
 }

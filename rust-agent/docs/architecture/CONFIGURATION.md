@@ -53,6 +53,9 @@ configuration.
 
 - Config parsing validates numeric values before service startup.
 - Model parsing validates defaults and the allowlist before service startup.
+  When `RUST_AGENT_ALLOWED_MODELS` is unset, rust-agent reads Codex's local
+  `$CODEX_HOME/models_cache.json` catalog, or `~/.codex/models_cache.json` when
+  `CODEX_HOME` is unset, and exposes models marked visible in the picker.
 - Defaults keep the CLI usable without extra setup.
 - Sub-config structs keep unrelated knobs separate.
 - Tool mode parsing validates the requested permission set before any model
