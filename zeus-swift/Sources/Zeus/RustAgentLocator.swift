@@ -44,6 +44,13 @@ enum RustAgentLocator {
         workingDirectoryURL: URL? = nil
     ) {
         let workingDirectoryURL = workingDirectoryURL ?? rootURL
+        if let bundledBinary = bundledRustAgentBinaryURL() {
+            process.executableURL = bundledBinary
+            process.arguments = arguments
+            process.currentDirectoryURL = workingDirectoryURL
+            return
+        }
+
         let debugBinary = rootURL.appendingPathComponent("target/debug/rust-agent")
         if shouldUseDebugBinary(debugBinary, rootURL: rootURL) {
             process.executableURL = debugBinary
@@ -59,6 +66,18 @@ enum RustAgentLocator {
             ] + arguments
         }
         process.currentDirectoryURL = workingDirectoryURL
+    }
+
+    private static func bundledRustAgentBinaryURL() -> URL? {
+        guard let executableDirectory = Bundle.main.executableURL?
+            .standardizedFileURL
+            .deletingLastPathComponent()
+        else {
+            return nil
+        }
+
+        let binaryURL = executableDirectory.appendingPathComponent("rust-agent")
+        return FileManager.default.isExecutableFile(atPath: binaryURL.path) ? binaryURL : nil
     }
 
     private static func isRustAgentRoot(_ url: URL) -> Bool {
