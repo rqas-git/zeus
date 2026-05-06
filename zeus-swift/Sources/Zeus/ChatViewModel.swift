@@ -4,7 +4,12 @@ import ZeusCore
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
-    @Published var draft = ""
+    @Published var draft = "" {
+        didSet {
+            guard !isApplyingDraftFromHistory else { return }
+            resetDraftHistoryNavigation()
+        }
+    }
     @Published var searchQuery = ""
     @Published private(set) var isSearchVisible = false
     @Published private(set) var searchResultSummary = ""
@@ -75,6 +80,8 @@ final class ChatViewModel: ObservableObject {
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
     private var searchMatchedLineIDsInOrder: [UUID] = []
+    private var submittedMessageHistory = PromptHistory()
+    private var isApplyingDraftFromHistory = false
 
     init(
         server: any AgentServerProtocol = RustAgentServer(),
@@ -139,6 +146,7 @@ final class ChatViewModel: ObservableObject {
         }
 
         if message == "/login" {
+            recordSubmittedMessage(message)
             draft = ""
             append(kind: .user, text: message)
             startLogin()
@@ -146,6 +154,7 @@ final class ChatViewModel: ObservableObject {
         }
 
         if message.split(separator: " ").first == "/restore" {
+            recordSubmittedMessage(message)
             draft = ""
             append(kind: .user, text: message)
             guard let restoreSessionID = Self.restoreSessionID(from: message) else {
@@ -166,6 +175,7 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        recordSubmittedMessage(message)
         draft = ""
         isSending = true
         currentAssistantLineID = nil
@@ -263,6 +273,22 @@ final class ChatViewModel: ObservableObject {
         draft = ""
     }
 
+    func selectPreviousSubmittedMessage() -> Bool {
+        guard let message = submittedMessageHistory.previous(currentDraft: draft) else {
+            return false
+        }
+        applyDraftFromHistory(message)
+        return true
+    }
+
+    func selectNextSubmittedMessage() -> Bool {
+        guard let message = submittedMessageHistory.next() else {
+            return false
+        }
+        applyDraftFromHistory(message)
+        return true
+    }
+
     func toggleTerminalPassthrough() {
         isTerminalPassthroughEnabled.toggle()
         append(
@@ -338,6 +364,7 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        recordSubmittedMessage(command)
         draft = ""
         isRunningTerminalCommand = true
         append(kind: .user, text: "$ \(command)")
@@ -599,6 +626,7 @@ final class ChatViewModel: ObservableObject {
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
         lines = transcriptLines(from: restored.messages)
+        replaceSubmittedMessages(with: restored.messages)
         refreshSearchMatches()
     }
 
@@ -746,6 +774,7 @@ final class ChatViewModel: ObservableObject {
         sessionID = session.sessionID
         applySessionModel(session.model)
         applySessionPermissions(session.toolPolicy ?? selectedPermission)
+        replaceSubmittedMessages(with: [])
         append(kind: .status, text: "new session ready. session \(session.sessionID)")
     }
 
@@ -896,5 +925,32 @@ final class ChatViewModel: ObservableObject {
             return String(format: "%.1fk", rounded)
         }
         return "\(value)"
+    }
+
+    private func recordSubmittedMessage(_ message: String) {
+        submittedMessageHistory.record(message)
+    }
+
+    private func replaceSubmittedMessages(with records: [TranscriptRecord]) {
+        let messages: [String] = records.compactMap { record in
+            guard record.kind == "message",
+                  record.role == "user",
+                  let text = record.text,
+                  !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+        submittedMessageHistory.replace(with: messages)
+    }
+
+    private func applyDraftFromHistory(_ value: String) {
+        isApplyingDraftFromHistory = true
+        draft = value
+        isApplyingDraftFromHistory = false
+    }
+
+    private func resetDraftHistoryNavigation() {
+        submittedMessageHistory.reset()
     }
 }
