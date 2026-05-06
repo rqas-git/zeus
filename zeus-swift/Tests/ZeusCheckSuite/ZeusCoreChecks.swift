@@ -177,6 +177,14 @@ public enum ZeusCoreChecks {
         )
         try require(unknown == .unknown(type: "new_event", sessionID: 7), "unexpected unknown event")
 
+        let turnCancelled = try decodeEvent(
+            #"{"type":"turn_cancelled","session_id":7}"#
+        )
+        try require(
+            turnCancelled == .turnCancelled(sessionID: 7),
+            "unexpected turn cancelled event"
+        )
+
         let cacheHealth = try decodeEvent(
             #"{"type":"cache_health","session_id":1,"cache":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}"#
         )

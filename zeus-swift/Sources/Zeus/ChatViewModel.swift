@@ -509,6 +509,8 @@ final class ChatViewModel: ObservableObject {
             }
         case .turnCompleted:
             break
+        case .turnCancelled:
+            break
         case .unknown:
             break
         }

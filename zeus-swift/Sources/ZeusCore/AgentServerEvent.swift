@@ -20,6 +20,7 @@ public enum AgentServerEvent: Decodable, Equatable {
     case cacheHealth(sessionID: UInt64?, cache: CacheHealthPayload?)
     case error(sessionID: UInt64?, message: String?)
     case turnCompleted(sessionID: UInt64?)
+    case turnCancelled(sessionID: UInt64?)
     case unknown(type: String, sessionID: UInt64?)
 
     public var isAssistantOutputEvent: Bool {
@@ -68,6 +69,8 @@ public enum AgentServerEvent: Decodable, Equatable {
             self = .error(sessionID: payload.sessionID, message: payload.message)
         case "turn_completed":
             self = .turnCompleted(sessionID: payload.sessionID)
+        case "turn_cancelled":
+            self = .turnCancelled(sessionID: payload.sessionID)
         default:
             self = .unknown(type: payload.type, sessionID: payload.sessionID)
         }

@@ -131,6 +131,13 @@ struct AgentAPIClient: AgentClientProtocol {
         }
     }
 
+    func cancelTurn(sessionID: UInt64) async throws -> CancelTurnResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/turns:cancel")
+        request.httpMethod = "POST"
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(CancelTurnResponse.self, from: data)
+    }
+
     func runTerminalCommand(
         sessionID: UInt64,
         command: String
@@ -381,6 +388,10 @@ struct SwitchWorkspaceBranchResponse: Decodable {
 struct TerminalCommandResponse: Decodable {
     let output: String
     let success: Bool
+}
+
+struct CancelTurnResponse: Decodable {
+    let cancelled: Bool
 }
 
 private struct SetModelRequest: Encodable {
