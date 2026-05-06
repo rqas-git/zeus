@@ -69,7 +69,8 @@ configuration.
 - Prompt, history, and output limits are plain copyable values.
 - Server bind addresses, bearer token, session bounds, queue capacity, stream
   limits, idle timeout, and optional parent-process watch are loaded once before
-  listeners start.
+  listeners start. Set either server address to port `0` to let the OS assign a
+  free port and read the selected address from the startup readiness JSON.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`

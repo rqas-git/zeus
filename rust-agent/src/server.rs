@@ -66,6 +66,7 @@ const GENERATED_TOKEN_BYTES: usize = 32;
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
 const MAX_SESSION_LIST_LIMIT: usize = 200;
+const SERVER_PROTOCOL_VERSION: u32 = 1;
 
 /// Runs the local server until interrupted.
 ///
@@ -84,12 +85,12 @@ where
     let h3_addr = h3_endpoint
         .local_addr()
         .context("failed to read H3 listener address")?;
+    let http_listener = bind_http_listener(config.http_addr()).await?;
+    let http_addr = http_listener
+        .local_addr()
+        .context("failed to read HTTP compatibility listener address")?;
     let auth = ServerAuth::from_config(config.auth_token())?;
-    if auth.is_generated() {
-        eprintln!("rust-agent server bearer token: {}", auth.token());
-    } else {
-        eprintln!("rust-agent server bearer token loaded from RUST_AGENT_SERVER_TOKEN");
-    }
+    emit_server_ready(http_addr, h3_addr, &auth, &workspace_root)?;
     let state = ServerState::with_limits(
         service,
         config.event_queue_capacity(),
@@ -100,12 +101,11 @@ where
         workspace_root,
     );
     let app = router(state);
-    let http_addr = config.http_addr();
     let parent_pid = config.parent_pid();
     let http_app = app.clone();
     let h3_app = app;
 
-    let http_task = tokio::spawn(async move { run_http_listener(http_app, http_addr).await });
+    let http_task = tokio::spawn(async move { run_http_listener(http_app, http_listener).await });
     let h3_task = tokio::spawn(async move { run_h3_listener(h3_app, h3_endpoint).await });
 
     tokio::select! {
@@ -116,6 +116,12 @@ where
     }
 
     Ok(())
+}
+
+async fn bind_http_listener(addr: SocketAddr) -> Result<TcpListener> {
+    TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind HTTP compatibility listener at {addr}"))
 }
 
 async fn wait_for_parent_process(parent_pid: Option<libc::pid_t>) -> Result<()> {
@@ -184,10 +190,7 @@ where
         .layer(middleware::from_fn_with_state(state, add_alt_svc::<M>))
 }
 
-async fn run_http_listener(app: Router, addr: SocketAddr) -> Result<()> {
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind HTTP compatibility listener at {addr}"))?;
+async fn run_http_listener(app: Router, listener: TcpListener) -> Result<()> {
     let local_addr = listener
         .local_addr()
         .context("failed to read HTTP compatibility listener address")?;
@@ -241,6 +244,36 @@ fn h3_endpoint(config: &ServerConfig) -> Result<quinn::Endpoint> {
 
     quinn::Endpoint::server(server_config, config.h3_addr())
         .with_context(|| format!("failed to bind H3 listener at {}", config.h3_addr()))
+}
+
+fn emit_server_ready(
+    http_addr: SocketAddr,
+    h3_addr: SocketAddr,
+    auth: &ServerAuth,
+    workspace_root: &Path,
+) -> Result<()> {
+    let ready = server_ready_message(http_addr, h3_addr, auth, workspace_root);
+    let message = serde_json::to_string(&ready).context("failed to serialize readiness message")?;
+    eprintln!("{message}");
+    Ok(())
+}
+
+fn server_ready_message(
+    http_addr: SocketAddr,
+    h3_addr: SocketAddr,
+    auth: &ServerAuth,
+    workspace_root: &Path,
+) -> ServerReadyMessage {
+    ServerReadyMessage {
+        event: "server_ready",
+        name: SERVER_NAME,
+        protocol_version: SERVER_PROTOCOL_VERSION,
+        http_addr: http_addr.to_string(),
+        h3_addr: h3_addr.to_string(),
+        token: auth.token().to_string(),
+        workspace_root: workspace_root.display().to_string(),
+        pid: std::process::id(),
+    }
 }
 
 fn load_tls_identity(
@@ -404,7 +437,6 @@ impl<M> ServerState<M> {
 #[derive(Clone)]
 struct ServerAuth {
     token: Arc<str>,
-    generated: bool,
 }
 
 impl ServerAuth {
@@ -415,12 +447,10 @@ impl ServerAuth {
                 anyhow::ensure!(!token.is_empty(), "server bearer token cannot be empty");
                 Ok(Self {
                     token: Arc::from(token),
-                    generated: false,
                 })
             }
             None => Ok(Self {
                 token: Arc::from(generate_bearer_token()?),
-                generated: true,
             }),
         }
     }
@@ -429,16 +459,11 @@ impl ServerAuth {
     fn for_test() -> Self {
         Self {
             token: Arc::from("test-token"),
-            generated: false,
         }
     }
 
     fn token(&self) -> &str {
         &self.token
-    }
-
-    const fn is_generated(&self) -> bool {
-        self.generated
     }
 
     fn authorizes(&self, headers: &HeaderMap) -> bool {
@@ -1354,6 +1379,18 @@ struct RootResponse {
     name: &'static str,
     protocol: &'static str,
     workspace_root: String,
+}
+
+#[derive(Serialize)]
+struct ServerReadyMessage {
+    event: &'static str,
+    name: &'static str,
+    protocol_version: u32,
+    http_addr: String,
+    h3_addr: String,
+    token: String,
+    workspace_root: String,
+    pid: u32,
 }
 
 #[derive(Serialize)]
@@ -2650,6 +2687,38 @@ mod tests {
             &format!("h3=\":{}\"; ma=86400", h3_addr.port())
         );
         endpoint.close(0u32.into(), b"test complete");
+    }
+
+    #[tokio::test]
+    async fn readiness_message_reports_bound_addresses_and_token() {
+        let http_listener = bind_http_listener("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let config = ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        );
+        let h3_endpoint = h3_endpoint(&config).unwrap();
+        let h3_addr = h3_endpoint.local_addr().unwrap();
+        let auth = ServerAuth::from_config(Some("ready-token")).unwrap();
+        let ready = server_ready_message(http_addr, h3_addr, &auth, Path::new("/workspace"));
+        let ready = serde_json::to_value(ready).unwrap();
+
+        assert_eq!(ready["event"], "server_ready");
+        assert_eq!(ready["name"], SERVER_NAME);
+        assert_eq!(
+            ready["protocol_version"].as_u64(),
+            Some(u64::from(SERVER_PROTOCOL_VERSION))
+        );
+        assert_eq!(ready["http_addr"], http_addr.to_string());
+        assert_eq!(ready["h3_addr"], h3_addr.to_string());
+        assert_eq!(ready["token"], "ready-token");
+        assert_eq!(ready["workspace_root"], "/workspace");
+        assert_eq!(ready["pid"].as_u64(), Some(u64::from(std::process::id())));
+
+        h3_endpoint.close(0u32.into(), b"test complete");
+        drop(http_listener);
     }
 
     #[tokio::test]

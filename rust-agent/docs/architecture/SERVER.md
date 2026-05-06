@@ -15,16 +15,19 @@ router through both HTTP compatibility and native HTTP/3 transports.
 4. One Axum router is built with shared `ServerState`.
 5. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
 6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
-7. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
+7. After both listeners bind, startup emits one JSON readiness line to stderr
+   with the bound addresses, bearer token, protocol version, workspace root, and
+   process id.
+8. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
-8. Clients can list durable SQLite session metadata for recent-session UIs.
-9. Clients create random server-issued sessions before using turn routes.
-10. Clients can fetch metadata for one durable SQLite session by id.
-11. Clients can restore an existing durable SQLite session by id before using
+9. Clients can list durable SQLite session metadata for recent-session UIs.
+10. Clients create random server-issued sessions before using turn routes.
+11. Clients can fetch metadata for one durable SQLite session by id.
+12. Clients can restore an existing durable SQLite session by id before using
    session routes.
-12. Clients can explicitly delete server sessions when they no longer need the
+13. Clients can explicitly delete server sessions when they no longer need the
    state.
-13. Turn requests submit work to `AgentService` and stream named SSE frames.
+14. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
@@ -72,6 +75,9 @@ The HTTP/3 path is native QUIC through `quinn`, `h3`, `h3-quinn`, and
 `h3-axum`. The compatibility listener uses Axum on TCP for local tools, clients
 without HTTP/3 support, and easy smoke tests. Both listeners use the same router
 so endpoint behavior stays identical across protocols.
+
+Both bind addresses may use port `0`; in that case the OS assigns free ports and
+the startup readiness line reports the selected addresses.
 
 HTTP/3 always uses TLS. When `RUST_AGENT_SERVER_TLS_CERT` and
 `RUST_AGENT_SERVER_TLS_KEY` are unset, the server generates a self-signed
@@ -135,7 +141,9 @@ event shape.
 
 The server is process-local and uses one bearer token for non-health routes.
 Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
-stable token, and treat the generated token as a local-development convenience.
+stable token, and read the startup readiness line when a supervisor needs the
+actual token or OS-assigned ports. Treat generated tokens as a local-development
+convenience.
 Server-issued session IDs are random and the active registry is process-local,
 while session content is durable in SQLite. Clients can restore durable session
 rows by id, which re-adds that session id to the process-local active registry

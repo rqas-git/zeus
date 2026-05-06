@@ -57,7 +57,10 @@ The HTTP compatibility responses advertise the HTTP/3 endpoint with `Alt-Svc`.
 When TLS files are not configured, the HTTP/3 listener generates a self-signed
 certificate for local development.
 Set `RUST_AGENT_SERVER_TOKEN` for a stable bearer token. If it is unset, server
-startup prints a generated bearer token.
+startup emits a JSON readiness line containing the generated bearer token, bound
+HTTP and HTTP/3 addresses, protocol version, workspace root, and process id. Set
+either server address to port `0` when a supervisor should let the OS choose a
+free port and read it from the readiness line.
 
 Useful smoke checks:
 
