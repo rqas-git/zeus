@@ -22,6 +22,8 @@ use crate::storage::StoredSessionLastMessage;
 use crate::storage::StoredSessionMetadata;
 use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
+use crate::workspace::BranchSwitchResult;
+use crate::workspace::WorkspaceSnapshot;
 
 /// Reuses a model client and keeps conversation state by session.
 #[derive(Debug)]
@@ -328,6 +330,19 @@ where
     /// Returns the configured default model for new sessions.
     pub(crate) fn default_model(&self) -> &str {
         self.model_config.default_model()
+    }
+
+    /// Returns Git/workspace metadata for the configured workspace root.
+    pub(crate) fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
+        crate::workspace::snapshot(self.tools.root())
+    }
+
+    /// Switches the configured workspace to a local branch and refreshes search state.
+    pub(crate) fn switch_workspace_branch(&self, branch: &str) -> Result<BranchSwitchResult> {
+        let result = crate::workspace::switch_branch(self.tools.root(), branch)?;
+        self.tools.reset_search_index()?;
+        let _warmup = self.tools.spawn_search_index_warmup();
+        Ok(result)
     }
 
     /// Changes the selected model for future turns in a session.

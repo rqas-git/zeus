@@ -727,6 +727,11 @@ impl ToolRegistry {
         tokio::task::spawn_blocking(move || search.warm())
     }
 
+    /// Drops the current search state so the next search scans the current workspace tree.
+    pub(crate) fn reset_search_index(&self) -> Result<()> {
+        self.search.reset()
+    }
+
     /// Returns the stable model-visible tool specs.
     pub(crate) fn specs(&self) -> &[ToolSpec] {
         &self.specs
@@ -951,6 +956,15 @@ impl FffSearchIndex {
 
     fn warm(&self) -> Result<()> {
         let _state = self.state()?;
+        Ok(())
+    }
+
+    fn reset(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("search index lock was poisoned"))?;
+        *state = None;
         Ok(())
     }
 

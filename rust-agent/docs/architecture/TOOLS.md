@@ -18,6 +18,11 @@ When unset, rust-agent uses the process current directory. The configured path i
 canonicalized during startup, and startup fails if it does not resolve to an
 existing directory.
 
+Zeus changes workspace Git branches through the rust-agent workspace API instead
+of running Git directly in the UI process. A successful backend branch switch
+drops the shared FFF search state and starts a fresh warmup so later
+`search_files` and `search_text` calls reflect the new tree.
+
 ## Patch Tool
 
 `apply_patch` accepts one JSON argument, `patch`, using this patch shape:

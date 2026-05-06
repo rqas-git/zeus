@@ -12,6 +12,7 @@ mod storage;
 #[cfg(test)]
 mod test_http;
 mod tools;
+mod workspace;
 
 use std::io;
 use std::io::Write;

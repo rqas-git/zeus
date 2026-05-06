@@ -20,20 +20,26 @@ router through both HTTP compatibility and native HTTP/3 transports.
    process id.
 8. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
-9. Clients can list durable SQLite session metadata for recent-session UIs.
-10. Clients create random server-issued sessions before using turn routes.
-11. Clients can fetch metadata for one durable SQLite session by id.
-12. Clients can restore an existing durable SQLite session by id before using
+9. Clients can read workspace Git metadata and request branch switches through
+   the backend so tool indexes and UI state stay aligned.
+10. Clients can list durable SQLite session metadata for recent-session UIs.
+11. Clients create random server-issued sessions before using turn routes.
+12. Clients can fetch metadata for one durable SQLite session by id.
+13. Clients can restore an existing durable SQLite session by id before using
    session routes.
-13. Clients can explicitly delete server sessions when they no longer need the
+14. Clients can explicitly delete server sessions when they no longer need the
    state.
-14. Turn requests submit work to `AgentService` and stream named SSE frames.
+15. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
 - `GET /` returns server identity, supported protocols, and the canonical
   workspace root used by built-in tools.
 - `GET /healthz` returns a lightweight health response.
+- `GET /workspace` returns the canonical workspace root plus Git branch
+  metadata when the workspace is a Git repository.
+- `POST /workspace/branch` switches the workspace to a local branch, auto-stashes
+  dirty changes, and refreshes backend search state.
 - `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
   recent activity.
 - `POST /sessions` creates a random session and returns its current model.

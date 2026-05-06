@@ -156,6 +156,8 @@ where
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
         .route("/permissions", get(permissions::<M>))
+        .route("/workspace", get(workspace::<M>))
+        .route("/workspace/branch", post(switch_workspace_branch::<M>))
         .route("/sessions:restore", post(restore_session::<M>))
         .route(
             "/sessions",
@@ -738,6 +740,29 @@ where
         default_tool_policy: state.service.default_tool_policy().as_str().to_string(),
         allowed_tool_policies: tool_policy_strings(state.service.tool_policies()),
     })
+}
+
+async fn workspace<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    match state.service.workspace_snapshot() {
+        Ok(snapshot) => Json(WorkspaceResponse::from_snapshot(snapshot)).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn switch_workspace_branch<M>(
+    State(state): State<ServerState<M>>,
+    Json(request): Json<SwitchWorkspaceBranchRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    match state.service.switch_workspace_branch(&request.branch) {
+        Ok(result) => Json(SwitchWorkspaceBranchResponse::from_result(result)).into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error),
+    }
 }
 
 async fn create_session<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
@@ -1413,6 +1438,44 @@ struct PermissionsResponse {
 }
 
 #[derive(Serialize)]
+struct WorkspaceResponse {
+    workspace_root: String,
+    branch: Option<String>,
+    branches: Vec<String>,
+    git: bool,
+}
+
+impl WorkspaceResponse {
+    fn from_snapshot(snapshot: crate::workspace::WorkspaceSnapshot) -> Self {
+        Self {
+            workspace_root: snapshot.workspace_root,
+            branch: snapshot.branch,
+            branches: snapshot.branches,
+            git: snapshot.git,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SwitchWorkspaceBranchResponse {
+    previous_branch: Option<String>,
+    branch: String,
+    stashed_changes: bool,
+    workspace: WorkspaceResponse,
+}
+
+impl SwitchWorkspaceBranchResponse {
+    fn from_result(result: crate::workspace::BranchSwitchResult) -> Self {
+        Self {
+            previous_branch: result.previous_branch,
+            branch: result.branch,
+            stashed_changes: result.stashed_changes,
+            workspace: WorkspaceResponse::from_snapshot(result.workspace),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct CreateSessionResponse {
     session_id: u64,
     model: String,
@@ -1607,6 +1670,11 @@ struct ListSessionsQuery {
 }
 
 #[derive(Deserialize)]
+struct SwitchWorkspaceBranchRequest {
+    branch: String,
+}
+
+#[derive(Deserialize)]
 struct TurnRequest {
     message: String,
     reasoning_effort: Option<String>,
@@ -1614,8 +1682,14 @@ struct TurnRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use axum::body::to_bytes;
     use axum::http::Method;
@@ -1632,6 +1706,7 @@ mod tests {
     use crate::config::ContextWindowConfig;
     use crate::config::ModelConfig;
     use crate::storage::SessionDatabase;
+    use crate::tools::ToolRegistry;
     use crate::tools::ToolSpec;
 
     use super::*;
@@ -1709,6 +1784,87 @@ mod tests {
             std::str::from_utf8(&body).unwrap(),
             r#"{"default_tool_policy":"read-only","allowed_tool_policies":["read-only","workspace-write","workspace-exec"]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn serves_workspace_metadata_and_switches_branches() {
+        if Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+
+        let root = temp_workspace("server-workspace");
+        fs::create_dir_all(&root).unwrap();
+        run_git(&root, &["init"]);
+        run_git(&root, &["config", "user.email", "zeus@example.invalid"]);
+        run_git(&root, &["config", "user.name", "Zeus Test"]);
+        fs::write(root.join("README.md"), "main\n").unwrap();
+        run_git(&root, &["add", "README.md"]);
+        run_git(&root, &["commit", "-m", "initial"]);
+        run_git(&root, &["branch", "-M", "main"]);
+        run_git(&root, &["branch", "feature"]);
+        let canonical_root = root.canonicalize().unwrap();
+
+        let tools = ToolRegistry::for_root(&root);
+        let service = Arc::new(AgentService::with_tools(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+            tools,
+        ));
+        let state = ServerState::with_limits(
+            service,
+            16,
+            "127.0.0.1:4433".parse().unwrap(),
+            ServerAuth::for_test(),
+            usize::MAX,
+            usize::MAX,
+            canonical_root.clone(),
+        );
+        let app = router(state);
+
+        let metadata = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/workspace")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metadata.status(), StatusCode::OK);
+        let body = to_bytes(metadata.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["workspace_root"], canonical_root.display().to_string());
+        assert_eq!(body["branch"], "main");
+        assert_eq!(body["git"], true);
+        assert!(body["branches"]
+            .as_array()
+            .unwrap()
+            .contains(&"feature".into()));
+
+        let switched = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/workspace/branch")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"branch":"feature"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(switched.status(), StatusCode::OK);
+        let body = to_bytes(switched.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["previous_branch"], "main");
+        assert_eq!(body["branch"], "feature");
+        assert_eq!(body["workspace"]["branch"], "feature");
+        assert_eq!(body["stashed_changes"], false);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -3046,5 +3202,35 @@ mod tests {
                 _ => unreachable!("unexpected turn"),
             }
         }
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rust-agent-{name}-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ))
+    }
+
+    fn unique_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
