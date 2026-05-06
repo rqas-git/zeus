@@ -67,6 +67,12 @@ curl --http3 -k https://127.0.0.1:4433/healthz
 SESSION_ID=$(curl -s -X POST \
   -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   http://127.0.0.1:4096/sessions | sed -E 's/.*"session_id":([0-9]+).*/\1/')
+curl -s \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  "http://127.0.0.1:4096/sessions?limit=20&offset=0"
+curl -s \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  "http://127.0.0.1:4096/sessions/$SESSION_ID"
 curl -s -X POST \
   -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   -H 'content-type: application/json' \

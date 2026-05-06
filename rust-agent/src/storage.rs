@@ -25,6 +25,7 @@ use crate::agent_loop::SessionId;
 use crate::agent_loop::SessionStatus;
 
 const BUSY_TIMEOUT_MS: i32 = 5_000;
+const MAX_SESSION_PREVIEW_CHARS: i64 = 240;
 
 /// Durable state for one loaded session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +34,28 @@ pub(crate) struct StoredSession {
     pub(crate) status: SessionStatus,
     pub(crate) messages: Vec<AgentMessage>,
     pub(crate) last_cache_observation: Option<CacheObservation>,
+}
+
+/// Durable metadata for one stored session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredSessionMetadata {
+    pub(crate) session_id: SessionId,
+    pub(crate) model: String,
+    pub(crate) status: SessionStatus,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) message_count: u64,
+    pub(crate) last_message: Option<StoredSessionLastMessage>,
+}
+
+/// Preview metadata for the latest user or assistant message in a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredSessionLastMessage {
+    pub(crate) message_id: MessageId,
+    pub(crate) role: MessageRole,
+    pub(crate) preview: String,
+    pub(crate) truncated: bool,
+    pub(crate) created_at_ms: i64,
 }
 
 /// SQLite-first storage for sessions and messages.
@@ -110,6 +133,98 @@ impl SessionDatabase {
                 messages,
                 last_cache_observation,
             }))
+        })
+    }
+
+    /// Lists stored session metadata ordered by recent activity.
+    ///
+    /// # Errors
+    /// Returns an error when stored rows cannot be read or decoded.
+    pub(crate) fn list_session_metadata(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredSessionMetadata>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT s.id,
+                        s.model,
+                        s.status,
+                        s.created_at_ms,
+                        s.updated_at_ms,
+                        (SELECT COUNT(*)
+                           FROM messages m_count
+                          WHERE m_count.session_id = s.id) AS message_count,
+                        lm.message_id,
+                        lm.role,
+                        substr(COALESCE(lm.text, ''), 1, ?3) AS last_preview,
+                        length(COALESCE(lm.text, '')) > ?3 AS last_truncated,
+                        lm.created_at_ms
+                   FROM sessions s
+                   LEFT JOIN messages lm
+                     ON lm.session_id = s.id
+                    AND lm.kind = 'message'
+                    AND lm.message_id = (
+                        SELECT m_last.message_id
+                          FROM messages m_last
+                         WHERE m_last.session_id = s.id
+                           AND m_last.kind = 'message'
+                         ORDER BY m_last.message_id DESC
+                         LIMIT 1
+                    )
+                  ORDER BY s.updated_at_ms DESC, s.id DESC
+                  LIMIT ?1 OFFSET ?2",
+            )?;
+            statement.bind_i64(1, usize_to_i64(limit, "session metadata limit")?)?;
+            statement.bind_i64(2, usize_to_i64(offset, "session metadata offset")?)?;
+            statement.bind_i64(3, MAX_SESSION_PREVIEW_CHARS)?;
+            load_session_metadata_rows(&mut statement)
+        })
+    }
+
+    /// Loads metadata for one stored session.
+    ///
+    /// # Errors
+    /// Returns an error when the stored row cannot be read or decoded.
+    pub(crate) fn session_metadata(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<StoredSessionMetadata>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT s.id,
+                        s.model,
+                        s.status,
+                        s.created_at_ms,
+                        s.updated_at_ms,
+                        (SELECT COUNT(*)
+                           FROM messages m_count
+                          WHERE m_count.session_id = s.id) AS message_count,
+                        lm.message_id,
+                        lm.role,
+                        substr(COALESCE(lm.text, ''), 1, ?2) AS last_preview,
+                        length(COALESCE(lm.text, '')) > ?2 AS last_truncated,
+                        lm.created_at_ms
+                   FROM sessions s
+                   LEFT JOIN messages lm
+                     ON lm.session_id = s.id
+                    AND lm.kind = 'message'
+                    AND lm.message_id = (
+                        SELECT m_last.message_id
+                          FROM messages m_last
+                         WHERE m_last.session_id = s.id
+                           AND m_last.kind = 'message'
+                         ORDER BY m_last.message_id DESC
+                         LIMIT 1
+                    )
+                  WHERE s.id = ?1",
+            )?;
+            statement.bind_i64(1, session_id_i64(session_id)?)?;
+            statement.bind_i64(2, MAX_SESSION_PREVIEW_CHARS)?;
+            match statement.step()? {
+                StepResult::Done => Ok(None),
+                StepResult::Row => decode_session_metadata_row(&statement).map(Some),
+            }
         })
     }
 
@@ -232,6 +347,60 @@ impl SessionDatabase {
             .map_err(|_| anyhow::anyhow!("session database lock was poisoned"))?;
         action(&mut connection)
     }
+}
+
+fn load_session_metadata_rows(statement: &mut Statement<'_>) -> Result<Vec<StoredSessionMetadata>> {
+    let mut sessions = Vec::new();
+    while statement.step()? == StepResult::Row {
+        sessions.push(decode_session_metadata_row(statement)?);
+    }
+    Ok(sessions)
+}
+
+fn decode_session_metadata_row(statement: &Statement<'_>) -> Result<StoredSessionMetadata> {
+    let session_id = SessionId::new(i64_to_u64(statement.column_i64(0), "session id")?);
+    let model = statement.column_text(1)?;
+    let status = parse_session_status(&statement.column_text(2)?)?;
+    let created_at_ms = statement.column_i64(3);
+    let updated_at_ms = statement.column_i64(4);
+    let message_count = i64_to_u64(statement.column_i64(5), "message count")?;
+    let last_message = decode_session_last_message(statement)?;
+
+    Ok(StoredSessionMetadata {
+        session_id,
+        model,
+        status,
+        created_at_ms,
+        updated_at_ms,
+        message_count,
+        last_message,
+    })
+}
+
+fn decode_session_last_message(
+    statement: &Statement<'_>,
+) -> Result<Option<StoredSessionLastMessage>> {
+    let Some(message_id) = statement.column_optional_i64(6)? else {
+        return Ok(None);
+    };
+    let role = statement
+        .column_optional_text(7)?
+        .as_deref()
+        .and_then(MessageRole::from_str)
+        .context("stored last message row has invalid role")?;
+    let preview = statement.column_optional_text(8)?.unwrap_or_default();
+    let truncated = statement.column_optional_i64(9)?.unwrap_or(0) != 0;
+    let created_at_ms = statement
+        .column_optional_i64(10)?
+        .context("stored last message row is missing created_at_ms")?;
+
+    Ok(Some(StoredSessionLastMessage {
+        message_id: MessageId::new(i64_to_u64(message_id, "last message id")?),
+        role,
+        preview,
+        truncated,
+        created_at_ms,
+    }))
 }
 
 fn load_session_header(
@@ -738,6 +907,12 @@ fn u64_to_i64(value: u64) -> Result<i64> {
         .context("value exceeds SQLite signed integer range")
 }
 
+fn usize_to_i64(value: usize, label: &str) -> Result<i64> {
+    value
+        .try_into()
+        .with_context(|| format!("{label} exceeds SQLite signed integer range"))
+}
+
 fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
     value
         .try_into()
@@ -922,6 +1097,98 @@ mod tests {
                 ..
             } if item_id == "item_1" && call_id == "call_1" && name == "read_file"
         ));
+    }
+
+    #[test]
+    fn lists_session_metadata_with_latest_message_preview() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let first = SessionId::new(7);
+        let second = SessionId::new(8);
+        database.ensure_session(first, "first-model").unwrap();
+        database
+            .insert_message(
+                first,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::Message {
+                        role: MessageRole::User,
+                        text: "older prompt".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+        database.ensure_session(second, "second-model").unwrap();
+        database
+            .set_session_status(second, SessionStatus::Failed)
+            .unwrap();
+        database
+            .insert_message(
+                second,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::FunctionOutput {
+                        call_id: "call_1".to_string(),
+                        output: "tool output".to_string(),
+                        success: true,
+                    },
+                ),
+            )
+            .unwrap();
+        database
+            .insert_message(
+                second,
+                &AgentMessage::from_parts(
+                    MessageId::new(2),
+                    AgentItem::Message {
+                        role: MessageRole::Assistant,
+                        text: "x".repeat(MAX_SESSION_PREVIEW_CHARS as usize + 8),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let sessions = database.list_session_metadata(0, 10).unwrap();
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, second);
+        assert_eq!(sessions[0].model, "second-model");
+        assert_eq!(sessions[0].status, SessionStatus::Failed);
+        assert_eq!(sessions[0].message_count, 2);
+        let last_message = sessions[0].last_message.as_ref().unwrap();
+        assert_eq!(last_message.message_id, MessageId::new(2));
+        assert_eq!(last_message.role, MessageRole::Assistant);
+        assert_eq!(
+            last_message.preview.len(),
+            MAX_SESSION_PREVIEW_CHARS as usize
+        );
+        assert!(last_message.truncated);
+
+        let paged = database.list_session_metadata(1, 1).unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0].session_id, first);
+        assert_eq!(
+            paged[0].last_message.as_ref().unwrap().preview,
+            "older prompt"
+        );
+    }
+
+    #[test]
+    fn loads_single_session_metadata() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(12);
+        database.ensure_session(session_id, "test-model").unwrap();
+
+        let metadata = database.session_metadata(session_id).unwrap().unwrap();
+
+        assert_eq!(metadata.session_id, session_id);
+        assert_eq!(metadata.model, "test-model");
+        assert_eq!(metadata.status, SessionStatus::Idle);
+        assert_eq!(metadata.message_count, 0);
+        assert!(metadata.last_message.is_none());
+        assert!(database
+            .session_metadata(SessionId::new(99))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

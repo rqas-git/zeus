@@ -14,6 +14,7 @@ use anyhow::Result;
 use async_stream::stream;
 use axum::body::Body;
 use axum::extract::Path as AxumPath;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::header;
 use axum::http::HeaderMap;
@@ -25,7 +26,6 @@ use axum::middleware;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Json;
-use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
@@ -52,6 +52,8 @@ use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
 use crate::config::ServerConfig;
 use crate::service::AgentService;
+use crate::service::SessionLastMessage;
+use crate::service::SessionMetadata;
 use crate::service::SessionSnapshot;
 use crate::tools::ToolPolicy;
 
@@ -61,6 +63,8 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const GENERATED_TOKEN_BYTES: usize = 32;
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
+const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
+const MAX_SESSION_LIST_LIMIT: usize = 200;
 
 /// Runs the local server until interrupted.
 ///
@@ -141,8 +145,14 @@ where
         .route("/models", get(models::<M>))
         .route("/permissions", get(permissions::<M>))
         .route("/sessions:restore", post(restore_session::<M>))
-        .route("/sessions", post(create_session::<M>))
-        .route("/sessions/{session_id}", delete(delete_session::<M>))
+        .route(
+            "/sessions",
+            get(list_sessions::<M>).post(create_session::<M>),
+        )
+        .route(
+            "/sessions/{session_id}",
+            get(get_session::<M>).delete(delete_session::<M>),
+        )
         .route(
             "/sessions/{session_id}/model",
             get(session_model::<M>).put(set_session_model::<M>),
@@ -359,17 +369,17 @@ impl<M> ServerState<M> {
         Ok(session_id)
     }
 
-    fn delete_session(&self, session_id: u64) -> Result<bool>
+    fn delete_session(&self, session_id: SessionId) -> Result<bool>
     where
         M: ModelStreamer + Sync,
     {
-        let session_id = SessionId::new(session_id);
-        if !self.sessions.remove(session_id)? {
-            return Ok(false);
+        let removed_from_registry = self.sessions.remove(session_id)?;
+        let removed_from_service = self.service.delete_session(session_id)?;
+        if removed_from_registry || removed_from_service {
+            self.events.remove_session(session_id)?;
+            return Ok(true);
         }
-        let _ = self.service.delete_session(session_id)?;
-        self.events.remove_session(session_id)?;
-        Ok(true)
+        Ok(false)
     }
 
     #[cfg(test)]
@@ -710,6 +720,70 @@ where
     .into_response()
 }
 
+async fn list_sessions<M>(
+    State(state): State<ServerState<M>>,
+    Query(query): Query<ListSessionsQuery>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let (offset, limit) = match session_list_bounds(query) {
+        Ok(bounds) => bounds,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
+    let fetch_limit = match limit.checked_add(1) {
+        Some(limit) => limit,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("session list limit overflowed"),
+            )
+        }
+    };
+
+    match state.service.list_session_metadata(offset, fetch_limit) {
+        Ok(mut sessions) => {
+            let next_offset = if sessions.len() > limit {
+                sessions.truncate(limit);
+                offset.checked_add(limit)
+            } else {
+                None
+            };
+            Json(ListSessionsResponse {
+                sessions: sessions
+                    .into_iter()
+                    .map(SessionMetadataResponse::from_metadata)
+                    .collect(),
+                limit,
+                offset,
+                next_offset,
+            })
+            .into_response()
+        }
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+async fn get_session<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match validated_session_id(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
+    match state.service.session_metadata(session_id) {
+        Ok(Some(metadata)) => {
+            Json(SessionMetadataResponse::from_metadata(metadata)).into_response()
+        }
+        Ok(None) => error_response(StatusCode::NOT_FOUND, anyhow::anyhow!("session not found")),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
 async fn restore_session<M>(
     State(state): State<ServerState<M>>,
     Json(request): Json<RestoreSessionRequest>,
@@ -747,6 +821,28 @@ where
     }
 }
 
+fn validated_session_id(session_id: u64) -> Result<SessionId> {
+    anyhow::ensure!(
+        (1..=MAX_JSON_SAFE_INTEGER).contains(&session_id),
+        "session_id must be between 1 and {MAX_JSON_SAFE_INTEGER}"
+    );
+    Ok(SessionId::new(session_id))
+}
+
+fn session_list_bounds(query: ListSessionsQuery) -> Result<(usize, usize)> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(DEFAULT_SESSION_LIST_LIMIT);
+    anyhow::ensure!(
+        offset <= i64::MAX as usize,
+        "offset exceeds SQLite signed integer range"
+    );
+    anyhow::ensure!(
+        (1..=MAX_SESSION_LIST_LIMIT).contains(&limit),
+        "limit must be between 1 and {MAX_SESSION_LIST_LIMIT}"
+    );
+    Ok((offset, limit))
+}
+
 async fn delete_session<M>(
     State(state): State<ServerState<M>>,
     AxumPath(session_id): AxumPath<u64>,
@@ -754,6 +850,10 @@ async fn delete_session<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
+    let session_id = match validated_session_id(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
     match state.delete_session(session_id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error_response(StatusCode::NOT_FOUND, anyhow::anyhow!("session not found")),
@@ -1267,6 +1367,64 @@ struct CreateSessionResponse {
 }
 
 #[derive(Serialize)]
+struct ListSessionsResponse {
+    sessions: Vec<SessionMetadataResponse>,
+    limit: usize,
+    offset: usize,
+    next_offset: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct SessionMetadataResponse {
+    session_id: u64,
+    model: String,
+    status: &'static str,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    message_count: u64,
+    active: bool,
+    last_message: Option<SessionLastMessageResponse>,
+}
+
+impl SessionMetadataResponse {
+    fn from_metadata(metadata: SessionMetadata) -> Self {
+        Self {
+            session_id: metadata.session_id.get(),
+            model: metadata.model,
+            status: metadata.status.as_str(),
+            created_at_ms: metadata.created_at_ms,
+            updated_at_ms: metadata.updated_at_ms,
+            message_count: metadata.message_count,
+            active: metadata.active,
+            last_message: metadata
+                .last_message
+                .map(SessionLastMessageResponse::from_last_message),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SessionLastMessageResponse {
+    message_id: u64,
+    role: &'static str,
+    preview: String,
+    truncated: bool,
+    created_at_ms: i64,
+}
+
+impl SessionLastMessageResponse {
+    fn from_last_message(message: SessionLastMessage) -> Self {
+        Self {
+            message_id: message.message_id.get(),
+            role: message.role.as_str(),
+            preview: message.preview,
+            truncated: message.truncated,
+            created_at_ms: message.created_at_ms,
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct RestoreSessionResponse {
     session_id: u64,
     model: String,
@@ -1387,6 +1545,12 @@ struct SetPermissionsRequest {
 #[derive(Deserialize)]
 struct RestoreSessionRequest {
     session_id: u64,
+}
+
+#[derive(Deserialize)]
+struct ListSessionsQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -1766,6 +1930,183 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(model.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn lists_session_metadata_for_frontend() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let older_session_id = SessionId::new(76);
+        database
+            .ensure_session(older_session_id, "test-default")
+            .unwrap();
+        database
+            .insert_message(
+                older_session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::Message {
+                        role: MessageRole::User,
+                        text: "older prompt".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let session_id = SessionId::new(77);
+        database.ensure_session(session_id, "test-fast").unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::Message {
+                        role: MessageRole::User,
+                        text: "latest prompt".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(2),
+                    AgentItem::Message {
+                        role: MessageRole::Assistant,
+                        text: "latest assistant reply".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("ok", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default", "test-fast"]).unwrap(),
+            )
+            .with_database(database),
+        );
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let app = router(state);
+
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions?limit=1&offset=0")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = to_bytes(listed.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(r#""limit":1"#), "{body}");
+        assert!(body.contains(r#""offset":0"#), "{body}");
+        assert!(body.contains(r#""next_offset":1"#), "{body}");
+        assert!(body.contains(r#""session_id":77"#), "{body}");
+        assert!(body.contains(r#""model":"test-fast""#), "{body}");
+        assert!(body.contains(r#""status":"idle""#), "{body}");
+        assert!(body.contains(r#""message_count":2"#), "{body}");
+        assert!(body.contains(r#""active":false"#), "{body}");
+        assert!(body.contains(r#""role":"assistant""#), "{body}");
+        assert!(
+            body.contains(r#""preview":"latest assistant reply""#),
+            "{body}"
+        );
+        assert!(!body.contains(r#""session_id":76"#), "{body}");
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/77")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail.status(), StatusCode::OK);
+        let body = to_bytes(detail.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(r#""session_id":77"#), "{body}");
+        assert!(body.contains(r#""active":false"#), "{body}");
+
+        let restored = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions:restore")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"session_id":77}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.status(), StatusCode::OK);
+
+        let active_detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/77")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(active_detail.status(), StatusCode::OK);
+        let body = to_bytes(active_detail.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(r#""active":true"#), "{body}");
+
+        let deleted_inactive = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/sessions/76")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted_inactive.status(), StatusCode::NO_CONTENT);
+
+        let deleted_detail = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/76")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted_detail.status(), StatusCode::NOT_FOUND);
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions?limit=0")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

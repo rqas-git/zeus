@@ -17,18 +17,23 @@ router through both HTTP compatibility and native HTTP/3 transports.
 6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
 7. HTTP compatibility responses include `Alt-Svc` pointing clients at the HTTP/3
    port.
-8. Clients create random server-issued sessions before using session routes.
-9. Clients can restore an existing durable SQLite session by id before using
+8. Clients can list durable SQLite session metadata for recent-session UIs.
+9. Clients create random server-issued sessions before using turn routes.
+10. Clients can fetch metadata for one durable SQLite session by id.
+11. Clients can restore an existing durable SQLite session by id before using
    session routes.
-10. Clients can explicitly delete server sessions when they no longer need the
+12. Clients can explicitly delete server sessions when they no longer need the
    state.
-11. Turn requests submit work to `AgentService` and stream named SSE frames.
+13. Turn requests submit work to `AgentService` and stream named SSE frames.
 
 ## Routes
 
 - `GET /` returns server identity and supported protocols.
 - `GET /healthz` returns a lightweight health response.
+- `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
+  recent activity.
 - `POST /sessions` creates a random session and returns its current model.
+- `GET /sessions/{session_id}` returns metadata for one durable session.
 - `GET /models` returns the default model and allowed model list.
 - `GET /sessions/{session_id}/model` returns the session model.
 - `PUT /sessions/{session_id}/model` changes the session model when idle.
@@ -45,9 +50,20 @@ router through both HTTP compatibility and native HTTP/3 transports.
 `GET /` and `GET /healthz` are public. All other routes require
 `Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a stable
 token; otherwise startup prints a generated token to stderr. Numeric session IDs
-must come from `POST /sessions` or an existing local SQLite row restored through
+must come from `POST /sessions` or an existing local SQLite row discovered
+through `GET /sessions`, `GET /sessions/{session_id}`, or restored through
 `POST /sessions:restore`; generated IDs stay within JavaScript's JSON-safe
 integer range.
+
+Session metadata responses are intended for clients such as Zeus's macOS
+sidebar. List responses are paginated with `limit`, `offset`, and nullable
+`next_offset`. Each session metadata object includes `session_id`, `model`,
+`status`, `created_at_ms`, `updated_at_ms`, `message_count`, `active`, and a
+nullable `last_message` preview. `last_message` contains the latest user or
+assistant message only, not tool transcript items, and includes `message_id`,
+`role`, `preview`, `truncated`, and `created_at_ms`. Transcript records remain
+exclusive to `POST /sessions:restore` so listing sessions does not load or
+return full conversations.
 
 ## Transport
 
@@ -108,6 +124,8 @@ event shape.
   receivers.
 - Active session and event-channel counts are bounded to cap process-local
   memory growth under repeated requests.
+- Session lists read compact metadata from SQLite and cap the latest-message
+  preview before returning it to clients.
 
 ## Current Scope
 
@@ -118,14 +136,16 @@ Server-issued session IDs are random and the active registry is process-local,
 while session content is durable in SQLite. Clients can restore durable session
 rows by id, which re-adds that session id to the process-local active registry
 and returns ordered message, function-call, and function-output transcript
-records for UI replay. Clients can explicitly delete sessions, which removes
-future route access, deletes durable rows, and closes the session event stream;
-it does not cancel an already-running direct turn stream. Use
+records for UI replay. Clients can list durable sessions and fetch individual
+session metadata without restoring transcripts. Clients can explicitly delete
+sessions, which removes future route access, deletes durable rows, and closes
+the session event stream; it does not cancel an already-running direct turn
+stream. Use
 `POST /sessions/{session_id}/turns:cancel` before deletion when the active turn
-should stop. Session listing, per-user authorization, and multi-process
-coordination are not implemented. Use `workspace-write` and `workspace-exec`
-only for trusted local deployments because any bearer-token holder can ask the
-model to edit workspace files or run local commands.
+should stop. Per-user authorization and multi-process coordination are not
+implemented. Use `workspace-write` and `workspace-exec` only for trusted local
+deployments because any bearer-token holder can ask the model to edit workspace
+files or run local commands.
 WebSocket endpoints are not implemented because SSE matches the current
 server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should

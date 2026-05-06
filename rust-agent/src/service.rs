@@ -18,6 +18,8 @@ use crate::agent_loop::TurnCancellation;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
 use crate::storage::SessionDatabase;
+use crate::storage::StoredSessionLastMessage;
+use crate::storage::StoredSessionMetadata;
 use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
 
@@ -48,6 +50,29 @@ pub(crate) struct SessionSnapshot {
     pub(crate) model: String,
     pub(crate) tool_policy: ToolPolicy,
     pub(crate) messages: Vec<AgentMessage>,
+}
+
+/// Durable metadata for a session with process-local activity state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionMetadata {
+    pub(crate) session_id: SessionId,
+    pub(crate) model: String,
+    pub(crate) status: crate::agent_loop::SessionStatus,
+    pub(crate) created_at_ms: i64,
+    pub(crate) updated_at_ms: i64,
+    pub(crate) message_count: u64,
+    pub(crate) last_message: Option<SessionLastMessage>,
+    pub(crate) active: bool,
+}
+
+/// Preview of the latest user or assistant message in a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionLastMessage {
+    pub(crate) message_id: crate::agent_loop::MessageId,
+    pub(crate) role: crate::agent_loop::MessageRole,
+    pub(crate) preview: String,
+    pub(crate) truncated: bool,
+    pub(crate) created_at_ms: i64,
 }
 
 impl SessionHandle {
@@ -201,6 +226,41 @@ where
             tool_policy,
             messages,
         }))
+    }
+
+    /// Lists durable session metadata ordered by recent activity.
+    ///
+    /// # Errors
+    /// Returns an error when no database is configured or storage fails.
+    pub(crate) fn list_session_metadata(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<SessionMetadata>> {
+        let database = self
+            .database
+            .as_ref()
+            .context("session database is not configured")?;
+        let stored = database.list_session_metadata(offset, limit)?;
+        self.annotate_session_metadata(stored)
+    }
+
+    /// Loads metadata for one durable session.
+    ///
+    /// # Errors
+    /// Returns an error when no database is configured or storage fails.
+    pub(crate) fn session_metadata(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionMetadata>> {
+        let database = self
+            .database
+            .as_ref()
+            .context("session database is not configured")?;
+        let Some(stored) = database.session_metadata(session_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.annotate_one_session_metadata(stored)?))
     }
 
     /// Deletes a session from memory and durable storage if present.
@@ -451,10 +511,59 @@ where
         Ok(())
     }
 
+    fn annotate_session_metadata(
+        &self,
+        sessions: Vec<StoredSessionMetadata>,
+    ) -> Result<Vec<SessionMetadata>> {
+        let active_sessions = self.active_session_ids()?;
+        Ok(sessions
+            .into_iter()
+            .map(|stored| session_metadata_from_stored(stored, &active_sessions))
+            .collect())
+    }
+
+    fn annotate_one_session_metadata(
+        &self,
+        stored: StoredSessionMetadata,
+    ) -> Result<SessionMetadata> {
+        let active_sessions = self.active_session_ids()?;
+        Ok(session_metadata_from_stored(stored, &active_sessions))
+    }
+
+    fn active_session_ids(&self) -> Result<Vec<SessionId>> {
+        Ok(self.lock_sessions()?.keys().copied().collect())
+    }
+
     /// Returns the number of sessions held in memory.
     #[cfg(test)]
     pub(crate) fn session_count(&self) -> Result<usize> {
         Ok(self.lock_sessions()?.len())
+    }
+}
+
+fn session_metadata_from_stored(
+    stored: StoredSessionMetadata,
+    active_sessions: &[SessionId],
+) -> SessionMetadata {
+    SessionMetadata {
+        active: active_sessions.contains(&stored.session_id),
+        session_id: stored.session_id,
+        model: stored.model,
+        status: stored.status,
+        created_at_ms: stored.created_at_ms,
+        updated_at_ms: stored.updated_at_ms,
+        message_count: stored.message_count,
+        last_message: stored.last_message.map(session_last_message_from_stored),
+    }
+}
+
+fn session_last_message_from_stored(stored: StoredSessionLastMessage) -> SessionLastMessage {
+    SessionLastMessage {
+        message_id: stored.message_id,
+        role: stored.role,
+        preview: stored.preview,
+        truncated: stored.truncated,
+        created_at_ms: stored.created_at_ms,
     }
 }
 

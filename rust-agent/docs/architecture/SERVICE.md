@@ -9,7 +9,8 @@ transport state for every request.
 
 1. Startup creates `AuthManager` and `ChatGptClient` once, then passes the
    client to `AgentService`.
-2. Each request supplies a `SessionId` and user message or session model update.
+2. Each request supplies a `SessionId`, pagination bounds, user message, or
+   session model update.
 3. `AgentService` validates model updates against `ModelConfig`.
 4. `AgentService` finds or creates the matching session handle, loading any
    durable SQLite state for that `SessionId`.
@@ -17,7 +18,9 @@ transport state for every request.
 6. The session loop streams the selected model response, executes any requested
    built-in tools, and emits `AgentEvent`s, including tool lifecycle events and
    the completed assistant message.
-7. The caller decides how to translate events into terminal output or server
+7. Metadata requests read compact SQLite session rows and annotate them with
+   process-local active-session state.
+8. The caller decides how to translate events into terminal output or server
    stream frames.
 
 ## Responsibilities
@@ -27,6 +30,8 @@ transport state for every request.
 - `AgentService` owns in-memory session lookup by `SessionId`.
 - `AgentService` creates, loads, and deletes SQLite-backed session state when a
   database is configured.
+- `AgentService` lists and loads durable session metadata without restoring full
+  transcripts.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` can request cancellation of the currently running turn without
   waiting on that session's execution lock.
@@ -47,6 +52,8 @@ transport state for every request.
 - Session history is pruned by each session loop according to the configured
   history limits.
 - Session model changes do not rebuild the HTTP client.
+- Session metadata reads stay outside per-session execution locks and only use
+  the session map to mark whether a durable session is currently active.
 - The service avoids frontend assumptions; event sinks stay caller-provided.
 - Event sinks are `Send`, so server handlers can spawn turn work onto Tokio's
   multi-threaded runtime.
@@ -72,12 +79,14 @@ Production startup configures a SQLite database, so sessions and ordered
 messages are durable. The database uses WAL mode, `synchronous=NORMAL`, foreign
 keys, a busy timeout, and cascade deletion of session messages. `AgentLoop`
 continues to keep only bounded recent history in memory; SQLite remains the
-canonical store for the full ordered message list.
+canonical store for the full ordered message list. Session metadata queries are
+ordered by `updated_at_ms` and include counts plus a capped preview of the latest
+user or assistant message.
 
 ## Current Scope
 
 The active session map and cancellation state are process-local; server mode
 bounds the active map with configuration. Explicit server deletion removes a
-session from memory and SQLite. Session listing, TTL eviction, and
-cross-process coordination should be added only when endpoint behavior requires
-them.
+session from memory and SQLite. Durable session listing is implemented for
+frontend navigation. TTL eviction and cross-process coordination should be added
+only when endpoint behavior requires them.
