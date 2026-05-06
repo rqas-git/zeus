@@ -61,7 +61,9 @@ struct ChatWindow: View {
                     text: $viewModel.draft,
                     prompt: viewModel.inputPrompt,
                     placeholder: viewModel.inputPlaceholder,
-                    onSubmit: viewModel.sendDraft
+                    onSubmit: viewModel.sendDraft,
+                    onHistoryPrevious: viewModel.selectPreviousSubmittedMessage,
+                    onHistoryNext: viewModel.selectNextSubmittedMessage
                 )
                 .padding(.top, 8)
 
@@ -568,7 +570,9 @@ private struct SearchBar: View {
             PromptTextField(
                 text: $text,
                 placeholder: "search transcript...",
-                onSubmit: onNext
+                onSubmit: onNext,
+                onHistoryPrevious: { false },
+                onHistoryNext: { false }
             )
             .frame(height: 18)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -852,6 +856,8 @@ private struct InputPrompt: View {
     let prompt: String
     let placeholder: String
     let onSubmit: () -> Void
+    let onHistoryPrevious: () -> Bool
+    let onHistoryNext: () -> Bool
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: TerminalLayout.markerTextSpacing) {
@@ -862,7 +868,9 @@ private struct InputPrompt: View {
             PromptTextField(
                 text: $text,
                 placeholder: placeholder,
-                onSubmit: onSubmit
+                onSubmit: onSubmit,
+                onHistoryPrevious: onHistoryPrevious,
+                onHistoryNext: onHistoryNext
             )
                 .frame(height: 18)
                 .frame(maxWidth: .infinity, alignment: .leading)

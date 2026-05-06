@@ -5,6 +5,8 @@ struct PromptTextField: NSViewRepresentable {
     @Binding var text: String
     let placeholder: String
     let onSubmit: () -> Void
+    let onHistoryPrevious: () -> Bool
+    let onHistoryNext: () -> Bool
 
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField()
@@ -35,6 +37,8 @@ struct PromptTextField: NSViewRepresentable {
     func updateNSView(_ textField: NSTextField, context: Context) {
         context.coordinator.text = $text
         context.coordinator.onSubmit = onSubmit
+        context.coordinator.onHistoryPrevious = onHistoryPrevious
+        context.coordinator.onHistoryNext = onHistoryNext
 
         if textField.stringValue != text {
             textField.stringValue = text
@@ -45,7 +49,12 @@ struct PromptTextField: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onSubmit: onSubmit)
+        Coordinator(
+            text: $text,
+            onSubmit: onSubmit,
+            onHistoryPrevious: onHistoryPrevious,
+            onHistoryNext: onHistoryNext
+        )
     }
 
     private func focus(_ textField: NSTextField, coordinator: Coordinator) {
@@ -63,11 +72,20 @@ struct PromptTextField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
         var onSubmit: () -> Void
+        var onHistoryPrevious: () -> Bool
+        var onHistoryNext: () -> Bool
         var didApplyInitialFocus = false
 
-        init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+        init(
+            text: Binding<String>,
+            onSubmit: @escaping () -> Void,
+            onHistoryPrevious: @escaping () -> Bool,
+            onHistoryNext: @escaping () -> Bool
+        ) {
             self.text = text
             self.onSubmit = onSubmit
+            self.onHistoryPrevious = onHistoryPrevious
+            self.onHistoryNext = onHistoryNext
         }
 
         @objc func submit() {
@@ -84,6 +102,20 @@ struct PromptTextField: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
+            if commandSelector == #selector(NSResponder.moveUp(_:)),
+               hasNoNavigationModifiers {
+                guard onHistoryPrevious() else { return false }
+                applyBoundText(to: textView)
+                return true
+            }
+
+            if commandSelector == #selector(NSResponder.moveDown(_:)),
+               hasNoNavigationModifiers {
+                guard onHistoryNext() else { return false }
+                applyBoundText(to: textView)
+                return true
+            }
+
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
                   NSApp.currentEvent?.modifierFlags
                     .intersection(.deviceIndependentFlagsMask)
@@ -95,6 +127,19 @@ struct PromptTextField: NSViewRepresentable {
             textView.insertNewlineIgnoringFieldEditor(nil)
             text.wrappedValue = textView.string
             return true
+        }
+
+        private var hasNoNavigationModifiers: Bool {
+            let flags = NSApp.currentEvent?.modifierFlags
+                .intersection(.deviceIndependentFlagsMask) ?? []
+            let disallowed: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+            return flags.intersection(disallowed).isEmpty
+        }
+
+        private func applyBoundText(to textView: NSTextView) {
+            let value = text.wrappedValue
+            textView.string = value
+            textView.setSelectedRange(NSRange(location: value.utf16.count, length: 0))
         }
     }
 }
