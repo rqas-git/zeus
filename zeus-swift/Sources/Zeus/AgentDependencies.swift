@@ -19,6 +19,10 @@ protocol AgentClientProtocol {
         reasoningEffort: String,
         onEvent: @escaping (AgentServerEvent) async -> Void
     ) async throws
+    func runTerminalCommand(
+        sessionID: UInt64,
+        command: String
+    ) async throws -> TerminalCommandResponse
 }
 
 protocol AgentServerProtocol: AnyObject {

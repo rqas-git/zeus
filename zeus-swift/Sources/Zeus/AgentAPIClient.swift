@@ -131,6 +131,18 @@ struct AgentAPIClient: AgentClientProtocol {
         }
     }
 
+    func runTerminalCommand(
+        sessionID: UInt64,
+        command: String
+    ) async throws -> TerminalCommandResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/terminal:run")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(TerminalCommandRequest(command: command))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(TerminalCommandResponse.self, from: data)
+    }
+
     private func authenticatedRequest(path: String) -> URLRequest {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
@@ -366,6 +378,11 @@ struct SwitchWorkspaceBranchResponse: Decodable {
     }
 }
 
+struct TerminalCommandResponse: Decodable {
+    let output: String
+    let success: Bool
+}
+
 private struct SetModelRequest: Encodable {
     let model: String
 }
@@ -398,4 +415,8 @@ struct TurnRequest: Encodable {
         case message
         case reasoningEffort = "reasoning_effort"
     }
+}
+
+private struct TerminalCommandRequest: Encodable {
+    let command: String
 }
