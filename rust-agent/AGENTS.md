@@ -98,6 +98,7 @@ Server configuration:
 - `RUST_AGENT_SERVER_H3_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_PARENT_PID`
 - `RUST_AGENT_STATE_DB`
+- `RUST_AGENT_WORKSPACE`
 
 ## Tool Mode
 
@@ -110,6 +111,9 @@ RUST_AGENT_TOOL_MODE=workspace-write cargo run -- "Update the requested file"
 
 `workspace-write` exposes `apply_patch` for workspace-confined UTF-8 file edits.
 Use it only for trusted local sessions, especially in server mode.
+Set `RUST_AGENT_WORKSPACE` to choose the canonical directory that workspace
+tools can read, edit, or execute within. When unset, rust-agent uses the process
+current directory.
 
 Enable trusted command execution with:
 

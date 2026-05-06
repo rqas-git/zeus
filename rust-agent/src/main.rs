@@ -59,7 +59,8 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         tools: tool_config,
     } = AppConfig::from_env()?;
     let session_id = SessionId::new(1);
-    let tools = ToolRegistry::with_policy_and_search_concurrency(
+    let tools = ToolRegistry::for_root_with_policy_and_search_concurrency(
+        tool_config.workspace_root(),
         tool_config.policy(),
         tool_config.search_concurrency(),
     );
@@ -96,10 +97,12 @@ async fn run_server() -> Result<()> {
         telemetry,
         tools: tool_config,
     } = AppConfig::from_env()?;
-    let tools = ToolRegistry::with_policy_and_search_concurrency(
+    let tools = ToolRegistry::for_root_with_policy_and_search_concurrency(
+        tool_config.workspace_root(),
         tool_config.policy(),
         tool_config.search_concurrency(),
     );
+    let workspace_root = tools.root().to_path_buf();
     let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
     let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
@@ -107,7 +110,7 @@ async fn run_server() -> Result<()> {
     let service = AgentService::with_tools(client, context, models, tools)
         .with_database(database)
         .with_session_limit(server.max_sessions());
-    server::serve(service, server).await
+    server::serve(service, server, workspace_root).await
 }
 
 async fn run_device_code_login() -> Result<()> {

@@ -668,15 +668,6 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Creates a tool registry for the current directory with explicit permissions and search concurrency.
-    pub(crate) fn with_policy_and_search_concurrency(
-        policy: ToolPolicy,
-        search_concurrency: usize,
-    ) -> Self {
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::for_root_with_policy_and_search_concurrency(root, policy, search_concurrency)
-    }
-
     /// Creates a tool registry rooted at `root`.
     pub(crate) fn for_root(root: impl Into<PathBuf>) -> Self {
         Self::for_root_with_policy(root, ToolPolicy::ReadOnly)
@@ -712,6 +703,11 @@ impl ToolRegistry {
     /// Returns the active tool permission policy.
     pub(crate) const fn policy(&self) -> ToolPolicy {
         self.policy
+    }
+
+    /// Returns the canonical workspace root used by this registry.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Returns a registry with the same root/search state and a different policy.

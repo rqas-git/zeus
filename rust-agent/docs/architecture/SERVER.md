@@ -28,7 +28,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 ## Routes
 
-- `GET /` returns server identity and supported protocols.
+- `GET /` returns server identity, supported protocols, and the canonical
+  workspace root used by built-in tools.
 - `GET /healthz` returns a lightweight health response.
 - `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
   recent activity.
@@ -108,6 +109,9 @@ event shape.
 - Tool policy is loaded once at startup. The default `read-only` mode exposes no
   write tools; `workspace-write` exposes `apply_patch`; `workspace-exec` exposes
   trusted local shell command execution.
+- The workspace root is resolved once at startup from `RUST_AGENT_WORKSPACE` or
+  the process current directory and is reported by `GET /` for clients that need
+  to verify backend/UI workspace alignment.
 - Server startup initializes the shared FFF search index in the background. If a
   request reaches an FFF-backed tool before scanning completes, that tool is the
   path that waits on a blocking worker and then runs against the ready index.

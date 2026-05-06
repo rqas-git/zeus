@@ -1,6 +1,7 @@
 //! Runtime configuration for the agent harness.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -645,8 +646,9 @@ impl Default for StorageConfig {
 }
 
 /// Controls which built-in tools are exposed to the model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolConfig {
+    workspace_root: PathBuf,
     policy: ToolPolicy,
     search_concurrency: usize,
 }
@@ -662,18 +664,24 @@ impl ToolConfig {
             DEFAULT_FFF_SEARCH_CONCURRENCY,
         )?;
         Ok(Self {
+            workspace_root: workspace_root_from_env()?,
             policy: parse_tool_policy(&env_string("RUST_AGENT_TOOL_MODE", DEFAULT_TOOL_MODE))?,
             search_concurrency: validate_tool_search_concurrency(search_concurrency)?,
         })
     }
 
+    /// Returns the canonical workspace root used by built-in tools.
+    pub(crate) fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     /// Returns the active tool permission policy.
-    pub(crate) const fn policy(self) -> ToolPolicy {
+    pub(crate) const fn policy(&self) -> ToolPolicy {
         self.policy
     }
 
     /// Returns the maximum number of concurrent FFF searches.
-    pub(crate) const fn search_concurrency(self) -> usize {
+    pub(crate) const fn search_concurrency(&self) -> usize {
         self.search_concurrency
     }
 }
@@ -681,6 +689,7 @@ impl ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            workspace_root: default_workspace_root(),
             policy: ToolPolicy::ReadOnly,
             search_concurrency: DEFAULT_FFF_SEARCH_CONCURRENCY,
         }
@@ -731,6 +740,30 @@ fn env_optional_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn workspace_root_from_env() -> Result<PathBuf> {
+    let root = match env_optional_path("RUST_AGENT_WORKSPACE") {
+        Some(path) => path,
+        None => std::env::current_dir().context("failed to read current workspace directory")?,
+    };
+    canonical_workspace_root(root)
+}
+
+fn default_workspace_root() -> PathBuf {
+    workspace_root_from_env().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn canonical_workspace_root(root: PathBuf) -> Result<PathBuf> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve RUST_AGENT_WORKSPACE={}", root.display()))?;
+    anyhow::ensure!(
+        root.is_dir(),
+        "RUST_AGENT_WORKSPACE is not a directory: {}",
+        root.display()
+    );
+    Ok(root)
 }
 
 fn env_optional_parent_pid(name: &str) -> Result<Option<libc::pid_t>> {
@@ -1021,6 +1054,18 @@ mod tests {
         );
         assert!(validate_tool_search_concurrency(0).is_err());
         assert!(validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).is_err());
+    }
+
+    #[test]
+    fn resolves_canonical_workspace_roots() {
+        let current = std::env::current_dir().unwrap();
+        assert_eq!(canonical_workspace_root(current.clone()).unwrap(), current);
+
+        let missing = std::env::temp_dir().join(format!(
+            "rust-agent-missing-workspace-{}",
+            std::process::id()
+        ));
+        assert!(canonical_workspace_root(missing).is_err());
     }
 
     #[test]

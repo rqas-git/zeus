@@ -48,6 +48,7 @@ configuration.
 - `RUST_AGENT_PARENT_PID`
 - `RUST_AGENT_CACHE_HEALTH`
 - `RUST_AGENT_TOOL_MODE`
+- `RUST_AGENT_WORKSPACE`
 
 ## Responsibilities
 
@@ -79,6 +80,10 @@ configuration.
   deferred, so use this mode only for trusted local sessions.
 - `RUST_AGENT_TOOL_SEARCH_CONCURRENCY` defaults to `1` and may be set up to
   `16` to allow more simultaneous FFF path/content searches across sessions.
+- `RUST_AGENT_WORKSPACE` selects the canonical directory used by built-in
+  workspace tools. When unset, rust-agent uses the process current directory.
+  Startup fails if the configured path cannot be resolved to an existing
+  directory.
 - `RUST_AGENT_HOME` changes the directory that stores `auth.json` and the
   default `sessions.db`; when unset, rust-agent uses `~/.rust-agent/`.
 - `RUST_AGENT_STATE_DB` overrides the SQLite session database path.

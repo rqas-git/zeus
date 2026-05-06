@@ -1,7 +1,8 @@
 # Tooling Architecture
 
-`ToolRegistry` exposes model-callable workspace tools. The default policy is
-read-only. Write access is opt-in with `RUST_AGENT_TOOL_MODE=workspace-write`.
+`ToolRegistry` exposes model-callable workspace tools rooted at the canonical
+workspace directory. The default policy is read-only. Write access is opt-in
+with `RUST_AGENT_TOOL_MODE=workspace-write`.
 
 ## Modes
 
@@ -9,6 +10,13 @@ read-only. Write access is opt-in with `RUST_AGENT_TOOL_MODE=workspace-write`.
   `search_files`, and `search_text`.
 - `workspace-write` exposes the read-only tools plus `apply_patch`.
 - `workspace-exec` exposes the workspace-write tools plus `exec_command`.
+
+## Workspace Root
+
+`RUST_AGENT_WORKSPACE` selects the workspace root used by all built-in tools.
+When unset, rust-agent uses the process current directory. The configured path is
+canonicalized during startup, and startup fails if it does not resolve to an
+existing directory.
 
 ## Patch Tool
 

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -70,7 +71,11 @@ const MAX_SESSION_LIST_LIMIT: usize = 200;
 ///
 /// # Errors
 /// Returns an error if either listener cannot start or exits unexpectedly.
-pub(crate) async fn serve<M>(service: AgentService<M>, config: ServerConfig) -> Result<()>
+pub(crate) async fn serve<M>(
+    service: AgentService<M>,
+    config: ServerConfig,
+    workspace_root: PathBuf,
+) -> Result<()>
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
@@ -92,6 +97,7 @@ where
         auth,
         config.max_sessions(),
         config.max_event_channels(),
+        workspace_root,
     );
     let app = router(state);
     let http_addr = config.http_addr();
@@ -140,7 +146,7 @@ where
     M: ModelStreamer + Send + Sync + 'static,
 {
     Router::new()
-        .route("/", get(root))
+        .route("/", get(root::<M>))
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
         .route("/permissions", get(permissions::<M>))
@@ -313,6 +319,7 @@ struct ServerState<M> {
     sessions: SessionRegistry,
     auth: ServerAuth,
     alt_svc: HeaderValue,
+    workspace_root: Arc<PathBuf>,
 }
 
 impl<M> Clone for ServerState<M> {
@@ -323,6 +330,7 @@ impl<M> Clone for ServerState<M> {
             sessions: self.sessions.clone(),
             auth: self.auth.clone(),
             alt_svc: self.alt_svc.clone(),
+            workspace_root: Arc::clone(&self.workspace_root),
         }
     }
 }
@@ -341,6 +349,7 @@ impl<M> ServerState<M> {
             ServerAuth::for_test(),
             usize::MAX,
             usize::MAX,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         )
     }
 
@@ -351,6 +360,7 @@ impl<M> ServerState<M> {
         auth: ServerAuth,
         max_sessions: usize,
         max_event_channels: usize,
+        workspace_root: PathBuf,
     ) -> Self {
         let alt_svc = HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", h3_addr.port()))
             .expect("generated Alt-Svc header must be valid");
@@ -360,6 +370,7 @@ impl<M> ServerState<M> {
             sessions: SessionRegistry::new(max_sessions),
             auth,
             alt_svc,
+            workspace_root: Arc::new(workspace_root),
         }
     }
 
@@ -667,10 +678,14 @@ fn tool_policy_strings(policies: &[ToolPolicy]) -> Vec<String> {
         .collect()
 }
 
-async fn root() -> impl IntoResponse {
+async fn root<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
     Json(RootResponse {
         name: SERVER_NAME,
         protocol: "http/1.1,http/2,http/3",
+        workspace_root: state.workspace_root.display().to_string(),
     })
 }
 
@@ -1338,6 +1353,7 @@ impl TokenUsageEvent {
 struct RootResponse {
     name: &'static str,
     protocol: &'static str,
+    workspace_root: String,
 }
 
 #[derive(Serialize)]
@@ -1595,6 +1611,19 @@ mod tests {
         let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
         let app = router(state);
 
+        let root = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+        let body = to_bytes(root.into_body(), usize::MAX).await.unwrap();
+        let root: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(root["name"], SERVER_NAME);
+        assert_eq!(root["protocol"], "http/1.1,http/2,http/3");
+        let expected_workspace = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(root["workspace_root"], expected_workspace);
+
         let health = app
             .clone()
             .oneshot(
@@ -1807,6 +1836,7 @@ mod tests {
             ServerAuth::for_test(),
             1,
             usize::MAX,
+            PathBuf::from("/workspace"),
         );
         let app = router(state);
 
@@ -2126,6 +2156,7 @@ mod tests {
             ServerAuth::for_test(),
             1,
             usize::MAX,
+            PathBuf::from("/workspace"),
         );
         let app = router(state);
         let created = app
@@ -2199,6 +2230,7 @@ mod tests {
             ServerAuth::for_test(),
             usize::MAX,
             1,
+            PathBuf::from("/workspace"),
         );
         state.register_session_for_test(SessionId::new(1));
         state.register_session_for_test(SessionId::new(2));
