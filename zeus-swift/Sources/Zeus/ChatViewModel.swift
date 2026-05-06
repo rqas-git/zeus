@@ -366,6 +366,18 @@ final class ChatViewModel: ObservableObject {
             append(kind: .status, text: "terminal command already running")
             return
         }
+        guard !isSending else {
+            append(kind: .status, text: "turn already running")
+            return
+        }
+        guard isReady else {
+            append(kind: .status, text: "rust-agent is still starting")
+            return
+        }
+        guard let client, let sessionID else {
+            append(kind: .error, text: "No rust-agent session is available.")
+            return
+        }
 
         recordSubmittedMessage(command)
         draft = ""
@@ -374,12 +386,16 @@ final class ChatViewModel: ObservableObject {
         let rootURL = workspace.url
         terminalTask = Task {
             do {
-                let result = try await Task.detached {
-                    try BashPassthrough.run(command, at: rootURL)
-                }.value
+                if selectedPermission != "workspace-exec" {
+                    applySelectedPermissions("workspace-exec")
+                }
+                try await applyTerminalPermissions(client: client, sessionID: sessionID)
+                let result = try await client.runTerminalCommand(
+                    sessionID: sessionID,
+                    command: command
+                )
                 appendTerminalResult(result)
-                workspace = WorkspaceMetadata.current(at: rootURL)
-                refreshBranchOptions()
+                try? await refreshWorkspace(client: client, fallbackURL: rootURL)
             } catch {
                 append(kind: .error, text: error.localizedDescription)
             }
@@ -421,12 +437,12 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func appendTerminalResult(_ result: BashCommandResult) {
-        let output = result.output.isEmpty ? "exit \(result.exitCode)" : result.output
-        if result.exitCode == 0 {
+    private func appendTerminalResult(_ result: TerminalCommandResponse) {
+        let output = result.output.isEmpty ? "terminal command completed" : result.output
+        if result.success {
             append(kind: .status, text: output)
         } else {
-            append(kind: .error, text: "\(output)\nexit \(result.exitCode)")
+            append(kind: .error, text: output)
         }
     }
 
@@ -807,10 +823,6 @@ final class ChatViewModel: ObservableObject {
         branchOptions = Self.branchOptions(from: response, currentBranch: workspace.branch)
     }
 
-    private func refreshBranchOptions() {
-        branchOptions = workspace.isGit ? [workspace.branch] : []
-    }
-
     private static func branchOptions(
         from response: WorkspaceResponse,
         currentBranch: String
@@ -918,6 +930,23 @@ final class ChatViewModel: ObservableObject {
             )
             applySessionPermissions(response.toolPolicy, selectedTarget: target)
         }
+    }
+
+    private func applyTerminalPermissions(
+        client: any AgentClientProtocol,
+        sessionID: UInt64
+    ) async throws {
+        let target = "workspace-exec"
+        guard sessionPermission != target else { return }
+
+        isSelectingPermissions = true
+        defer { isSelectingPermissions = false }
+
+        let response = try await client.setSessionPermissions(
+            sessionID: sessionID,
+            toolPolicy: target
+        )
+        applySessionPermissions(response.toolPolicy, selectedTarget: target)
     }
 
     private func updateTokenUsage(_ usage: TokenUsagePayload?) {

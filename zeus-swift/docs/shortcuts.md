@@ -10,7 +10,7 @@
 | `Cmd+F` | Open transcript search. |
 | `Cmd+G` | Move to the next transcript search match. |
 | `Cmd+Shift+G` | Move to the previous transcript search match. |
-| `Cmd+T` | Toggle terminal passthrough for the input field. |
+| `Cmd+T` | Toggle terminal passthrough for the input field. Commands run through rust-agent and are recorded in the active session context. |
 | `Ctrl+C` | Clear the input field. |
 | `Ctrl+Enter` | Insert a newline in the input field. |
 | `Up Arrow` | Recall the previous submitted message while the input field is focused, or move the highlighted option up while a footer dropdown is open. |
