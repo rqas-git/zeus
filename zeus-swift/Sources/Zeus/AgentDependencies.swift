@@ -4,6 +4,8 @@ import ZeusCore
 protocol AgentClientProtocol {
     func models() async throws -> ModelsResponse
     func permissions() async throws -> PermissionsResponse
+    func workspace() async throws -> WorkspaceResponse
+    func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse
     func createSession() async throws -> CreateSessionResponse
     func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse

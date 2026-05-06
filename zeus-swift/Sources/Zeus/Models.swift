@@ -47,6 +47,7 @@ struct WorkspaceMetadata {
     let branch: String
     let displayPath: String
     let url: URL
+    let isGit: Bool
 
     static func current() -> WorkspaceMetadata {
         let environment = ProcessInfo.processInfo.environment
@@ -55,13 +56,23 @@ struct WorkspaceMetadata {
     }
 
     static func current(at url: URL) -> WorkspaceMetadata {
-        let branch = (try? GitWorkspace.currentBranch(at: url)) ?? "main"
-
         return WorkspaceMetadata(
             name: url.lastPathComponent,
-            branch: branch.isEmpty ? "main" : branch,
+            branch: "...",
             displayPath: PathDisplay.abbreviatingHome(in: url.path),
-            url: url
+            url: url,
+            isGit: false
+        )
+    }
+
+    func applying(_ workspace: WorkspaceResponse) -> WorkspaceMetadata {
+        let branch = workspace.branch ?? (workspace.git ? "detached" : "no git")
+        return WorkspaceMetadata(
+            name: name,
+            branch: branch.isEmpty ? "detached" : branch,
+            displayPath: PathDisplay.abbreviatingHome(in: workspace.workspaceRoot),
+            url: URL(fileURLWithPath: workspace.workspaceRoot).standardizedFileURL,
+            isGit: workspace.git
         )
     }
 

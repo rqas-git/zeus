@@ -52,7 +52,13 @@ final class ChatViewModel: ObservableObject {
     }
 
     var canChangeBranch: Bool {
-        !isSending && !isLoggingIn && !isSwitchingBranch && !isRunningTerminalCommand
+        isReady
+            && workspace.isGit
+            && !branchOptions.isEmpty
+            && !isSending
+            && !isLoggingIn
+            && !isSwitchingBranch
+            && !isRunningTerminalCommand
     }
 
     var inputPrompt: String {
@@ -91,7 +97,7 @@ final class ChatViewModel: ObservableObject {
         self.server = server
         self.auth = auth
         self.workspace = workspace
-        self.branchOptions = Self.branchOptions(at: workspace.url, currentBranch: workspace.branch)
+        self.branchOptions = [workspace.branch]
     }
 
     deinit {
@@ -120,7 +126,7 @@ final class ChatViewModel: ObservableObject {
             if let permissions = try? await client.permissions() {
                 applyPermissions(permissions)
             }
-            refreshBranchOptions()
+            try? await refreshWorkspace(client: client)
 
             let session = try await client.createSession()
             sessionID = session.sessionID
@@ -328,29 +334,26 @@ final class ChatViewModel: ObservableObject {
         guard rawBranch != workspace.branch else { return }
         guard canChangeBranch else { return }
         guard branchOptions.contains(rawBranch) else { return }
+        guard let client else {
+            append(kind: .error, text: "No rust-agent client is available.")
+            return
+        }
 
         isSwitchingBranch = true
         append(kind: .status, text: "switching branch to \(rawBranch)...")
 
-        let rootURL = workspace.url
         let previousBranch = workspace.branch
         branchSwitchTask = Task {
             do {
-                let result = try await Task.detached {
-                    try GitWorkspace.switchBranch(
-                        to: rawBranch,
-                        at: rootURL,
-                        currentBranch: previousBranch
-                    )
-                }.value
-                workspace = WorkspaceMetadata.current(at: rootURL)
-                refreshBranchOptions()
+                let result = try await client.switchWorkspaceBranch(branch: rawBranch)
+                applyWorkspace(result.workspace)
+                let previous = result.previousBranch ?? previousBranch
                 let stashStatus = result.stashedChanges
-                    ? "stashed changes on \(result.previousBranch); "
+                    ? "stashed changes on \(previous); "
                     : ""
                 append(kind: .status, text: "\(stashStatus)switched to \(result.branch)")
             } catch {
-                refreshBranchOptions()
+                try? await refreshWorkspace(client: client)
                 append(kind: .error, text: error.localizedDescription)
             }
             isSwitchingBranch = false
@@ -784,16 +787,40 @@ final class ChatViewModel: ObservableObject {
         applyReasoningEfforts(models.reasoningEfforts, defaultEffort: models.defaultReasoningEffort)
     }
 
-    private func refreshBranchOptions() {
-        branchOptions = Self.branchOptions(at: workspace.url, currentBranch: workspace.branch)
+    private func refreshWorkspace(
+        client: any AgentClientProtocol,
+        fallbackURL: URL? = nil
+    ) async throws {
+        do {
+            applyWorkspace(try await client.workspace())
+        } catch {
+            if let fallbackURL {
+                workspace = WorkspaceMetadata.current(at: fallbackURL)
+                branchOptions = [workspace.branch]
+            }
+            throw error
+        }
     }
 
-    private static func branchOptions(at url: URL, currentBranch: String) -> [String] {
-        let branches = (try? GitWorkspace.branches(at: url)) ?? []
-        if branches.contains(currentBranch) {
-            return branches
+    private func applyWorkspace(_ response: WorkspaceResponse) {
+        workspace = workspace.applying(response)
+        branchOptions = Self.branchOptions(from: response, currentBranch: workspace.branch)
+    }
+
+    private func refreshBranchOptions() {
+        branchOptions = workspace.isGit ? [workspace.branch] : []
+    }
+
+    private static func branchOptions(
+        from response: WorkspaceResponse,
+        currentBranch: String
+    ) -> [String] {
+        guard response.git else { return [] }
+        var branches = response.branches
+        if !branches.contains(currentBranch) {
+            branches.append(currentBranch)
         }
-        return branches.isEmpty ? [currentBranch] : branches + [currentBranch]
+        return branches
     }
 
     private static func restoreSessionID(from message: String) -> UInt64? {

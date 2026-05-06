@@ -38,6 +38,22 @@ struct AgentAPIClient: AgentClientProtocol {
         return try JSONDecoder().decode(PermissionsResponse.self, from: data)
     }
 
+    func workspace() async throws -> WorkspaceResponse {
+        var request = authenticatedRequest(path: "workspace")
+        request.httpMethod = "GET"
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(WorkspaceResponse.self, from: data)
+    }
+
+    func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse {
+        var request = authenticatedRequest(path: "workspace/branch")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(SwitchWorkspaceBranchRequest(branch: branch))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(SwitchWorkspaceBranchResponse.self, from: data)
+    }
+
     func createSession() async throws -> CreateSessionResponse {
         var request = authenticatedRequest(path: "sessions")
         request.httpMethod = "POST"
@@ -322,6 +338,34 @@ struct SessionPermissionsResponse: Decodable {
     }
 }
 
+struct WorkspaceResponse: Decodable {
+    let workspaceRoot: String
+    let branch: String?
+    let branches: [String]
+    let git: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case workspaceRoot = "workspace_root"
+        case branch
+        case branches
+        case git
+    }
+}
+
+struct SwitchWorkspaceBranchResponse: Decodable {
+    let previousBranch: String?
+    let branch: String
+    let stashedChanges: Bool
+    let workspace: WorkspaceResponse
+
+    enum CodingKeys: String, CodingKey {
+        case previousBranch = "previous_branch"
+        case branch
+        case stashedChanges = "stashed_changes"
+        case workspace
+    }
+}
+
 private struct SetModelRequest: Encodable {
     let model: String
 }
@@ -332,6 +376,10 @@ private struct SetPermissionsRequest: Encodable {
     enum CodingKeys: String, CodingKey {
         case toolPolicy = "tool_policy"
     }
+}
+
+private struct SwitchWorkspaceBranchRequest: Encodable {
+    let branch: String
 }
 
 private struct RestoreSessionRequest: Encodable {
