@@ -67,6 +67,11 @@ curl --http3 -k https://127.0.0.1:4433/healthz
 SESSION_ID=$(curl -s -X POST \
   -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   http://127.0.0.1:4096/sessions | sed -E 's/.*"session_id":([0-9]+).*/\1/')
+curl -s -X POST \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  -H 'content-type: application/json' \
+  -d "{\"session_id\":$SESSION_ID}" \
+  http://127.0.0.1:4096/sessions:restore
 curl -N -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"message":"Say hello in one sentence"}' \

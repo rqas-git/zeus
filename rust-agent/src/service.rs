@@ -10,6 +10,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::agent_loop::AgentEvent;
 use crate::agent_loop::AgentLoop;
+use crate::agent_loop::AgentMessage;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
@@ -39,6 +40,15 @@ struct SessionHandle {
 }
 
 type SharedSession = Arc<SessionHandle>;
+
+/// Durable transcript state returned when a stored session is restored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionSnapshot {
+    pub(crate) session_id: SessionId,
+    pub(crate) model: String,
+    pub(crate) tool_policy: ToolPolicy,
+    pub(crate) messages: Vec<AgentMessage>,
+}
 
 impl SessionHandle {
     fn new(agent: AgentLoop) -> Self {
@@ -145,6 +155,52 @@ where
             )?,
         );
         Ok(())
+    }
+
+    /// Restores a durable SQLite session into the active in-memory session map.
+    ///
+    /// # Errors
+    /// Returns an error when no database is configured, the session map is full, or storage fails.
+    pub(crate) fn restore_session(&self, session_id: SessionId) -> Result<Option<SessionSnapshot>> {
+        let database = self
+            .database
+            .as_ref()
+            .context("session database is not configured")?;
+        let Some(stored) = database.load_session(session_id)? else {
+            return Ok(None);
+        };
+
+        let model = stored.config.model().to_string();
+        let messages = stored.messages.clone();
+        let session = {
+            let mut sessions = self.lock_sessions()?;
+            if let Some(session) = sessions.get(&session_id) {
+                Arc::clone(session)
+            } else {
+                self.ensure_can_insert_session(&sessions)?;
+                let session = Self::new_session(
+                    session_id,
+                    self.context_window,
+                    stored.config,
+                    self.tools.clone(),
+                    Some(database.clone()),
+                )?;
+                sessions.insert(session_id, Arc::clone(&session));
+                session
+            }
+        };
+        let tool_policy = session
+            .agent
+            .try_lock()
+            .map(|agent| agent.tool_policy())
+            .unwrap_or_else(|_| self.default_tool_policy());
+
+        Ok(Some(SessionSnapshot {
+            session_id,
+            model,
+            tool_policy,
+            messages,
+        }))
     }
 
     /// Deletes a session from memory and durable storage if present.

@@ -43,12 +43,16 @@ use tokio_stream::StreamExt;
 
 use crate::agent_loop::is_turn_cancelled;
 use crate::agent_loop::AgentEvent;
+use crate::agent_loop::AgentItem;
+use crate::agent_loop::AgentMessage;
 use crate::agent_loop::CacheHealth;
+use crate::agent_loop::MessageRole;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
 use crate::config::ServerConfig;
 use crate::service::AgentService;
+use crate::service::SessionSnapshot;
 use crate::tools::ToolPolicy;
 
 const SERVER_NAME: &str = "rust-agent";
@@ -136,6 +140,7 @@ where
         .route("/healthz", get(healthz))
         .route("/models", get(models::<M>))
         .route("/permissions", get(permissions::<M>))
+        .route("/sessions:restore", post(restore_session::<M>))
         .route("/sessions", post(create_session::<M>))
         .route("/sessions/{session_id}", delete(delete_session::<M>))
         .route(
@@ -476,6 +481,19 @@ impl SessionRegistry {
         anyhow::bail!("failed to allocate unique session id")
     }
 
+    fn reserve(&self, session_id: SessionId) -> Result<bool> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+        if sessions.contains(&session_id) {
+            return Ok(false);
+        }
+        anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
+        sessions.insert(session_id);
+        Ok(true)
+    }
+
     fn contains(&self, session_id: SessionId) -> Result<bool> {
         Ok(self
             .sessions
@@ -690,6 +708,43 @@ where
         tool_policy: state.service.default_tool_policy().as_str().to_string(),
     })
     .into_response()
+}
+
+async fn restore_session<M>(
+    State(state): State<ServerState<M>>,
+    Json(request): Json<RestoreSessionRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    if !(1..=MAX_JSON_SAFE_INTEGER).contains(&request.session_id) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("session_id must be between 1 and {MAX_JSON_SAFE_INTEGER}"),
+        );
+    }
+
+    let session_id = SessionId::new(request.session_id);
+    let reserved = match state.sessions.reserve(session_id) {
+        Ok(reserved) => reserved,
+        Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
+    };
+
+    match state.service.restore_session(session_id) {
+        Ok(Some(snapshot)) => Json(RestoreSessionResponse::from_snapshot(snapshot)).into_response(),
+        Ok(None) => {
+            if reserved {
+                state.sessions.release(session_id);
+            }
+            error_response(StatusCode::NOT_FOUND, anyhow::anyhow!("session not found"))
+        }
+        Err(error) => {
+            if reserved {
+                state.sessions.release(session_id);
+            }
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, error)
+        }
+    }
 }
 
 async fn delete_session<M>(
@@ -1212,6 +1267,94 @@ struct CreateSessionResponse {
 }
 
 #[derive(Serialize)]
+struct RestoreSessionResponse {
+    session_id: u64,
+    model: String,
+    tool_policy: String,
+    messages: Vec<TranscriptMessageResponse>,
+}
+
+impl RestoreSessionResponse {
+    fn from_snapshot(snapshot: SessionSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id.get(),
+            model: snapshot.model,
+            tool_policy: snapshot.tool_policy.as_str().to_string(),
+            messages: snapshot
+                .messages
+                .iter()
+                .map(TranscriptMessageResponse::from_message)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TranscriptMessageResponse {
+    message_id: u64,
+    kind: &'static str,
+    role: Option<&'static str>,
+    text: Option<String>,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    tool_arguments: Option<String>,
+    success: Option<bool>,
+}
+
+impl TranscriptMessageResponse {
+    fn from_message(message: &AgentMessage) -> Self {
+        match message.item() {
+            AgentItem::Message { role, text } => Self {
+                message_id: message.id().get(),
+                kind: "message",
+                role: Some(role_name(*role)),
+                text: Some(text.clone()),
+                tool_call_id: None,
+                tool_name: None,
+                tool_arguments: None,
+                success: None,
+            },
+            AgentItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => Self {
+                message_id: message.id().get(),
+                kind: "function_call",
+                role: None,
+                text: None,
+                tool_call_id: Some(call_id.clone()),
+                tool_name: Some(name.clone()),
+                tool_arguments: Some(arguments.clone()),
+                success: None,
+            },
+            AgentItem::FunctionOutput {
+                call_id,
+                output,
+                success,
+            } => Self {
+                message_id: message.id().get(),
+                kind: "function_output",
+                role: None,
+                text: Some(output.clone()),
+                tool_call_id: Some(call_id.clone()),
+                tool_name: None,
+                tool_arguments: None,
+                success: Some(*success),
+            },
+        }
+    }
+}
+
+const fn role_name(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+    }
+}
+
+#[derive(Serialize)]
 struct SessionModelResponse {
     model: String,
 }
@@ -1242,6 +1385,11 @@ struct SetPermissionsRequest {
 }
 
 #[derive(Deserialize)]
+struct RestoreSessionRequest {
+    session_id: u64,
+}
+
+#[derive(Deserialize)]
 struct TurnRequest {
     message: String,
     reasoning_effort: Option<String>,
@@ -1259,12 +1407,14 @@ mod tests {
     use tokio::sync::Notify;
     use tower::ServiceExt;
 
+    use crate::agent_loop::MessageId;
     use crate::agent_loop::ModelResponse;
     use crate::agent_loop::ModelToolCall;
     use crate::bench_support::DurationSummary;
     use crate::client::ConversationMessage;
     use crate::config::ContextWindowConfig;
     use crate::config::ModelConfig;
+    use crate::storage::SessionDatabase;
     use crate::tools::ToolSpec;
 
     use super::*;
@@ -1511,6 +1661,111 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn restores_durable_session_by_id() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(77);
+        database.ensure_session(session_id, "test-fast").unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(1),
+                    AgentItem::Message {
+                        role: MessageRole::User,
+                        text: "hello".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(2),
+                    AgentItem::FunctionCall {
+                        item_id: Some("item_read".to_string()),
+                        call_id: "call_read".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(3),
+                    AgentItem::FunctionOutput {
+                        call_id: "call_read".to_string(),
+                        output: "file contents".to_string(),
+                        success: true,
+                    },
+                ),
+            )
+            .unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(4),
+                    AgentItem::Message {
+                        role: MessageRole::Assistant,
+                        text: "hi".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("ok", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default", "test-fast"]).unwrap(),
+            )
+            .with_database(database)
+            .with_session_limit(1),
+        );
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        let app = router(state);
+
+        let restored = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions:restore")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"session_id":77}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.status(), StatusCode::OK);
+        let body = to_bytes(restored.into_body(), usize::MAX).await.unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(r#""session_id":77"#));
+        assert!(body.contains(r#""model":"test-fast""#));
+        assert!(body.contains(r#""role":"user","text":"hello""#));
+        assert!(body.contains(r#""kind":"function_call""#));
+        assert!(body.contains(r#""tool_call_id":"call_read""#));
+        assert!(body.contains(r#""success":true"#));
+
+        let model = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/77/model")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(model.status(), StatusCode::OK);
     }
 
     #[tokio::test]
