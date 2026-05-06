@@ -986,8 +986,8 @@ impl AgentLoop {
     /// Runs a user-initiated terminal command through the backend tool layer and stores it.
     ///
     /// # Errors
-    /// Returns an error if the session is already running, terminal execution is not enabled,
-    /// cancellation is requested before the command starts, or event/storage updates fail.
+    /// Returns an error if the session is already running, cancellation is requested before the
+    /// command starts, or event/storage updates fail.
     pub(crate) async fn run_terminal_command_with_cancellation(
         &mut self,
         command: impl Into<String>,
@@ -997,10 +997,6 @@ impl AgentLoop {
         anyhow::ensure!(
             self.store.status() != SessionStatus::Running,
             "session is already running"
-        );
-        anyhow::ensure!(
-            self.tools.policy() == ToolPolicy::WorkspaceExec,
-            "terminal command requires workspace-exec tool policy"
         );
         cancellation.ensure_not_cancelled()?;
 
@@ -1301,8 +1297,8 @@ impl AgentLoop {
             args: &tool_call.arguments,
         })?;
 
-        let execution = self
-            .tools
+        let terminal_tools = self.tools.with_policy(ToolPolicy::WorkspaceExec);
+        let execution = terminal_tools
             .execute_ref_with_cancellation(&tool_call, cancellation)
             .await;
         let result = TerminalCommandResult {
@@ -2043,7 +2039,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
-        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::ReadOnly);
         let mut agent = AgentLoop::with_context_window_and_tools(
             SessionId::new(7),
             ContextWindowConfig::default(),
@@ -2066,6 +2062,7 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("terminal-ok"));
+        assert_eq!(agent.tool_policy(), ToolPolicy::ReadOnly);
         assert_eq!(
             events,
             [
@@ -2079,10 +2076,11 @@ mod tests {
 
         let streamer = FnStreamer::new(
             |history: &[ConversationMessage<'_>],
-             _tools: &[ToolSpec],
+             tools: &[ToolSpec],
              _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                assert!(!tools.iter().any(|tool| tool.name() == "exec_command"));
                 assert_eq!(history.len(), 4);
                 assert_eq!(
                     history[0],

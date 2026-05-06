@@ -12,10 +12,9 @@ with `RUST_AGENT_TOOL_MODE=workspace-write`.
 - `workspace-exec` exposes the workspace-write tools plus `exec_command`.
 
 Zeus terminal passthrough uses the same `exec_command` implementation through
-`POST /sessions/{session_id}/terminal:run`. The route is user-initiated, but it
-still requires that session's tool policy to be `workspace-exec`, and it stores
-the command plus bounded output in the session transcript so future model turns
-can see it.
+`POST /sessions/{session_id}/terminal:run`. The route is user-initiated and does
+not change or require that session's model tool policy. It stores the command
+plus bounded output in the session transcript so future model turns can see it.
 
 ## Workspace Root
 
@@ -93,6 +92,7 @@ explicit `limit` values may request up to 500 entries.
 The registry does not expose network tools or arbitrary file writes.
 Cross-file writes are planned before execution, but filesystem failures during
 the final rename phase can still leave a partial multi-file patch.
-`workspace-exec` is intended only for trusted local sessions; shell commands are
-not filesystem-sandboxed beyond their starting directory and are not filtered by
-command content.
+`workspace-exec` is intended only for trusted local model sessions; shell
+commands are not filesystem-sandboxed beyond their starting directory and are
+not filtered by command content. Zeus terminal passthrough is separately
+user-initiated, but uses the same shell execution implementation.

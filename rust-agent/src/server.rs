@@ -2720,22 +2720,9 @@ mod tests {
         let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
         state.register_session_for_test(SessionId::new(7));
         let app = router(state);
-        let permissions = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri("/sessions/7/permissions")
-                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"tool_policy":"workspace-exec"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(permissions.status(), StatusCode::OK);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2753,6 +2740,22 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["success"], true);
         assert!(body["output"].as_str().unwrap().contains("server-terminal"));
+
+        let permissions = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/7/permissions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(permissions.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"tool_policy":"read-only"}"#
+        );
     }
 
     #[tokio::test]

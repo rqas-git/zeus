@@ -470,8 +470,8 @@ where
     /// Runs a user-initiated terminal command in a session and records it in context.
     ///
     /// # Errors
-    /// Returns an error when the session cannot be created, terminal execution is not enabled,
-    /// command execution is cancelled before it starts, or event publishing fails.
+    /// Returns an error when the session cannot be created, command execution is cancelled before
+    /// it starts, or event publishing fails.
     pub(crate) async fn run_terminal_command(
         &self,
         session_id: SessionId,

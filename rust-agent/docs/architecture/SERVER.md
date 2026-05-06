@@ -57,7 +57,7 @@ router through both HTTP compatibility and native HTTP/3 transports.
   currently running turn for the session and returns whether a turn was active.
 - `POST /sessions/{session_id}/terminal:run` runs a user-initiated terminal
   command through the `exec_command` tool and records the command plus output in
-  the session transcript.
+  the session transcript without changing the session's model tool policy.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
 
 `GET /` and `GET /healthz` are public. All other routes require
@@ -169,8 +169,8 @@ stream. Use
 should stop. Per-user authorization and multi-process coordination are not
 implemented. Use `workspace-write` and `workspace-exec` only for trusted local
 deployments because any bearer-token holder can ask the model to edit workspace
-files or run local commands. User-initiated terminal commands also require the
-session's tool policy to be `workspace-exec`.
+files or run local commands. User-initiated terminal commands run through a
+separate route and do not grant `workspace-exec` to future model turns.
 WebSocket endpoints are not implemented because SSE matches the current
 server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should
