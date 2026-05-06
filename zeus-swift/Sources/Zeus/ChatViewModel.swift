@@ -110,7 +110,7 @@ final class ChatViewModel: ObservableObject {
         append(kind: .status, text: "starting server...")
 
         do {
-            let client = try await server.start()
+            let client = try await server.start(workspaceURL: workspace.url)
             self.client = client
             append(kind: .status, text: "creating session...")
 

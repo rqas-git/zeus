@@ -20,7 +20,7 @@ protocol AgentClientProtocol {
 }
 
 protocol AgentServerProtocol: AnyObject {
-    func start() async throws -> any AgentClientProtocol
+    func start(workspaceURL: URL) async throws -> any AgentClientProtocol
     func stop()
 }
 

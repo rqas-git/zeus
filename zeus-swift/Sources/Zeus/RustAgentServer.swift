@@ -16,26 +16,30 @@ final class RustAgentServer: AgentServerProtocol {
         stop()
     }
 
-    func start() async throws -> any AgentClientProtocol {
+    func start(workspaceURL: URL) async throws -> any AgentClientProtocol {
+        let expectedWorkspacePath = try canonicalWorkspacePath(workspaceURL)
         var failures: [String] = []
         var reusableClient: AgentAPIClient?
 
         for candidate in candidates {
             let client = AgentAPIClient(baseURL: candidate.baseURL, token: token)
             if await client.healthz() {
-                if (try? await client.models()) != nil,
-                   (try? await client.permissions()) != nil {
+                do {
+                    try await validateCompatibility(
+                        client,
+                        expectedWorkspacePath: expectedWorkspacePath
+                    )
                     reusableClient = reusableClient ?? client
                     failures.append("\(candidate.httpAddress) already has a compatible server; trying to start a fresh server first")
-                } else {
-                    failures.append("\(candidate.httpAddress) is occupied by an incompatible server")
+                } catch {
+                    failures.append("\(candidate.httpAddress) is occupied by an incompatible server: \(error.localizedDescription)")
                 }
                 continue
             }
 
             do {
-                try launch(candidate)
-                try await waitForReady(client)
+                try launch(candidate, workspacePath: expectedWorkspacePath)
+                try await waitForReady(client, expectedWorkspacePath: expectedWorkspacePath)
                 return client
             } catch {
                 stop()
@@ -62,7 +66,7 @@ final class RustAgentServer: AgentServerProtocol {
         }
     }
 
-    private func launch(_ candidate: ServerCandidate) throws {
+    private func launch(_ candidate: ServerCandidate, workspacePath: String) throws {
         let rustAgentRoot = RustAgentLocator.rootURL()
         let workingDirectory = RustAgentLocator.launchDirectoryURL()
         let process = Process()
@@ -72,7 +76,7 @@ final class RustAgentServer: AgentServerProtocol {
             arguments: ["serve"],
             workingDirectoryURL: workingDirectory
         )
-        process.environment = serverEnvironment(candidate)
+        process.environment = serverEnvironment(candidate, workspacePath: workspacePath)
 
         let stdout = Pipe()
         let stderr = Pipe()
@@ -85,11 +89,16 @@ final class RustAgentServer: AgentServerProtocol {
         self.process = process
     }
 
-    private func waitForReady(_ client: AgentAPIClient) async throws {
+    private func waitForReady(
+        _ client: AgentAPIClient,
+        expectedWorkspacePath: String
+    ) async throws {
         for _ in 0..<readyPolls {
-            if await client.healthz(),
-               (try? await client.models()) != nil,
-               (try? await client.permissions()) != nil {
+            if await client.healthz() {
+                try await validateCompatibility(
+                    client,
+                    expectedWorkspacePath: expectedWorkspacePath
+                )
                 return
             }
 
@@ -103,14 +112,46 @@ final class RustAgentServer: AgentServerProtocol {
         throw RustAgentServerError.timedOut(outputCapture.snapshot())
     }
 
-    private func serverEnvironment(_ candidate: ServerCandidate) -> [String: String] {
+    private func validateCompatibility(
+        _ client: AgentAPIClient,
+        expectedWorkspacePath: String
+    ) async throws {
+        let identity = try await client.identity()
+        guard identity.name == "rust-agent" else {
+            throw RustAgentServerError.invalidIdentity(identity.name)
+        }
+        guard identity.workspaceRoot == expectedWorkspacePath else {
+            throw RustAgentServerError.workspaceMismatch(
+                expected: expectedWorkspacePath,
+                actual: identity.workspaceRoot
+            )
+        }
+        _ = try await client.models()
+        _ = try await client.permissions()
+    }
+
+    private func serverEnvironment(
+        _ candidate: ServerCandidate,
+        workspacePath: String
+    ) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["RUST_AGENT_SERVER_TOKEN"] = token
         environment["RUST_AGENT_SERVER_HTTP_ADDR"] = candidate.httpAddress
         environment["RUST_AGENT_SERVER_H3_ADDR"] = candidate.h3Address
         environment["RUST_AGENT_CACHE_HEALTH"] = "1"
         environment["RUST_AGENT_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
+        environment["RUST_AGENT_WORKSPACE"] = workspacePath
         return environment
+    }
+
+    private func canonicalWorkspacePath(_ workspaceURL: URL) throws -> String {
+        let url = workspaceURL.resolvingSymlinksInPath().standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw RustAgentServerError.workspaceUnavailable(url.path)
+        }
+        return url.path
     }
 
     private func waitForExit(_ process: Process, timeout: TimeInterval) {
@@ -145,12 +186,21 @@ private struct ServerCandidate {
 }
 
 enum RustAgentServerError: LocalizedError {
+    case workspaceUnavailable(String)
+    case invalidIdentity(String)
+    case workspaceMismatch(expected: String, actual: String)
     case exitedEarly(String)
     case timedOut(String)
     case noAvailableServer([String])
 
     var errorDescription: String? {
         switch self {
+        case let .workspaceUnavailable(path):
+            return "Workspace does not exist or is not a directory: \(path)"
+        case let .invalidIdentity(name):
+            return "Expected rust-agent, but server identified as \(name)."
+        case let .workspaceMismatch(expected, actual):
+            return "rust-agent workspace mismatch. expected \(expected), got \(actual)."
         case let .exitedEarly(output):
             return "rust-agent exited before the server was ready.\(suffix(output))"
         case let .timedOut(output):
