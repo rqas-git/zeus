@@ -5,6 +5,11 @@ import ZeusCore
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
     @Published var draft = ""
+    @Published var searchQuery = ""
+    @Published private(set) var isSearchVisible = false
+    @Published private(set) var searchResultSummary = ""
+    @Published private(set) var searchMatchLineIDs: Set<UUID> = []
+    @Published private(set) var selectedSearchLineID: UUID?
     @Published private(set) var isTerminalPassthroughEnabled = false
     @Published private(set) var workspace: WorkspaceMetadata
     @Published private(set) var branchOptions: [String]
@@ -69,6 +74,7 @@ final class ChatViewModel: ObservableObject {
     private var terminalTask: Task<Void, Never>?
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
+    private var searchMatchedLineIDsInOrder: [UUID] = []
 
     init(
         server: any AgentServerProtocol = RustAgentServer(),
@@ -114,7 +120,7 @@ final class ChatViewModel: ObservableObject {
             applySessionModel(session.model)
             applySessionPermissions(session.toolPolicy ?? selectedPermission)
             isReady = true
-            append(kind: .status, text: "ready")
+            append(kind: .status, text: "ready. session \(session.sessionID)")
             await refreshAuthStatus()
         } catch {
             started = false
@@ -136,6 +142,17 @@ final class ChatViewModel: ObservableObject {
             draft = ""
             append(kind: .user, text: message)
             startLogin()
+            return
+        }
+
+        if message.split(separator: " ").first == "/restore" {
+            draft = ""
+            append(kind: .user, text: message)
+            guard let restoreSessionID = Self.restoreSessionID(from: message) else {
+                append(kind: .error, text: "usage: /restore <session id>")
+                return
+            }
+            restoreSession(restoreSessionID)
             return
         }
 
@@ -254,6 +271,33 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
+    func showSearch() {
+        isSearchVisible = true
+        refreshSearchMatches()
+    }
+
+    func closeSearch() {
+        isSearchVisible = false
+        searchQuery = ""
+        searchMatchedLineIDsInOrder.removeAll(keepingCapacity: true)
+        searchMatchLineIDs.removeAll(keepingCapacity: true)
+        selectedSearchLineID = nil
+        searchResultSummary = ""
+    }
+
+    func setSearchQuery(_ query: String) {
+        searchQuery = query
+        refreshSearchMatches()
+    }
+
+    func selectNextSearchMatch() {
+        moveSearchSelection(by: 1)
+    }
+
+    func selectPreviousSearchMatch() {
+        moveSearchSelection(by: -1)
+    }
+
     func selectBranch(_ rawBranch: String) {
         guard rawBranch != workspace.branch else { return }
         guard canChangeBranch else { return }
@@ -311,6 +355,39 @@ final class ChatViewModel: ObservableObject {
             }
             isRunningTerminalCommand = false
             terminalTask = nil
+        }
+    }
+
+    private func restoreSession(_ targetSessionID: UInt64) {
+        guard !isSending else {
+            append(kind: .status, text: "turn already running")
+            return
+        }
+        guard !isLoggingIn else {
+            append(kind: .status, text: "login already running")
+            return
+        }
+        guard isReady else {
+            append(kind: .status, text: "rust-agent is still starting")
+            return
+        }
+        guard let client else {
+            append(kind: .error, text: "No rust-agent client is available.")
+            return
+        }
+
+        isSending = true
+        append(kind: .status, text: "restoring session \(targetSessionID)...")
+        streamTask = Task {
+            do {
+                let restored = try await client.restoreSession(sessionID: targetSessionID)
+                applyRestoredSession(restored)
+                append(kind: .status, text: "restored session \(restored.sessionID)")
+            } catch {
+                append(kind: .error, text: error.localizedDescription)
+            }
+            isSending = false
+            streamTask = nil
         }
     }
 
@@ -420,6 +497,7 @@ final class ChatViewModel: ObservableObject {
             assistantPlaceholderLineID = nil
         }
         lines[index].text += delta
+        refreshSearchMatches()
     }
 
     private func replaceAssistantText(_ text: String) {
@@ -427,6 +505,7 @@ final class ChatViewModel: ObservableObject {
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         lines[index].text = text
         assistantPlaceholderLineID = nil
+        refreshSearchMatches()
     }
 
     private func showAssistantPlaceholder(_ text: String) {
@@ -435,6 +514,7 @@ final class ChatViewModel: ObservableObject {
         guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
         lines[index].text = text
         assistantPlaceholderLineID = id
+        refreshSearchMatches()
     }
 
     private func removeAssistantPlaceholder() {
@@ -444,6 +524,7 @@ final class ChatViewModel: ObservableObject {
         }
         lines.remove(at: index)
         self.assistantPlaceholderLineID = nil
+        refreshSearchMatches()
     }
 
     private func ensureAssistantLine() -> UUID {
@@ -459,6 +540,7 @@ final class ChatViewModel: ObservableObject {
 
     private func append(kind: TranscriptKind, text: String) {
         lines.append(TranscriptLine(kind: kind, text: text))
+        refreshSearchMatches()
     }
 
     private func upsertToolLine(
@@ -477,6 +559,7 @@ final class ChatViewModel: ObservableObject {
            let index = lines.firstIndex(where: { $0.id == lineID }) {
             lines[index].text = text
             lines[index].toolCall = display
+            refreshSearchMatches()
             return
         }
 
@@ -492,16 +575,86 @@ final class ChatViewModel: ObservableObject {
         if let currentAssistantLineID,
            let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) {
             lines.insert(line, at: index)
+            refreshSearchMatches()
             return lineID
         }
 
         if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
             lines.insert(line, at: index)
+            refreshSearchMatches()
             return lineID
         }
 
         lines.append(line)
+        refreshSearchMatches()
         return lineID
+    }
+
+    private func applyRestoredSession(_ restored: RestoreSessionResponse) {
+        sessionID = restored.sessionID
+        applySessionModel(restored.model)
+        applySessionPermissions(restored.toolPolicy)
+        currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
+        toolLineIDsByCallID.removeAll(keepingCapacity: true)
+        toolDisplaysByCallID.removeAll(keepingCapacity: true)
+        lines = transcriptLines(from: restored.messages)
+        refreshSearchMatches()
+    }
+
+    private func transcriptLines(from records: [TranscriptRecord]) -> [TranscriptLine] {
+        var restoredLines: [TranscriptLine] = []
+        var lineIndexesByCallID: [String: Int] = [:]
+        var displaysByCallID: [String: ToolCallTranscript] = [:]
+
+        for record in records {
+            switch record.kind {
+            case "message":
+                guard let kind = transcriptKind(forRole: record.role) else { continue }
+                restoredLines.append(TranscriptLine(kind: kind, text: record.text ?? ""))
+            case "function_call":
+                let display = toolDisplay(
+                    name: record.toolName,
+                    arguments: record.toolArguments,
+                    status: .running
+                )
+                let line = TranscriptLine(
+                    kind: .tool,
+                    text: toolFallbackText(display),
+                    toolCall: display
+                )
+                restoredLines.append(line)
+                if let callID = record.toolCallID, !callID.isEmpty {
+                    lineIndexesByCallID[callID] = restoredLines.count - 1
+                    displaysByCallID[callID] = display
+                }
+            case "function_output":
+                guard let callID = record.toolCallID,
+                      let index = lineIndexesByCallID[callID],
+                      var display = displaysByCallID[callID] else {
+                    continue
+                }
+                display.status = record.success == false ? .failed : .completed
+                displaysByCallID[callID] = display
+                restoredLines[index].text = toolFallbackText(display)
+                restoredLines[index].toolCall = display
+            default:
+                continue
+            }
+        }
+
+        return restoredLines
+    }
+
+    private func transcriptKind(forRole role: String?) -> TranscriptKind? {
+        switch role {
+        case "user":
+            return .user
+        case "assistant":
+            return .assistant
+        default:
+            return nil
+        }
     }
 
     private func toolDisplay(
@@ -542,13 +695,58 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func refreshSearchMatches() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchMatchedLineIDsInOrder.removeAll(keepingCapacity: true)
+            searchMatchLineIDs.removeAll(keepingCapacity: true)
+            selectedSearchLineID = nil
+            searchResultSummary = ""
+            return
+        }
+
+        let preferredLineID = selectedSearchLineID
+        let matches = lines.compactMap { line -> UUID? in
+            line.text.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == nil ? nil : line.id
+        }
+        searchMatchedLineIDsInOrder = matches
+        searchMatchLineIDs = Set(matches)
+
+        guard !matches.isEmpty else {
+            selectedSearchLineID = nil
+            searchResultSummary = "no matches"
+            return
+        }
+
+        let selectedIndex = preferredLineID
+            .flatMap { matches.firstIndex(of: $0) }
+            ?? 0
+        selectedSearchLineID = matches[selectedIndex]
+        searchResultSummary = "\(selectedIndex + 1) / \(matches.count) lines"
+    }
+
+    private func moveSearchSelection(by offset: Int) {
+        guard !searchMatchedLineIDsInOrder.isEmpty else { return }
+        let currentIndex = selectedSearchLineID
+            .flatMap { searchMatchedLineIDsInOrder.firstIndex(of: $0) }
+            ?? 0
+        let nextIndex = (
+            currentIndex + offset + searchMatchedLineIDsInOrder.count
+        ) % searchMatchedLineIDsInOrder.count
+        selectedSearchLineID = searchMatchedLineIDsInOrder[nextIndex]
+        searchResultSummary = "\(nextIndex + 1) / \(searchMatchedLineIDsInOrder.count) lines"
+    }
+
     private func createFreshSession() async throws {
         guard let client else { return }
         let session = try await client.createSession()
         sessionID = session.sessionID
         applySessionModel(session.model)
         applySessionPermissions(session.toolPolicy ?? selectedPermission)
-        append(kind: .status, text: "new session ready")
+        append(kind: .status, text: "new session ready. session \(session.sessionID)")
     }
 
     private func applyModels(_ models: ModelsResponse) {
@@ -567,6 +765,12 @@ final class ChatViewModel: ObservableObject {
             return branches
         }
         return branches.isEmpty ? [currentBranch] : branches + [currentBranch]
+    }
+
+    private static func restoreSessionID(from message: String) -> UInt64? {
+        let parts = message.split(separator: " ")
+        guard parts.count == 2, parts[0] == "/restore" else { return nil }
+        return UInt64(parts[1])
     }
 
     private func applyPermissions(_ permissions: PermissionsResponse) {

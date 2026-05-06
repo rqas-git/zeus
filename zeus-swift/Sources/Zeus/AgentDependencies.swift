@@ -5,6 +5,7 @@ protocol AgentClientProtocol {
     func models() async throws -> ModelsResponse
     func permissions() async throws -> PermissionsResponse
     func createSession() async throws -> CreateSessionResponse
+    func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse
     func setSessionPermissions(
         sessionID: UInt64,

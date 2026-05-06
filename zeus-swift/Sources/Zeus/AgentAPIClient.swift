@@ -37,6 +37,15 @@ struct AgentAPIClient: AgentClientProtocol {
         return try JSONDecoder().decode(CreateSessionResponse.self, from: data)
     }
 
+    func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse {
+        var request = authenticatedRequest(path: "sessions:restore")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(RestoreSessionRequest(sessionID: sessionID))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(RestoreSessionResponse.self, from: data)
+    }
+
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/model")
         request.httpMethod = "PUT"
@@ -245,6 +254,42 @@ struct CreateSessionResponse: Decodable {
     }
 }
 
+struct RestoreSessionResponse: Decodable {
+    let sessionID: UInt64
+    let model: String
+    let toolPolicy: String
+    let messages: [TranscriptRecord]
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case model
+        case toolPolicy = "tool_policy"
+        case messages
+    }
+}
+
+struct TranscriptRecord: Decodable, Equatable {
+    let messageID: UInt64
+    let kind: String
+    let role: String?
+    let text: String?
+    let toolCallID: String?
+    let toolName: String?
+    let toolArguments: String?
+    let success: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+        case kind
+        case role
+        case text
+        case toolCallID = "tool_call_id"
+        case toolName = "tool_name"
+        case toolArguments = "tool_arguments"
+        case success
+    }
+}
+
 struct SessionModelResponse: Decodable {
     let model: String
 }
@@ -266,6 +311,14 @@ private struct SetPermissionsRequest: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case toolPolicy = "tool_policy"
+    }
+}
+
+private struct RestoreSessionRequest: Encodable {
+    let sessionID: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
     }
 }
 

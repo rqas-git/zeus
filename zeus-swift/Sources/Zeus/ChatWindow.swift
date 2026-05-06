@@ -36,7 +36,25 @@ struct ChatWindow: View {
             VStack(spacing: 0) {
                 HeaderBar(onLoginStatus: viewModel.showLoginStatus)
 
-                TranscriptView(lines: viewModel.lines)
+                if viewModel.isSearchVisible {
+                    SearchBar(
+                        text: Binding(
+                            get: { viewModel.searchQuery },
+                            set: viewModel.setSearchQuery
+                        ),
+                        resultSummary: viewModel.searchResultSummary,
+                        onPrevious: viewModel.selectPreviousSearchMatch,
+                        onNext: viewModel.selectNextSearchMatch,
+                        onClose: viewModel.closeSearch
+                    )
+                    .padding(.top, 8)
+                }
+
+                TranscriptView(
+                    lines: viewModel.lines,
+                    searchMatchLineIDs: viewModel.searchMatchLineIDs,
+                    selectedSearchLineID: viewModel.selectedSearchLineID
+                )
                     .padding(.top, 10)
 
                 InputPrompt(
@@ -116,6 +134,23 @@ struct ChatWindow: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if isSearchShortcut(event) {
+            activeFooterMenu = nil
+            viewModel.showSearch()
+            return true
+        }
+        if isSearchNextShortcut(event) {
+            viewModel.selectNextSearchMatch()
+            return true
+        }
+        if isSearchPreviousShortcut(event) {
+            viewModel.selectPreviousSearchMatch()
+            return true
+        }
+        if event.keyCode == KeyCode.escape, viewModel.isSearchVisible {
+            viewModel.closeSearch()
+            return true
+        }
         if isTerminalPassthroughShortcut(event) {
             viewModel.toggleTerminalPassthrough()
             return true
@@ -188,10 +223,31 @@ struct ChatWindow: View {
             && event.charactersIgnoringModifiers?.lowercased() == "c"
     }
 
+    private func isSearchShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "f")
+    }
+
+    private func isSearchNextShortcut(_ event: NSEvent) -> Bool {
+        isCommandShortcut(event, key: "g")
+    }
+
+    private func isSearchPreviousShortcut(_ event: NSEvent) -> Bool {
+        isCommandShiftShortcut(event, key: "g")
+    }
+
     private func isCommandShortcut(_ event: NSEvent, key: String) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let disallowed: NSEvent.ModifierFlags = [.control, .option, .shift]
         return flags.contains(.command)
+            && flags.intersection(disallowed).isEmpty
+            && event.charactersIgnoringModifiers?.lowercased() == key
+    }
+
+    private func isCommandShiftShortcut(_ event: NSEvent, key: String) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let disallowed: NSEvent.ModifierFlags = [.control, .option]
+        return flags.contains(.command)
+            && flags.contains(.shift)
             && flags.intersection(disallowed).isEmpty
             && event.charactersIgnoringModifiers?.lowercased() == key
     }
@@ -495,15 +551,73 @@ private struct LocalEventMonitor: NSViewRepresentable {
     }
 }
 
+private struct SearchBar: View {
+    @Binding var text: String
+    let resultSummary: String
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(TerminalPalette.cyan)
+                .frame(width: TerminalLayout.markerWidth, alignment: .leading)
+
+            PromptTextField(
+                text: $text,
+                placeholder: "search transcript...",
+                onSubmit: onNext
+            )
+            .frame(height: 18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(resultSummary)
+                .foregroundStyle(TerminalPalette.dimText)
+                .lineLimit(1)
+                .frame(minWidth: 82, alignment: .trailing)
+
+            searchButton(systemName: "chevron.up", help: "Previous Match", action: onPrevious)
+            searchButton(systemName: "chevron.down", help: "Next Match", action: onNext)
+            searchButton(systemName: "xmark", help: "Close Search", action: onClose)
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .frame(height: 20)
+    }
+
+    private func searchButton(
+        systemName: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(TerminalPalette.dimText)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
 private struct TranscriptView: View {
     let lines: [TranscriptLine]
+    let searchMatchLineIDs: Set<UUID>
+    let selectedSearchLineID: UUID?
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(lines) { line in
-                        TerminalLineView(line: line)
+                        TerminalLineView(
+                            line: line,
+                            isSearchMatch: searchMatchLineIDs.contains(line.id),
+                            isSelectedSearchMatch: selectedSearchLineID == line.id
+                        )
                             .id(line.id)
                     }
                 }
@@ -512,9 +626,16 @@ private struct TranscriptView: View {
             }
             .scrollIndicators(.hidden)
             .onChange(of: lines) { newLines in
+                guard selectedSearchLineID == nil else { return }
                 guard let last = newLines.last else { return }
                 withAnimation(.easeOut(duration: 0.16)) {
                     proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+            .onChange(of: selectedSearchLineID) { lineID in
+                guard let lineID else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(lineID, anchor: .center)
                 }
             }
         }
@@ -524,20 +645,35 @@ private struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
+    let isSearchMatch: Bool
+    let isSelectedSearchMatch: Bool
 
     var body: some View {
-        if line.kind == .tool {
-            HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
-                toolPrefix
-                    .frame(width: TerminalLayout.markerWidth, alignment: .leading)
-                lineText
+        Group {
+            if line.kind == .tool {
+                HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
+                    toolPrefix
+                        .frame(width: TerminalLayout.markerWidth, alignment: .leading)
+                    lineText
+                }
+            } else {
+                HStack(alignment: .top, spacing: TerminalLayout.markerTextSpacing) {
+                    prefix
+                        .frame(width: TerminalLayout.markerWidth, alignment: .leading)
+                    lineText
+                }
             }
-        } else {
-            HStack(alignment: .top, spacing: TerminalLayout.markerTextSpacing) {
-                prefix
-                    .frame(width: TerminalLayout.markerWidth, alignment: .leading)
-                lineText
-            }
+        }
+        .padding(.vertical, isSearchMatch ? 2 : 0)
+        .background(searchBackground)
+    }
+
+    @ViewBuilder
+    private var searchBackground: some View {
+        if isSelectedSearchMatch {
+            Rectangle().fill(TerminalPalette.cyan.opacity(0.16))
+        } else if isSearchMatch {
+            Rectangle().fill(TerminalPalette.green.opacity(0.08))
         }
     }
 
