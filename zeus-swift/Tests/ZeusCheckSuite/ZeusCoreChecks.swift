@@ -212,6 +212,56 @@ public enum ZeusCoreChecks {
         )
     }
 
+    public static func testPromptHistoryNavigation() throws {
+        var history = PromptHistory()
+        try require(history.previous(currentDraft: "draft") == nil, "empty history should not navigate up")
+        try require(history.next() == nil, "empty history should not navigate down")
+
+        history.record("first")
+        history.record("second")
+
+        try require(
+            history.previous(currentDraft: "draft") == "second",
+            "up should recall newest entry"
+        )
+        try require(
+            history.previous(currentDraft: "ignored") == "first",
+            "second up should recall older entry"
+        )
+        try require(
+            history.previous(currentDraft: "ignored") == "first",
+            "up at oldest entry should remain there"
+        )
+        try require(
+            history.next() == "second",
+            "down should move toward newer entries"
+        )
+        try require(
+            history.next() == "draft",
+            "down after newest entry should restore original draft"
+        )
+        try require(
+            history.next() == nil,
+            "down after leaving history should not handle the key"
+        )
+    }
+
+    public static func testPromptHistoryResetAndReplace() throws {
+        var history = PromptHistory(entries: ["old"])
+        try require(history.previous(currentDraft: "draft") == "old", "expected initial entry")
+
+        history.record("new")
+        try require(history.next() == nil, "record should reset active navigation")
+        try require(history.previous(currentDraft: "draft") == "new", "record should append new entry")
+
+        history.replace(with: ["restored"])
+        try require(history.next() == nil, "replace should reset active navigation")
+        try require(
+            history.previous(currentDraft: "draft") == "restored",
+            "replace should use restored entries"
+        )
+    }
+
     private static func decodeEvent(_ json: String) throws -> AgentServerEvent {
         try JSONDecoder().decode(AgentServerEvent.self, from: Data(json.utf8))
     }

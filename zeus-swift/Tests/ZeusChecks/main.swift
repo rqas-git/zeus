@@ -18,6 +18,8 @@ struct ZeusChecks {
         checks.run("ToolMetadata summarizes arguments", ZeusCoreChecks.testToolTargets)
         checks.run("AgentServerEvent decodes typed events", ZeusCoreChecks.testAgentServerEvents)
         checks.run("PathDisplay abbreviates home paths", ZeusCoreChecks.testPathDisplay)
+        checks.run("PromptHistory navigates like a terminal", ZeusCoreChecks.testPromptHistoryNavigation)
+        checks.run("PromptHistory resets and restores entries", ZeusCoreChecks.testPromptHistoryResetAndReplace)
         checks.finish()
     }
 }
