@@ -4,7 +4,6 @@ import SwiftUI
 @main
 struct ZeusApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var viewModel = ChatViewModel()
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -12,14 +11,22 @@ struct ZeusApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ChatWindow(viewModel: viewModel)
-                .frame(minWidth: 860, minHeight: 560)
-                .task {
-                    await viewModel.start()
-                }
+            ChatWindowScene()
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
+    }
+}
+
+private struct ChatWindowScene: View {
+    @StateObject private var viewModel = ChatViewModel()
+
+    var body: some View {
+        ChatWindow(viewModel: viewModel)
+            .frame(minWidth: 860, minHeight: 560)
+            .task {
+                await viewModel.start()
+            }
     }
 }
 
