@@ -2,6 +2,7 @@
 
 | Shortcut | Action |
 | --- | --- |
+| `Cmd+N` | Open a new Zeus window with a fresh rust-agent session. |
 | `Cmd+B` | Open the branch dropdown menu. |
 | `Cmd+M` | Open the model dropdown menu. |
 | `Cmd+E` | Open the reasoning effort dropdown menu. |
