@@ -33,6 +33,7 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var tokenUsage = "0 / 272k tokens"
     @Published private(set) var isReady = false
     @Published private(set) var isSending = false
+    @Published private(set) var canCancelTurn = false
     @Published private(set) var isLoggingIn = false
     @Published private(set) var isSelectingModel = false
     @Published private(set) var isSelectingPermissions = false
@@ -184,6 +185,7 @@ final class ChatViewModel: ObservableObject {
         recordSubmittedMessage(message)
         draft = ""
         isSending = true
+        canCancelTurn = true
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
@@ -194,26 +196,43 @@ final class ChatViewModel: ObservableObject {
         streamTask = Task {
             var receivedEvent = false
             var receivedAssistantOutput = false
+            var receivedCancellation = false
             do {
-                try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
-                try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
-                try await applySelectedPermissionsForNextTurn(client: client, sessionID: sessionID)
-                let reasoningEffort = effort
-                try await client.streamTurn(
-                    sessionID: sessionID,
-                    message: message,
-                    reasoningEffort: reasoningEffort
-                ) { event in
-                    if case let .statusChanged(_, status) = event, status == "running" {
-                        try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
-                    }
-                    await MainActor.run {
-                        receivedEvent = true
-                        if event.isAssistantOutputEvent {
-                            receivedAssistantOutput = true
+                try await withTaskCancellationHandler {
+                    try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
+                    try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
+                    try await applySelectedPermissionsForNextTurn(
+                        client: client,
+                        sessionID: sessionID
+                    )
+                    let reasoningEffort = effort
+                    try await client.streamTurn(
+                        sessionID: sessionID,
+                        message: message,
+                        reasoningEffort: reasoningEffort
+                    ) { event in
+                        if case let .statusChanged(_, status) = event, status == "running" {
+                            try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
                         }
-                        self.handle(event)
+                        await MainActor.run {
+                            receivedEvent = true
+                            if event.isAssistantOutputEvent {
+                                receivedAssistantOutput = true
+                            }
+                            if case .turnCancelled = event {
+                                receivedCancellation = true
+                            }
+                            self.handle(event)
+                        }
                     }
+                } onCancel: {
+                    Task {
+                        _ = try? await client.cancelTurn(sessionID: sessionID)
+                    }
+                }
+                if receivedCancellation {
+                    finishCancelledTurn()
+                    return
                 }
                 if !receivedEvent {
                     append(kind: .error, text: "rust-agent returned no stream events")
@@ -222,9 +241,18 @@ final class ChatViewModel: ObservableObject {
                 }
                 finishTurn()
             } catch {
-                failTurn(error)
+                if Self.isCancellation(error) {
+                    finishCancelledTurn()
+                } else {
+                    failTurn(error)
+                }
             }
         }
+    }
+
+    func cancelCurrentTurn() {
+        guard canCancelTurn else { return }
+        streamTask?.cancel()
     }
 
     func shutdown() {
@@ -518,18 +546,40 @@ final class ChatViewModel: ObservableObject {
 
     private func finishTurn() {
         isSending = false
+        canCancelTurn = false
         streamTask = nil
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
     }
 
+    private func finishCancelledTurn() {
+        let wasCancellable = canCancelTurn
+        isSending = false
+        canCancelTurn = false
+        streamTask = nil
+        removeAssistantPlaceholder()
+        currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
+        if wasCancellable {
+            append(kind: .status, text: "turn cancelled")
+        }
+    }
+
     private func failTurn(_ error: Error) {
         isSending = false
+        canCancelTurn = false
         streamTask = nil
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         append(kind: .error, text: error.localizedDescription)
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        return (error as? URLError)?.code == .cancelled
     }
 
     private func appendAssistantDelta(_ delta: String) {
