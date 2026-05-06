@@ -55,6 +55,7 @@ const SEARCH_FILES_TOOL: &str = "search_files";
 const SEARCH_TEXT_TOOL: &str = "search_text";
 const APPLY_PATCH_TOOL: &str = "apply_patch";
 const EXEC_COMMAND_TOOL: &str = "exec_command";
+pub(crate) const EXEC_COMMAND_TOOL_NAME: &str = EXEC_COMMAND_TOOL;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const RANGE_TRUNCATION_MARKER: &str = "\n[truncated: range exceeds requested max_bytes]";

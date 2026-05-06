@@ -20,6 +20,7 @@ use crate::tools::ToolExecution;
 use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
 use crate::tools::ToolSpec;
+use crate::tools::EXEC_COMMAND_TOOL_NAME;
 
 const MAX_TOOL_ROUNDS: usize = 8;
 
@@ -463,6 +464,13 @@ pub(crate) struct ModelToolCall {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: String,
+}
+
+/// Result of a user-initiated terminal command recorded in the session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalCommandResult {
+    pub(crate) output: String,
+    pub(crate) success: bool,
 }
 
 /// Streams a prompt window into an assistant response.
@@ -975,6 +983,89 @@ impl AgentLoop {
         }
     }
 
+    /// Runs a user-initiated terminal command through the backend tool layer and stores it.
+    ///
+    /// # Errors
+    /// Returns an error if the session is already running, terminal execution is not enabled,
+    /// cancellation is requested before the command starts, or event/storage updates fail.
+    pub(crate) async fn run_terminal_command_with_cancellation(
+        &mut self,
+        command: impl Into<String>,
+        cancellation: TurnCancellation,
+        mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<TerminalCommandResult> {
+        anyhow::ensure!(
+            self.store.status() != SessionStatus::Running,
+            "session is already running"
+        );
+        anyhow::ensure!(
+            self.tools.policy() == ToolPolicy::WorkspaceExec,
+            "terminal command requires workspace-exec tool policy"
+        );
+        cancellation.ensure_not_cancelled()?;
+
+        let command = command.into();
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "command cannot be empty");
+        let user_id = self
+            .store
+            .append_message(MessageRole::User, format!("$ {command}"));
+        self.persist_message(user_id)?;
+        if let Err(error) = emit(AgentEvent::MessageCompleted {
+            session_id: self.session_id(),
+            message_id: user_id,
+            role: MessageRole::User,
+            text: self
+                .store
+                .messages()
+                .last()
+                .map(AgentMessage::text)
+                .unwrap_or_default(),
+        }) {
+            self.store.remove_last_message(user_id);
+            return rollback_persisted_message(
+                self.database.as_ref(),
+                self.session_id(),
+                user_id,
+                error,
+            );
+        }
+
+        if let Err(error) = self.begin_running(&mut emit) {
+            self.store.remove_last_message(user_id);
+            return rollback_persisted_message(
+                self.database.as_ref(),
+                self.session_id(),
+                user_id,
+                error,
+            );
+        }
+
+        let result = self
+            .execute_terminal_command(command, user_id, &cancellation, &mut emit)
+            .await;
+        self.store.prune_history(self.context_window);
+        match result {
+            Ok(result) => {
+                self.set_status(SessionStatus::Idle, &mut emit)?;
+                Ok(result)
+            }
+            Err(error) if is_turn_cancelled(&error) => {
+                self.set_status(SessionStatus::Idle, &mut emit)?;
+                Err(error)
+            }
+            Err(error) => {
+                self.set_status(SessionStatus::Failed, &mut emit)?;
+                let message = error.to_string();
+                emit(AgentEvent::Error {
+                    session_id: self.session_id(),
+                    message: &message,
+                })?;
+                Err(error)
+            }
+        }
+    }
+
     fn persist_message(&self, message_id: MessageId) -> Result<()> {
         let Some(database) = &self.database else {
             return Ok(());
@@ -1187,14 +1278,59 @@ impl AgentLoop {
         }
         Ok(())
     }
+
+    async fn execute_terminal_command(
+        &mut self,
+        command: &str,
+        user_id: MessageId,
+        cancellation: &TurnCancellation,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
+    ) -> Result<TerminalCommandResult> {
+        let session_id = self.session_id();
+        let arguments = serde_json::json!({ "command": command }).to_string();
+        let tool_call = ModelToolCall {
+            item_id: None,
+            call_id: format!("terminal_{}", user_id.get()),
+            name: EXEC_COMMAND_TOOL_NAME.to_string(),
+            arguments,
+        };
+        emit(AgentEvent::ToolCallStarted {
+            session_id,
+            tool_call_id: &tool_call.call_id,
+            tool_name: &tool_call.name,
+            args: &tool_call.arguments,
+        })?;
+
+        let execution = self
+            .tools
+            .execute_ref_with_cancellation(&tool_call, cancellation)
+            .await;
+        let result = TerminalCommandResult {
+            output: execution.output.clone(),
+            success: execution.success,
+        };
+        let tool_call_id = execution.call_id.clone();
+        let tool_name = execution.tool_name.clone();
+        let success = execution.success;
+        let first_new_message = self.store.messages().len();
+        self.store.append_tool_transcript([tool_call], [execution]);
+        self.persist_messages_from(first_new_message)?;
+        emit(AgentEvent::ToolCallCompleted {
+            session_id,
+            tool_call_id: &tool_call_id,
+            tool_name: &tool_name,
+            success,
+        })?;
+        Ok(result)
+    }
 }
 
-fn rollback_persisted_message(
+fn rollback_persisted_message<T>(
     database: Option<&SessionDatabase>,
     session_id: SessionId,
     message_id: MessageId,
     error: anyhow::Error,
-) -> Result<()> {
+) -> Result<T> {
     if let Some(database) = database {
         database
             .delete_message(session_id, message_id)
@@ -1894,6 +2030,97 @@ mod tests {
                 "status:Idle",
             ]
         );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_command_is_recorded_in_context() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-loop-terminal-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
+        let mut agent = AgentLoop::with_context_window_and_tools(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            tools,
+        );
+        let mut events = Vec::new();
+
+        let result = agent
+            .run_terminal_command_with_cancellation(
+                "printf terminal-ok",
+                TurnCancellation::new(),
+                |event| {
+                    events.push(format_event(event));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("terminal-ok"));
+        assert_eq!(
+            events,
+            [
+                "message:user:$ printf terminal-ok",
+                "status:Running",
+                "tool-start:exec_command:terminal_1",
+                "tool-end:exec_command:terminal_1:true",
+                "status:Idle",
+            ]
+        );
+
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                assert_eq!(history.len(), 4);
+                assert_eq!(
+                    history[0],
+                    ConversationMessage::user("$ printf terminal-ok")
+                );
+                match history[1] {
+                    ConversationMessage::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } => {
+                        assert_eq!(call_id, "terminal_1");
+                        assert_eq!(name, "exec_command");
+                        assert!(arguments.contains("printf terminal-ok"));
+                    }
+                    _ => panic!("expected terminal function call in prompt"),
+                }
+                match history[2] {
+                    ConversationMessage::FunctionOutput {
+                        call_id,
+                        output,
+                        success,
+                    } => {
+                        assert_eq!(call_id, "terminal_1");
+                        assert!(output.contains("terminal-ok"));
+                        assert!(success);
+                    }
+                    _ => panic!("expected terminal function output in prompt"),
+                }
+                assert_eq!(history[3], ConversationMessage::user("what happened?"));
+                Ok("saw terminal".to_string())
+            },
+        );
+        agent
+            .submit_user_message("what happened?", &streamer, |_| Ok(()))
+            .await
+            .unwrap();
 
         fs::remove_dir_all(&temp).unwrap();
     }

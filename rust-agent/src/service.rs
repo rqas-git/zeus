@@ -14,6 +14,7 @@ use crate::agent_loop::AgentMessage;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
+use crate::agent_loop::TerminalCommandResult;
 use crate::agent_loop::TurnCancellation;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
@@ -461,6 +462,27 @@ where
                 reasoning_effort,
                 emit,
             )
+            .await;
+        session.clear_turn()?;
+        result
+    }
+
+    /// Runs a user-initiated terminal command in a session and records it in context.
+    ///
+    /// # Errors
+    /// Returns an error when the session cannot be created, terminal execution is not enabled,
+    /// command execution is cancelled before it starts, or event publishing fails.
+    pub(crate) async fn run_terminal_command(
+        &self,
+        session_id: SessionId,
+        command: impl Into<String>,
+        emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<TerminalCommandResult> {
+        let session = self.session_or_insert_default(session_id)?;
+        let mut agent = session.agent.lock().await;
+        let cancellation = session.begin_turn()?;
+        let result = agent
+            .run_terminal_command_with_cancellation(command, cancellation, emit)
             .await;
         session.clear_turn()?;
         result
