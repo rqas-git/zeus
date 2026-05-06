@@ -1,12 +1,9 @@
 import Darwin
 import Foundation
+import Security
 
 final class RustAgentServer: AgentServerProtocol {
-    let token = "zeus-swift-dev-token"
-
-    private let candidates = (0..<20).map {
-        ServerCandidate(httpPort: 4196 + $0, h3Port: 4533 + $0)
-    }
+    private let requiredProtocolVersion = 1
     private var process: Process?
     private let outputCapture = ProcessOutputCapture()
     private let readyPolls = 600
@@ -18,40 +15,24 @@ final class RustAgentServer: AgentServerProtocol {
 
     func start(workspaceURL: URL) async throws -> any AgentClientProtocol {
         let expectedWorkspacePath = try canonicalWorkspacePath(workspaceURL)
-        var failures: [String] = []
-        var reusableClient: AgentAPIClient?
+        let token = try Self.generateToken()
+        let readiness = ServerReadinessCapture()
 
-        for candidate in candidates {
-            let client = AgentAPIClient(baseURL: candidate.baseURL, token: token)
-            if await client.healthz() {
-                do {
-                    try await validateCompatibility(
-                        client,
-                        expectedWorkspacePath: expectedWorkspacePath
-                    )
-                    reusableClient = reusableClient ?? client
-                    failures.append("\(candidate.httpAddress) already has a compatible server; trying to start a fresh server first")
-                } catch {
-                    failures.append("\(candidate.httpAddress) is occupied by an incompatible server: \(error.localizedDescription)")
-                }
-                continue
-            }
-
-            do {
-                try launch(candidate, workspacePath: expectedWorkspacePath)
-                try await waitForReady(client, expectedWorkspacePath: expectedWorkspacePath)
-                return client
-            } catch {
-                stop()
-                failures.append("\(candidate.httpAddress): \(error.localizedDescription)")
-            }
+        do {
+            try launch(
+                token: token,
+                workspacePath: expectedWorkspacePath,
+                readiness: readiness
+            )
+            return try await waitForReady(
+                readiness,
+                expectedWorkspacePath: expectedWorkspacePath,
+                expectedToken: token
+            )
+        } catch {
+            stop()
+            throw error
         }
-
-        if let reusableClient {
-            return reusableClient
-        }
-
-        throw RustAgentServerError.noAvailableServer(failures)
     }
 
     func stop() {
@@ -66,7 +47,11 @@ final class RustAgentServer: AgentServerProtocol {
         }
     }
 
-    private func launch(_ candidate: ServerCandidate, workspacePath: String) throws {
+    private func launch(
+        token: String,
+        workspacePath: String,
+        readiness: ServerReadinessCapture
+    ) throws {
         let rustAgentRoot = RustAgentLocator.rootURL()
         let workingDirectory = RustAgentLocator.launchDirectoryURL()
         let process = Process()
@@ -76,30 +61,42 @@ final class RustAgentServer: AgentServerProtocol {
             arguments: ["serve"],
             workingDirectoryURL: workingDirectory
         )
-        process.environment = serverEnvironment(candidate, workspacePath: workspacePath)
+        process.environment = serverEnvironment(token: token, workspacePath: workspacePath)
 
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        capture(stdout)
-        capture(stderr)
+        capture(stdout, readiness: readiness)
+        capture(stderr, readiness: readiness)
 
         try process.run()
         self.process = process
     }
 
     private func waitForReady(
-        _ client: AgentAPIClient,
-        expectedWorkspacePath: String
-    ) async throws {
+        _ readiness: ServerReadinessCapture,
+        expectedWorkspacePath: String,
+        expectedToken: String
+    ) async throws -> AgentAPIClient {
+        var client: AgentAPIClient?
+
         for _ in 0..<readyPolls {
-            if await client.healthz() {
+            if client == nil, let message = try readiness.snapshot() {
+                try validateReadiness(
+                    message,
+                    expectedWorkspacePath: expectedWorkspacePath,
+                    expectedToken: expectedToken
+                )
+                client = AgentAPIClient(baseURL: try message.baseURL, token: message.token)
+            }
+
+            if let client, await client.healthz() {
                 try await validateCompatibility(
                     client,
                     expectedWorkspacePath: expectedWorkspacePath
                 )
-                return
+                return client
             }
 
             if let process, !process.isRunning {
@@ -110,6 +107,28 @@ final class RustAgentServer: AgentServerProtocol {
         }
 
         throw RustAgentServerError.timedOut(outputCapture.snapshot())
+    }
+
+    private func validateReadiness(
+        _ readiness: ServerReadyMessage,
+        expectedWorkspacePath: String,
+        expectedToken: String
+    ) throws {
+        guard readiness.name == "rust-agent" else {
+            throw RustAgentServerError.invalidIdentity(readiness.name)
+        }
+        guard readiness.protocolVersion == requiredProtocolVersion else {
+            throw RustAgentServerError.unsupportedProtocolVersion(readiness.protocolVersion)
+        }
+        guard readiness.workspaceRoot == expectedWorkspacePath else {
+            throw RustAgentServerError.workspaceMismatch(
+                expected: expectedWorkspacePath,
+                actual: readiness.workspaceRoot
+            )
+        }
+        guard readiness.token == expectedToken else {
+            throw RustAgentServerError.tokenMismatch
+        }
     }
 
     private func validateCompatibility(
@@ -130,14 +149,11 @@ final class RustAgentServer: AgentServerProtocol {
         _ = try await client.permissions()
     }
 
-    private func serverEnvironment(
-        _ candidate: ServerCandidate,
-        workspacePath: String
-    ) -> [String: String] {
+    private func serverEnvironment(token: String, workspacePath: String) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["RUST_AGENT_SERVER_TOKEN"] = token
-        environment["RUST_AGENT_SERVER_HTTP_ADDR"] = candidate.httpAddress
-        environment["RUST_AGENT_SERVER_H3_ADDR"] = candidate.h3Address
+        environment["RUST_AGENT_SERVER_HTTP_ADDR"] = "127.0.0.1:0"
+        environment["RUST_AGENT_SERVER_H3_ADDR"] = "127.0.0.1:0"
         environment["RUST_AGENT_CACHE_HEALTH"] = "1"
         environment["RUST_AGENT_PARENT_PID"] = "\(ProcessInfo.processInfo.processIdentifier)"
         environment["RUST_AGENT_WORKSPACE"] = workspacePath
@@ -161,37 +177,48 @@ final class RustAgentServer: AgentServerProtocol {
         }
     }
 
-    private func capture(_ pipe: Pipe) {
+    private func capture(_ pipe: Pipe, readiness: ServerReadinessCapture) {
+        let emitter = ProcessLineEmitter { line in
+            readiness.observe(line)
+        }
         pipe.fileHandleForReading.readabilityHandler = { [outputCapture] handle in
-            outputCapture.append(handle.availableData)
+            let data = handle.availableData
+            outputCapture.append(data)
+            if data.isEmpty {
+                emitter.finish()
+            } else {
+                emitter.append(data)
+            }
         }
     }
-}
 
-private struct ServerCandidate {
-    let httpPort: Int
-    let h3Port: Int
-
-    var httpAddress: String {
-        "127.0.0.1:\(httpPort)"
-    }
-
-    var h3Address: String {
-        "127.0.0.1:\(h3Port)"
-    }
-
-    var baseURL: URL {
-        URL(string: "http://\(httpAddress)")!
+    private static func generateToken() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+        }
+        guard status == errSecSuccess else {
+            throw RustAgentServerError.tokenGenerationFailed(status)
+        }
+        return Data(bytes)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
 enum RustAgentServerError: LocalizedError {
     case workspaceUnavailable(String)
     case invalidIdentity(String)
+    case unsupportedProtocolVersion(Int)
     case workspaceMismatch(expected: String, actual: String)
+    case tokenMismatch
+    case invalidReadinessAddress(String)
+    case invalidReadiness(String)
+    case tokenGenerationFailed(OSStatus)
     case exitedEarly(String)
     case timedOut(String)
-    case noAvailableServer([String])
 
     var errorDescription: String? {
         switch self {
@@ -199,21 +226,113 @@ enum RustAgentServerError: LocalizedError {
             return "Workspace does not exist or is not a directory: \(path)"
         case let .invalidIdentity(name):
             return "Expected rust-agent, but server identified as \(name)."
+        case let .unsupportedProtocolVersion(version):
+            return "Unsupported rust-agent protocol version \(version)."
         case let .workspaceMismatch(expected, actual):
             return "rust-agent workspace mismatch. expected \(expected), got \(actual)."
+        case .tokenMismatch:
+            return "rust-agent readiness token did not match the launched token."
+        case let .invalidReadinessAddress(address):
+            return "rust-agent readiness returned an invalid HTTP address: \(address)"
+        case let .invalidReadiness(message):
+            return "rust-agent returned invalid readiness metadata: \(message)"
+        case let .tokenGenerationFailed(status):
+            return "Failed to generate rust-agent server token: \(status)"
         case let .exitedEarly(output):
             return "rust-agent exited before the server was ready.\(suffix(output))"
         case let .timedOut(output):
             return "Timed out waiting for rust-agent to start.\(suffix(output))"
-        case let .noAvailableServer(failures):
-            let details = failures.isEmpty ? "" : "\n" + failures.joined(separator: "\n")
-            return "Could not start or connect to a local rust-agent server.\(details)"
         }
     }
 
     private func suffix(_ output: String) -> String {
         guard !output.isEmpty else { return "" }
         return "\n\(output)"
+    }
+}
+
+private struct ServerReadyMessage: Decodable {
+    let event: String
+    let name: String
+    let protocolVersion: Int
+    let httpAddr: String
+    let h3Addr: String
+    let token: String
+    let workspaceRoot: String
+    let pid: UInt32
+
+    var baseURL: URL {
+        get throws {
+            guard let url = URL(string: "http://\(httpAddr)") else {
+                throw RustAgentServerError.invalidReadinessAddress(httpAddr)
+            }
+            return url
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case event
+        case name
+        case protocolVersion = "protocol_version"
+        case httpAddr = "http_addr"
+        case h3Addr = "h3_addr"
+        case token
+        case workspaceRoot = "workspace_root"
+        case pid
+    }
+}
+
+private struct ServerReadyProbe: Decodable {
+    let event: String?
+}
+
+private final class ServerReadinessCapture {
+    private let lock = NSLock()
+    private var message: ServerReadyMessage?
+    private var error: Error?
+
+    func observe(_ line: String) {
+        do {
+            guard let readiness = try Self.readiness(from: line) else { return }
+            lock.lock()
+            if message == nil, error == nil {
+                message = readiness
+            }
+            lock.unlock()
+        } catch {
+            lock.lock()
+            if self.error == nil {
+                self.error = error
+            }
+            lock.unlock()
+        }
+    }
+
+    func snapshot() throws -> ServerReadyMessage? {
+        lock.lock()
+        let message = message
+        let error = error
+        lock.unlock()
+
+        if let error {
+            throw error
+        }
+        return message
+    }
+
+    private static func readiness(from line: String) throws -> ServerReadyMessage? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.first == "{" else { return nil }
+        let data = Data(trimmed.utf8)
+        guard let probe = try? JSONDecoder().decode(ServerReadyProbe.self, from: data) else {
+            return nil
+        }
+        guard probe.event == "server_ready" else { return nil }
+        do {
+            return try JSONDecoder().decode(ServerReadyMessage.self, from: data)
+        } catch {
+            throw RustAgentServerError.invalidReadiness(error.localizedDescription)
+        }
     }
 }
 

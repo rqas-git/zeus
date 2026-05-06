@@ -27,7 +27,10 @@ NOTARY_PROFILE=apple-notary-profile
 
 At runtime, `ZEUS_WORKSPACE` selects the project shown by the UI. Zeus passes
 that directory to the embedded backend as `RUST_AGENT_WORKSPACE` and verifies
-the server reports the same canonical workspace before creating a session.
+the server reports the same canonical workspace before creating a session. Zeus
+launches the embedded backend as an owned child process with a per-launch bearer
+token and loopback port `0`; the backend's structured readiness line supplies
+the actual bound HTTP and HTTP/3 addresses.
 
 Set `SIGN_IDENTITY` to a Developer ID Application identity and
 `NOTARY_PROFILE` to a `notarytool` keychain profile when creating a distributable
