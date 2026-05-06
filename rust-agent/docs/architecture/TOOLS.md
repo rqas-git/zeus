@@ -11,6 +11,12 @@ with `RUST_AGENT_TOOL_MODE=workspace-write`.
 - `workspace-write` exposes the read-only tools plus `apply_patch`.
 - `workspace-exec` exposes the workspace-write tools plus `exec_command`.
 
+Zeus terminal passthrough uses the same `exec_command` implementation through
+`POST /sessions/{session_id}/terminal:run`. The route is user-initiated, but it
+still requires that session's tool policy to be `workspace-exec`, and it stores
+the command plus bounded output in the session transcript so future model turns
+can see it.
+
 ## Workspace Root
 
 `RUST_AGENT_WORKSPACE` selects the workspace root used by all built-in tools.

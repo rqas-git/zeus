@@ -183,6 +183,10 @@ where
             "/sessions/{session_id}/turns:cancel",
             post(cancel_turn::<M>),
         )
+        .route(
+            "/sessions/{session_id}/terminal:run",
+            post(run_terminal_command::<M>),
+        )
         .route("/sessions/{session_id}/events", get(session_events::<M>))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -1102,6 +1106,43 @@ where
     }
 }
 
+async fn run_terminal_command<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+    Json(request): Json<TerminalCommandRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    if request.command.trim().is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("command cannot be empty"),
+        );
+    }
+
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    let events = state.events.clone();
+    match state
+        .service
+        .run_terminal_command(session_id, request.command, |event| {
+            events.publish(ServerEvent::from_agent_event(event))
+        })
+        .await
+    {
+        Ok(result) => Json(TerminalCommandResponse {
+            output: result.output,
+            success: result.success,
+        })
+        .into_response(),
+        Err(error) if is_turn_cancelled(&error) => error_response(StatusCode::CONFLICT, error),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error),
+    }
+}
+
 async fn session_events<M>(
     State(state): State<ServerState<M>>,
     AxumPath(session_id): AxumPath<u64>,
@@ -1644,6 +1685,12 @@ struct CancelTurnResponse {
 }
 
 #[derive(Serialize)]
+struct TerminalCommandResponse {
+    output: String,
+    success: bool,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -1678,6 +1725,11 @@ struct SwitchWorkspaceBranchRequest {
 struct TurnRequest {
     message: String,
     reasoning_effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TerminalCommandRequest {
+    command: String,
 }
 
 #[cfg(test)]
@@ -2656,6 +2708,51 @@ mod tests {
             std::str::from_utf8(&body).unwrap(),
             r#"{"cancelled":false}"#
         );
+    }
+
+    #[tokio::test]
+    async fn runs_terminal_commands_through_session_route() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("ok", []),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let app = router(state);
+        let permissions = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/sessions/7/permissions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"tool_policy":"workspace-exec"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(permissions.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/terminal:run")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"command":"printf server-terminal"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["success"], true);
+        assert!(body["output"].as_str().unwrap().contains("server-terminal"));
     }
 
     #[tokio::test]

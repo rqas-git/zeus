@@ -55,6 +55,9 @@ router through both HTTP compatibility and native HTTP/3 transports.
   the turn as SSE.
 - `POST /sessions/{session_id}/turns:cancel` requests cancellation of the
   currently running turn for the session and returns whether a turn was active.
+- `POST /sessions/{session_id}/terminal:run` runs a user-initiated terminal
+  command through the `exec_command` tool and records the command plus output in
+  the session transcript.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
 
 `GET /` and `GET /healthz` are public. All other routes require
@@ -114,6 +117,9 @@ Important event names include:
 clients can render the requested tool invocation before the tool result arrives.
 The short `args` field is intentional and follows pi-mono's tool execution start
 event shape.
+Terminal command requests emit the same user-message, session-status, and
+tool-call lifecycle events as model-initiated tool calls, but the route returns a
+bounded JSON result instead of an SSE turn stream.
 
 ## Performance Notes
 
@@ -163,7 +169,8 @@ stream. Use
 should stop. Per-user authorization and multi-process coordination are not
 implemented. Use `workspace-write` and `workspace-exec` only for trusted local
 deployments because any bearer-token holder can ask the model to edit workspace
-files or run local commands.
+files or run local commands. User-initiated terminal commands also require the
+session's tool policy to be `workspace-exec`.
 WebSocket endpoints are not implemented because SSE matches the current
 server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should
