@@ -1038,7 +1038,6 @@ where
     };
     let (tx, rx) = mpsc::unbounded_channel();
     let service = Arc::clone(&state.service);
-    let events = state.events.clone();
     tokio::spawn(async move {
         let mut error_forwarded = false;
         let result = service
@@ -1049,7 +1048,6 @@ where
                 |event| {
                     let event = ServerEvent::from_agent_event(event);
                     let is_error = matches!(event, ServerEvent::Error { .. });
-                    events.publish(event.clone())?;
                     let _ = tx.send(event);
                     if is_error {
                         error_forwarded = true;
@@ -1064,14 +1062,12 @@ where
                 let event = ServerEvent::TurnCompleted {
                     session_id: session_id.get(),
                 };
-                let _ = events.publish(event.clone());
                 let _ = tx.send(event);
             }
             Err(error) if is_turn_cancelled(&error) => {
                 let event = ServerEvent::TurnCancelled {
                     session_id: session_id.get(),
                 };
-                let _ = events.publish(event.clone());
                 let _ = tx.send(event);
             }
             Err(error) if !error_forwarded => {
@@ -1079,7 +1075,6 @@ where
                     session_id: session_id.get(),
                     message: error.to_string(),
                 };
-                let _ = events.publish(event.clone());
                 let _ = tx.send(event);
             }
             Err(_) => {}
@@ -2542,6 +2537,41 @@ mod tests {
         assert!(body.contains("event: message.text_delta\ndata: {\"type\":\"text_delta\",\"session_id\":7,\"delta\":\"hel\"}\n\n"));
         assert!(body.contains(
             "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_stream_does_not_broadcast_duplicate_session_events() {
+        let service = Arc::new(AgentService::new(
+            StaticStreamer::new("hello", ["hel", "lo"]),
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let mut receiver = state.events.subscribe(SessionId::new(7)).unwrap();
+        let app = router(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("event: turn.completed\n"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
         ));
     }
 

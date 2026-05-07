@@ -96,8 +96,9 @@ should provide a stable certificate and key.
 ## Events
 
 SSE frames use explicit event names and compact JSON payloads. The direct turn
-stream receives events from the submitted turn. The session event stream uses a
-per-session broadcast channel and sends heartbeat frames while connected.
+stream is the canonical source for events from the submitted turn. The session
+event stream uses a per-session broadcast channel for passive updates and sends
+heartbeat frames while connected.
 
 Important event names include:
 
@@ -143,7 +144,7 @@ bounded JSON result instead of an SSE turn stream.
 - HTTP/3 concurrent bidirectional and unidirectional stream limits are
   configurable.
 - The event bus is per session, so unrelated sessions do not share broadcast
-  receivers.
+  receivers. Direct turn-stream events are not republished to that bus.
 - Active session and event-channel counts are bounded to cap process-local
   memory growth under repeated requests.
 - Session lists read compact metadata from SQLite and cap the latest-message
