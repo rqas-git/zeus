@@ -32,6 +32,24 @@ public struct ServerIdentityResponse: Decodable {
     }
 }
 
+public struct ServerCapabilitiesResponse: Decodable {
+    public let name: String
+    public let protocolVersion: Int
+    public let schemaHash: String
+    public let transports: [String]
+    public let features: [String]
+    public let routeGroups: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case protocolVersion = "protocol_version"
+        case schemaHash = "schema_hash"
+        case transports
+        case features
+        case routeGroups = "route_groups"
+    }
+}
+
 public struct ModelsResponse: Decodable {
     public let defaultModel: String
     public let allowedModels: [String]
@@ -151,4 +169,67 @@ public struct TerminalCommandResponse: Decodable {
 
 public struct CancelTurnResponse: Decodable {
     public let cancelled: Bool
+}
+
+public struct SetModelRequest: Codable, Equatable {
+    public let model: String
+
+    public init(model: String) {
+        self.model = model
+    }
+}
+
+public struct SetPermissionsRequest: Codable, Equatable {
+    public let toolPolicy: String
+
+    public init(toolPolicy: String) {
+        self.toolPolicy = toolPolicy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case toolPolicy = "tool_policy"
+    }
+}
+
+public struct SwitchWorkspaceBranchRequest: Codable, Equatable {
+    public let branch: String
+
+    public init(branch: String) {
+        self.branch = branch
+    }
+}
+
+public struct RestoreSessionRequest: Codable, Equatable {
+    public let sessionID: UInt64
+
+    public init(sessionID: UInt64) {
+        self.sessionID = sessionID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+    }
+}
+
+public struct TurnRequest: Codable, Equatable {
+    public let message: String
+    public let reasoningEffort: String
+
+    public init(message: String, reasoningEffort: String) {
+        self.message = message
+        self.reasoningEffort = reasoningEffort
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
+public struct TerminalCommandRequest: Codable, Equatable {
+    public let command: String
+
+    public init(command: String) {
+        self.command = command
+    }
 }

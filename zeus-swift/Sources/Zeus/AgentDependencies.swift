@@ -2,6 +2,7 @@ import Foundation
 import ZeusCore
 
 protocol AgentClientProtocol {
+    func capabilities() async throws -> ServerCapabilitiesResponse
     func models() async throws -> ModelsResponse
     func permissions() async throws -> PermissionsResponse
     func workspace() async throws -> WorkspaceResponse

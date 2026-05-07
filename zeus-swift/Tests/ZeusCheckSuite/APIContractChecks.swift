@@ -15,6 +15,18 @@ extension ZeusCoreChecks {
         try contractRequire(root.name == "rust-agent", "unexpected root identity")
         try contractRequire(root.workspaceRoot == "/workspace", "unexpected root workspace")
 
+        let capabilities = try fixture.decodeResponse(
+            "capabilities",
+            as: ServerCapabilitiesResponse.self
+        )
+        try contractRequire(capabilities.name == "rust-agent", "unexpected capabilities identity")
+        try contractRequire(capabilities.protocolVersion == 1, "unexpected capabilities protocol")
+        try contractRequire(!capabilities.schemaHash.isEmpty, "missing contract schema hash")
+        try contractRequire(
+            capabilities.features.contains("turn_streaming"),
+            "missing turn streaming feature"
+        )
+
         let models = try fixture.decodeResponse("models", as: ModelsResponse.self)
         try contractRequire(models.defaultModel == "gpt-5.5", "unexpected default model")
         try contractRequire(models.reasoningEfforts.contains("high"), "missing reasoning effort")
@@ -67,6 +79,61 @@ extension ZeusCoreChecks {
 
         let error = try fixture.decodeResponse("error", as: ContractErrorResponse.self)
         try contractRequire(error.error == "session not found", "unexpected error response")
+
+        try contractRequire(
+            Set(fixture.requestNames) == [
+                "switch_workspace_branch",
+                "set_session_model",
+                "set_session_permissions",
+                "restore_session",
+                "list_sessions",
+                "turn",
+                "terminal_command"
+            ],
+            "contract request names changed"
+        )
+        let setModel = try fixture.decodeRequest("set_session_model", as: SetModelRequest.self)
+        try contractRequire(
+            setModel == SetModelRequest(model: "gpt-5.5"),
+            "unexpected set model request"
+        )
+        let setPermissions = try fixture.decodeRequest(
+            "set_session_permissions",
+            as: SetPermissionsRequest.self
+        )
+        try contractRequire(
+            setPermissions == SetPermissionsRequest(toolPolicy: "workspace-write"),
+            "unexpected set permissions request"
+        )
+        let branchRequest = try fixture.decodeRequest(
+            "switch_workspace_branch",
+            as: SwitchWorkspaceBranchRequest.self
+        )
+        try contractRequire(
+            branchRequest == SwitchWorkspaceBranchRequest(branch: "feature"),
+            "unexpected branch request"
+        )
+        let restoreRequest = try fixture.decodeRequest(
+            "restore_session",
+            as: RestoreSessionRequest.self
+        )
+        try contractRequire(
+            restoreRequest == RestoreSessionRequest(sessionID: 42),
+            "unexpected restore request"
+        )
+        let turnRequest = try fixture.decodeRequest("turn", as: TurnRequest.self)
+        try contractRequire(
+            turnRequest == TurnRequest(message: "hello", reasoningEffort: "medium"),
+            "unexpected turn request"
+        )
+        let terminalRequest = try fixture.decodeRequest(
+            "terminal_command",
+            as: TerminalCommandRequest.self
+        )
+        try contractRequire(
+            terminalRequest == TerminalCommandRequest(command: "printf ok"),
+            "unexpected terminal request"
+        )
 
         let expectedEvents: [String: AgentServerEvent] = [
             "server.connected": .serverConnected(sessionID: 42),
@@ -125,6 +192,10 @@ private struct APIContractFixture {
         Array(((root["events"] as? [String: Any]) ?? [:]).keys)
     }
 
+    var requestNames: [String] {
+        Array(((root["requests"] as? [String: Any]) ?? [:]).keys)
+    }
+
     static func load() throws -> APIContractFixture {
         let url = try contractFixtureURL()
         guard FileManager.default.isReadableFile(atPath: url.path) else {
@@ -162,6 +233,10 @@ private struct APIContractFixture {
 
     func decodeResponse<T: Decodable>(_ name: String, as type: T.Type) throws -> T {
         try JSONDecoder().decode(type, from: objectData(section: "responses", name: name))
+    }
+
+    func decodeRequest<T: Decodable>(_ name: String, as type: T.Type) throws -> T {
+        try JSONDecoder().decode(type, from: objectData(section: "requests", name: name))
     }
 
     func decodeEvent(_ name: String) throws -> AgentServerEvent {

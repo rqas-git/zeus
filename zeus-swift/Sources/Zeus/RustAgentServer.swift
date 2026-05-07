@@ -5,6 +5,11 @@ import ZeusCore
 
 final class RustAgentServer: AgentServerProtocol {
     private let requiredProtocolVersion = 1
+    private let requiredFeatures = [
+        "turn_streaming",
+        "session_events",
+        "terminal_command"
+    ]
     private var process: Process?
     private let outputCapture = ProcessOutputCapture()
     private let readyPolls = 600
@@ -146,6 +151,19 @@ final class RustAgentServer: AgentServerProtocol {
                 actual: identity.workspaceRoot
             )
         }
+        let capabilities = try await client.capabilities()
+        guard capabilities.name == "rust-agent" else {
+            throw RustAgentServerError.invalidIdentity(capabilities.name)
+        }
+        guard capabilities.protocolVersion == requiredProtocolVersion else {
+            throw RustAgentServerError.unsupportedProtocolVersion(capabilities.protocolVersion)
+        }
+        guard !capabilities.schemaHash.isEmpty else {
+            throw RustAgentServerError.invalidCapabilities("missing schema hash")
+        }
+        for feature in requiredFeatures where !capabilities.features.contains(feature) {
+            throw RustAgentServerError.missingFeature(feature)
+        }
         _ = try await client.models()
         _ = try await client.permissions()
     }
@@ -217,6 +235,8 @@ enum RustAgentServerError: LocalizedError {
     case tokenMismatch
     case invalidReadinessAddress(String)
     case invalidReadiness(String)
+    case invalidCapabilities(String)
+    case missingFeature(String)
     case tokenGenerationFailed(OSStatus)
     case exitedEarly(String)
     case timedOut(String)
@@ -237,6 +257,10 @@ enum RustAgentServerError: LocalizedError {
             return "rust-agent readiness returned an invalid HTTP address: \(address)"
         case let .invalidReadiness(message):
             return "rust-agent returned invalid readiness metadata: \(message)"
+        case let .invalidCapabilities(message):
+            return "rust-agent returned invalid capabilities metadata: \(message)"
+        case let .missingFeature(feature):
+            return "rust-agent does not support required feature \(feature)."
         case let .tokenGenerationFailed(status):
             return "Failed to generate rust-agent server token: \(status)"
         case let .exitedEarly(output):

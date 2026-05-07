@@ -24,6 +24,14 @@ struct AgentAPIClient: AgentClientProtocol {
         return try JSONDecoder().decode(ServerIdentityResponse.self, from: data)
     }
 
+    func capabilities() async throws -> ServerCapabilitiesResponse {
+        var request = URLRequest(url: baseURL.appendingPathComponent("capabilities"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 2
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(ServerCapabilitiesResponse.self, from: data)
+    }
+
     func models() async throws -> ModelsResponse {
         var request = authenticatedRequest(path: "models")
         request.httpMethod = "GET"
@@ -278,42 +286,4 @@ enum AgentClientError: LocalizedError {
             return "rust-agent returned no parseable stream events: \(preview)"
         }
     }
-}
-
-private struct SetModelRequest: Encodable {
-    let model: String
-}
-
-private struct SetPermissionsRequest: Encodable {
-    let toolPolicy: String
-
-    enum CodingKeys: String, CodingKey {
-        case toolPolicy = "tool_policy"
-    }
-}
-
-private struct SwitchWorkspaceBranchRequest: Encodable {
-    let branch: String
-}
-
-private struct RestoreSessionRequest: Encodable {
-    let sessionID: UInt64
-
-    enum CodingKeys: String, CodingKey {
-        case sessionID = "session_id"
-    }
-}
-
-struct TurnRequest: Encodable {
-    let message: String
-    let reasoningEffort: String
-
-    enum CodingKeys: String, CodingKey {
-        case message
-        case reasoningEffort = "reasoning_effort"
-    }
-}
-
-private struct TerminalCommandRequest: Encodable {
-    let command: String
 }
