@@ -20,6 +20,27 @@
       "session_id": 42,
       "type": "cache_health"
     },
+    "compaction.completed": {
+      "details": {
+        "modified_files": [
+          "src/main.rs"
+        ],
+        "read_files": [
+          "Cargo.toml"
+        ]
+      },
+      "first_kept_message_id": 4,
+      "reason": "manual",
+      "session_id": 42,
+      "summary": "checkpoint",
+      "tokens_before": 12345,
+      "type": "compaction_completed"
+    },
+    "compaction.started": {
+      "reason": "manual",
+      "session_id": 42,
+      "type": "compaction_started"
+    },
     "message.completed": {
       "role": "assistant",
       "session_id": 42,
@@ -78,6 +99,10 @@
     }
   },
   "requests": {
+    "compact_session": {
+      "instructions": "focus on open files",
+      "reasoning_effort": "medium"
+    },
     "list_sessions": {
       "limit": 50,
       "offset": 0
@@ -114,7 +139,8 @@
         "session_restore",
         "turn_streaming",
         "session_events",
-        "terminal_command"
+        "terminal_command",
+        "session_compaction"
       ],
       "name": "rust-agent",
       "protocol_version": 1,
@@ -126,14 +152,28 @@
         "sessions",
         "turns",
         "terminal",
+        "compaction",
         "events"
       ],
-      "schema_hash": "bb46f3d73d09426c",
+      "schema_hash": "1187345528e3a760",
       "transports": [
         "http/1.1",
         "http/2",
         "http/3"
       ]
+    },
+    "compact_session": {
+      "details": {
+        "modified_files": [
+          "src/main.rs"
+        ],
+        "read_files": [
+          "Cargo.toml"
+        ]
+      },
+      "first_kept_message_id": 4,
+      "summary": "checkpoint",
+      "tokens_before": 12345
     },
     "create_session": {
       "model": "gpt-5.5",

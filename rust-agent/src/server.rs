@@ -51,6 +51,8 @@ use crate::agent_loop::MessageRole;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
+use crate::compaction::CompactionDetails;
+use crate::compaction::CompactionResult;
 use crate::config::ServerConfig;
 use crate::service::AgentService;
 use crate::service::SessionLastMessage;
@@ -77,6 +79,7 @@ const SERVER_FEATURES: &[&str] = &[
     "turn_streaming",
     "session_events",
     "terminal_command",
+    "session_compaction",
 ];
 const SERVER_ROUTE_GROUPS: &[&str] = &[
     "identity",
@@ -86,6 +89,7 @@ const SERVER_ROUTE_GROUPS: &[&str] = &[
     "sessions",
     "turns",
     "terminal",
+    "compaction",
     "events",
 ];
 
@@ -209,6 +213,7 @@ where
             "/sessions/{session_id}/terminal:run",
             post(run_terminal_command::<M>),
         )
+        .route("/sessions/{session_id}/compact", post(compact_session::<M>))
         .route("/sessions/{session_id}/events", get(session_events::<M>))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
@@ -1164,6 +1169,42 @@ where
     }
 }
 
+async fn compact_session<M>(
+    State(state): State<ServerState<M>>,
+    AxumPath(session_id): AxumPath<u64>,
+    Json(request): Json<CompactSessionRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let session_id = match state.require_session(session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, error),
+    };
+    let reasoning_effort = match request.reasoning_effort.as_deref() {
+        Some(effort) => match state.service.allowed_reasoning_effort(effort) {
+            Ok(effort) => Some(effort.to_string()),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+        },
+        None => None,
+    };
+    let events = state.events.clone();
+    match state
+        .service
+        .compact_session(
+            session_id,
+            request.instructions.as_deref(),
+            reasoning_effort.as_deref(),
+            |event| events.publish(ServerEvent::from_agent_event(event)),
+        )
+        .await
+    {
+        Ok(result) => Json(CompactionResponse::from_result(result)).into_response(),
+        Err(error) if is_turn_cancelled(&error) => error_response(StatusCode::CONFLICT, error),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error),
+    }
+}
+
 async fn session_events<M>(
     State(state): State<ServerState<M>>,
     AxumPath(session_id): AxumPath<u64>,
@@ -1326,6 +1367,10 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
             "terminal_command": TerminalCommandRequest {
                 command: "printf ok".to_string(),
             },
+            "compact_session": CompactSessionRequest {
+                instructions: Some("focus on open files".to_string()),
+                reasoning_effort: Some("medium".to_string()),
+            },
         },
         "responses": {
             "server_ready": ServerReadyMessage {
@@ -1447,6 +1492,15 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 output: "ok\n".to_string(),
                 success: true,
             },
+            "compact_session": CompactionResponse {
+                summary: "checkpoint".to_string(),
+                first_kept_message_id: 4,
+                tokens_before: 12345,
+                details: CompactionDetails {
+                    read_files: vec!["Cargo.toml".to_string()],
+                    modified_files: vec!["src/main.rs".to_string()],
+                },
+            },
             "error": ErrorResponse {
                 error: "session not found".to_string(),
             },
@@ -1506,6 +1560,21 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 session_id: 42,
                 message: "not logged in".to_string(),
             },
+            "compaction.started": ServerEvent::CompactionStarted {
+                session_id: 42,
+                reason: "manual",
+            },
+            "compaction.completed": ServerEvent::CompactionCompleted {
+                session_id: 42,
+                reason: "manual",
+                summary: "checkpoint".to_string(),
+                first_kept_message_id: 4,
+                tokens_before: 12345,
+                details: CompactionDetails {
+                    read_files: vec!["Cargo.toml".to_string()],
+                    modified_files: vec!["src/main.rs".to_string()],
+                },
+            },
             "turn.completed": ServerEvent::TurnCompleted { session_id: 42 },
             "turn.cancelled": ServerEvent::TurnCancelled { session_id: 42 },
         },
@@ -1541,6 +1610,18 @@ enum ServerEvent {
     CacheHealth {
         session_id: u64,
         cache: CacheHealthEvent,
+    },
+    CompactionStarted {
+        session_id: u64,
+        reason: &'static str,
+    },
+    CompactionCompleted {
+        session_id: u64,
+        reason: &'static str,
+        summary: String,
+        first_kept_message_id: u64,
+        tokens_before: u64,
+        details: CompactionDetails,
     },
     ToolCallStarted {
         session_id: u64,
@@ -1594,6 +1675,22 @@ impl ServerEvent {
                 session_id: session_id.get(),
                 cache: CacheHealthEvent::from_cache_health(cache_health),
             },
+            AgentEvent::CompactionStarted { session_id, reason } => Self::CompactionStarted {
+                session_id: session_id.get(),
+                reason: reason.as_str(),
+            },
+            AgentEvent::CompactionCompleted {
+                session_id,
+                reason,
+                result,
+            } => Self::CompactionCompleted {
+                session_id: session_id.get(),
+                reason: reason.as_str(),
+                summary: result.summary.clone(),
+                first_kept_message_id: result.first_kept_message_id.get(),
+                tokens_before: result.tokens_before,
+                details: result.details.clone(),
+            },
             AgentEvent::ToolCallStarted {
                 session_id,
                 tool_call_id,
@@ -1635,6 +1732,8 @@ impl ServerEvent {
             | Self::TextDelta { session_id, .. }
             | Self::MessageCompleted { session_id, .. }
             | Self::CacheHealth { session_id, .. }
+            | Self::CompactionStarted { session_id, .. }
+            | Self::CompactionCompleted { session_id, .. }
             | Self::ToolCallStarted { session_id, .. }
             | Self::ToolCallCompleted { session_id, .. }
             | Self::Error { session_id, .. }
@@ -1652,6 +1751,8 @@ impl ServerEvent {
             Self::TextDelta { .. } => "message.text_delta",
             Self::MessageCompleted { .. } => "message.completed",
             Self::CacheHealth { .. } => "cache.health",
+            Self::CompactionStarted { .. } => "compaction.started",
+            Self::CompactionCompleted { .. } => "compaction.completed",
             Self::ToolCallStarted { .. } => "tool_call.started",
             Self::ToolCallCompleted { .. } => "tool_call.completed",
             Self::Error { .. } => "session.error",
@@ -1937,6 +2038,16 @@ impl TranscriptMessageResponse {
                 tool_arguments: None,
                 success: Some(*success),
             },
+            AgentItem::Compaction { summary, .. } => Self {
+                message_id: message.id().get(),
+                kind: "compaction",
+                role: None,
+                text: Some(summary.clone()),
+                tool_call_id: None,
+                tool_name: None,
+                tool_arguments: None,
+                success: None,
+            },
         }
     }
 }
@@ -1967,6 +2078,25 @@ struct CancelTurnResponse {
 struct TerminalCommandResponse {
     output: String,
     success: bool,
+}
+
+#[derive(Serialize)]
+struct CompactionResponse {
+    summary: String,
+    first_kept_message_id: u64,
+    tokens_before: u64,
+    details: CompactionDetails,
+}
+
+impl CompactionResponse {
+    fn from_result(result: CompactionResult) -> Self {
+        Self {
+            summary: result.summary,
+            first_kept_message_id: result.first_kept_message_id.get(),
+            tokens_before: result.tokens_before,
+            details: result.details,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2011,6 +2141,12 @@ struct TerminalCommandRequest {
     command: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct CompactSessionRequest {
+    instructions: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2034,6 +2170,7 @@ mod tests {
     use crate::agent_loop::ModelToolCall;
     use crate::bench_support::DurationSummary;
     use crate::client::ConversationMessage;
+    use crate::config::CompactionConfig;
     use crate::config::ContextWindowConfig;
     use crate::config::ModelConfig;
     use crate::storage::SessionDatabase;
@@ -3098,6 +3235,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compacts_session_through_route() {
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("checkpoint", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default"]).unwrap(),
+            )
+            .with_compaction(CompactionConfig::for_test(10_000, 0, 5)),
+        );
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let mut receiver = state.events.subscribe(SessionId::new(7)).unwrap();
+        let app = router(state);
+
+        for message in ["first", "second"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/sessions/7/turns:stream")
+                        .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(r#"{{"message":"{message}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/compact")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"instructions":"focus paths","reasoning_effort":"medium"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["summary"], "checkpoint");
+        assert_eq!(body["first_kept_message_id"], 3);
+        let events = (0..4)
+            .map(|_| receiver.try_recv().unwrap())
+            .collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServerEvent::CompactionStarted {
+                reason: "manual",
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ServerEvent::CompactionCompleted {
+                first_kept_message_id: 3,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
     async fn streams_tool_call_args_in_started_event() {
         let turn = Arc::new(AtomicUsize::new(0));
         let service = Arc::new(AgentService::new(
@@ -3637,8 +3846,8 @@ mod tests {
                         &[
                             ConversationMessage::user("read the manifest"),
                             ConversationMessage::assistant("checking"),
-                            messages[2],
-                            messages[3],
+                            messages[2].clone(),
+                            messages[3].clone(),
                             ConversationMessage::assistant("done"),
                             ConversationMessage::user("continue"),
                         ]
