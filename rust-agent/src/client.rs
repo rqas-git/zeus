@@ -29,11 +29,11 @@ use crate::config::ClientConfig;
 use crate::tools::ToolSpec;
 
 /// One message in the current in-memory conversation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ConversationMessage<'a> {
     Message {
         role: ConversationRole,
-        text: &'a str,
+        text: Cow<'a, str>,
     },
     FunctionCall {
         item_id: Option<&'a str>,
@@ -53,7 +53,15 @@ impl<'a> ConversationMessage<'a> {
     pub(crate) fn user(text: &'a str) -> Self {
         Self::Message {
             role: ConversationRole::User,
-            text,
+            text: Cow::Borrowed(text),
+        }
+    }
+
+    /// Creates an owned user message.
+    pub(crate) fn owned_user(text: impl Into<String>) -> Self {
+        Self::Message {
+            role: ConversationRole::User,
+            text: Cow::Owned(text.into()),
         }
     }
 
@@ -61,7 +69,7 @@ impl<'a> ConversationMessage<'a> {
     pub(crate) fn assistant(text: &'a str) -> Self {
         Self::Message {
             role: ConversationRole::Assistant,
-            text,
+            text: Cow::Borrowed(text),
         }
     }
 
@@ -89,7 +97,7 @@ impl<'a> ConversationMessage<'a> {
         }
     }
 
-    fn input_bytes(self) -> usize {
+    fn input_bytes(&self) -> usize {
         match self {
             Self::Message { text, .. } => text.len(),
             Self::FunctionCall {
@@ -179,6 +187,7 @@ impl ModelStreamer for ChatGptClient {
             session_id,
             model,
             None,
+            self.config.instructions(),
             on_delta,
         )
         .await
@@ -201,9 +210,35 @@ impl ModelStreamer for ChatGptClient {
             session_id,
             model,
             reasoning_effort,
+            self.config.instructions(),
             on_delta,
         )
         .await
+    }
+
+    async fn compact_conversation<'a>(
+        &'a self,
+        prompt: &'a str,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+    ) -> Result<String> {
+        let messages = [ConversationMessage::user(prompt)];
+        let tools: [ToolSpec; 0] = [];
+        let mut ignore_delta = |_delta: &str| Ok(());
+        let response = self
+            .stream_conversation_inner(
+                &messages,
+                &tools,
+                false,
+                session_id,
+                model,
+                reasoning_effort,
+                crate::compaction::SUMMARIZATION_SYSTEM_PROMPT,
+                &mut ignore_delta,
+            )
+            .await?;
+        Ok(response.text)
     }
 }
 
@@ -216,16 +251,17 @@ impl ChatGptClient {
         session_id: SessionId,
         model: &'a str,
         reasoning_effort: Option<&'a str>,
+        instructions: &'a str,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
-        let stable_prefix = stable_prefix_stats(self.config.instructions(), tools);
+        let stable_prefix = stable_prefix_stats(instructions, tools);
         let input_bytes = conversation_input_bytes(messages);
         let body = ResponsesRequest {
             model,
-            instructions: self.config.instructions(),
+            instructions,
             input: responses_input(messages),
             tools,
             tool_choice: "auto",
@@ -426,7 +462,7 @@ impl Serialize for ResponsesMessage<'_> {
                     "content",
                     &[ResponsesContent {
                         kind: role.content_type(),
-                        text,
+                        text: text.as_ref(),
                     }],
                 )?;
                 state.end()

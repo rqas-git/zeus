@@ -13,6 +13,15 @@ use futures_util::future::join_all;
 use tokio::sync::Notify;
 
 use crate::client::ConversationMessage;
+use crate::compaction::is_context_overflow_error;
+use crate::compaction::prepare_compaction;
+use crate::compaction::summary_prompt;
+use crate::compaction::turn_prefix_prompt;
+use crate::compaction::with_file_operations;
+use crate::compaction::CompactionDetails;
+use crate::compaction::CompactionPreparation;
+use crate::compaction::CompactionResult;
+use crate::config::CompactionConfig;
 use crate::config::ContextWindowConfig;
 use crate::storage::SessionDatabase;
 use crate::storage::StoredSession;
@@ -214,6 +223,12 @@ pub(crate) enum AgentItem {
         output: String,
         success: bool,
     },
+    Compaction {
+        summary: String,
+        first_kept_message_id: MessageId,
+        tokens_before: u64,
+        details: CompactionDetails,
+    },
 }
 
 impl AgentItem {
@@ -249,6 +264,9 @@ impl AgentMessage {
             AgentItem::FunctionCall { .. } | AgentItem::FunctionOutput { .. } => {
                 panic!("tool transcript items do not have user or assistant roles")
             }
+            AgentItem::Compaction { .. } => {
+                panic!("compaction entries do not have user or assistant roles")
+            }
         }
     }
 
@@ -258,6 +276,7 @@ impl AgentMessage {
             AgentItem::Message { text, .. } => text,
             AgentItem::FunctionCall { arguments, .. } => arguments,
             AgentItem::FunctionOutput { output, .. } => output,
+            AgentItem::Compaction { summary, .. } => summary,
         }
     }
 
@@ -278,6 +297,9 @@ impl AgentMessage {
                 output,
                 success,
             } => ConversationMessage::function_output(call_id, output, *success),
+            AgentItem::Compaction { summary, .. } => {
+                ConversationMessage::owned_user(crate::compaction::compaction_context_text(summary))
+            }
         }
     }
 
@@ -298,6 +320,9 @@ impl AgentMessage {
             AgentItem::FunctionOutput {
                 call_id, output, ..
             } => call_id.len() + output.len(),
+            AgentItem::Compaction { summary, .. } => {
+                crate::compaction::compaction_context_text(summary).len()
+            }
         }
     }
 }
@@ -323,6 +348,15 @@ pub(crate) enum AgentEvent<'a> {
         session_id: SessionId,
         cache_health: &'a CacheHealth,
     },
+    CompactionStarted {
+        session_id: SessionId,
+        reason: CompactionReason,
+    },
+    CompactionCompleted {
+        session_id: SessionId,
+        reason: CompactionReason,
+        result: &'a CompactionResult,
+    },
     ToolCallStarted {
         session_id: SessionId,
         tool_call_id: &'a str,
@@ -339,6 +373,25 @@ pub(crate) enum AgentEvent<'a> {
         session_id: SessionId,
         message: &'a str,
     },
+}
+
+/// Reason a compaction run started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompactionReason {
+    Manual,
+    Threshold,
+    Overflow,
+}
+
+impl CompactionReason {
+    /// Returns the stable event label for the reason.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Threshold => "threshold",
+            Self::Overflow => "overflow",
+        }
+    }
 }
 
 /// Provider token usage reported for one completed model response.
@@ -510,6 +563,33 @@ pub(crate) trait ModelStreamer: Sync {
             .await
         }
     }
+
+    /// Generates a semantic compaction summary without user-visible deltas.
+    fn compact_conversation<'a>(
+        &'a self,
+        prompt: &'a str,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+    ) -> impl Future<Output = Result<String>> + Send + 'a {
+        async move {
+            let messages = [ConversationMessage::user(prompt)];
+            let tools: [ToolSpec; 0] = [];
+            let mut ignore_delta = |_delta: &str| Ok(());
+            let response = self
+                .stream_conversation_with_reasoning(
+                    &messages,
+                    &tools,
+                    false,
+                    session_id,
+                    model,
+                    reasoning_effort,
+                    &mut ignore_delta,
+                )
+                .await?;
+            Ok(response.text)
+        }
+    }
 }
 
 /// Per-session runtime settings.
@@ -645,6 +725,15 @@ impl InMemorySessionStore {
         }
     }
 
+    fn append_compaction(&mut self, result: CompactionResult) -> MessageId {
+        self.append_item(AgentItem::Compaction {
+            summary: result.summary,
+            first_kept_message_id: result.first_kept_message_id,
+            tokens_before: result.tokens_before,
+            details: result.details,
+        })
+    }
+
     fn append_item(&mut self, item: AgentItem) -> MessageId {
         let id = self.next_message_id;
         self.next_message_id = self.next_message_id.next();
@@ -662,7 +751,20 @@ impl InMemorySessionStore {
         }
     }
 
+    #[cfg(test)]
     fn conversation_window(&self, config: ContextWindowConfig) -> Vec<ConversationMessage<'_>> {
+        self.conversation_window_with_compaction(config, CompactionConfig::disabled())
+    }
+
+    fn conversation_window_with_compaction(
+        &self,
+        config: ContextWindowConfig,
+        compaction: CompactionConfig,
+    ) -> Vec<ConversationMessage<'_>> {
+        if compaction.enabled() || self.latest_compaction_index().is_some() {
+            return self.compacted_context();
+        }
+
         let ranges = self.retained_ranges(config.max_messages(), config.max_bytes());
         let retained_count = ranges.iter().map(|range| range.end - range.start).sum();
         let mut retained = Vec::with_capacity(retained_count);
@@ -675,7 +777,63 @@ impl InMemorySessionStore {
         retained
     }
 
+    fn compacted_context(&self) -> Vec<ConversationMessage<'_>> {
+        let Some(compaction_index) = self.latest_compaction_index() else {
+            return self
+                .messages
+                .iter()
+                .filter(|message| !matches!(message.item(), AgentItem::Compaction { .. }))
+                .map(AgentMessage::conversation_message)
+                .collect();
+        };
+        let AgentItem::Compaction {
+            summary,
+            first_kept_message_id,
+            ..
+        } = self.messages[compaction_index].item()
+        else {
+            unreachable!("latest compaction index must point at a compaction")
+        };
+        let first_kept = self
+            .messages
+            .iter()
+            .take(compaction_index)
+            .position(|message| message.id() == *first_kept_message_id)
+            .unwrap_or(compaction_index);
+        let mut context = Vec::new();
+        context.push(ConversationMessage::owned_user(
+            crate::compaction::compaction_context_text(summary),
+        ));
+        context.extend(
+            self.messages[first_kept..compaction_index]
+                .iter()
+                .filter(|message| !matches!(message.item(), AgentItem::Compaction { .. }))
+                .map(AgentMessage::conversation_message),
+        );
+        context.extend(
+            self.messages[compaction_index + 1..]
+                .iter()
+                .filter(|message| !matches!(message.item(), AgentItem::Compaction { .. }))
+                .map(AgentMessage::conversation_message),
+        );
+        context
+    }
+
+    #[cfg(test)]
     fn prune_history(&mut self, config: ContextWindowConfig) {
+        self.prune_history_with_compaction(config, CompactionConfig::disabled());
+    }
+
+    fn prune_history_with_compaction(
+        &mut self,
+        config: ContextWindowConfig,
+        compaction: CompactionConfig,
+    ) {
+        if compaction.enabled() || self.latest_compaction_index().is_some() {
+            self.prune_before_latest_compaction_boundary();
+            return;
+        }
+
         let ranges =
             self.retained_ranges(config.history_max_messages(), config.history_max_bytes());
         let first_retained = ranges
@@ -685,6 +843,34 @@ impl InMemorySessionStore {
         if first_retained > 0 {
             self.messages.drain(0..first_retained);
         }
+    }
+
+    fn prune_before_latest_compaction_boundary(&mut self) {
+        let Some(compaction_index) = self.latest_compaction_index() else {
+            return;
+        };
+        let AgentItem::Compaction {
+            first_kept_message_id,
+            ..
+        } = self.messages[compaction_index].item()
+        else {
+            unreachable!("latest compaction index must point at a compaction")
+        };
+        let first_retained = self
+            .messages
+            .iter()
+            .take(compaction_index)
+            .position(|message| message.id() == *first_kept_message_id)
+            .unwrap_or(compaction_index);
+        if first_retained > 0 {
+            self.messages.drain(0..first_retained);
+        }
+    }
+
+    fn latest_compaction_index(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .rposition(|message| matches!(message.item(), AgentItem::Compaction { .. }))
     }
 
     fn retained_ranges(&self, max_messages: usize, max_bytes: usize) -> Vec<Range<usize>> {
@@ -759,6 +945,7 @@ pub(crate) struct CacheObservation {
 pub(crate) struct AgentLoop {
     store: InMemorySessionStore,
     context_window: ContextWindowConfig,
+    compaction: CompactionConfig,
     tools: ToolRegistry,
     database: Option<SessionDatabase>,
 }
@@ -781,24 +968,60 @@ impl AgentLoop {
         context_window: ContextWindowConfig,
         config: SessionConfig,
     ) -> Self {
-        Self::with_context_window_and_tools(
+        Self::with_context_window_and_compaction(
             session_id,
             context_window,
+            CompactionConfig::disabled(),
+            config,
+        )
+    }
+
+    /// Creates an agent loop with explicit context and compaction bounds.
+    #[cfg(test)]
+    pub(crate) fn with_context_window_and_compaction(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
+        config: SessionConfig,
+    ) -> Self {
+        Self::with_context_window_compaction_and_tools(
+            session_id,
+            context_window,
+            compaction,
             config,
             ToolRegistry::default(),
         )
     }
 
     /// Creates an agent loop with explicit context bounds and tool registry.
+    #[cfg(test)]
     pub(crate) fn with_context_window_and_tools(
         session_id: SessionId,
         context_window: ContextWindowConfig,
         config: SessionConfig,
         tools: ToolRegistry,
     ) -> Self {
+        Self::with_context_window_compaction_and_tools(
+            session_id,
+            context_window,
+            CompactionConfig::disabled(),
+            config,
+            tools,
+        )
+    }
+
+    /// Creates an agent loop with explicit context, compaction, and tools.
+    pub(crate) fn with_context_window_compaction_and_tools(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
+        config: SessionConfig,
+        tools: ToolRegistry,
+    ) -> Self {
         Self {
             store: InMemorySessionStore::new(session_id, config),
             context_window,
+            compaction,
             tools,
             database: None,
         }
@@ -808,9 +1031,32 @@ impl AgentLoop {
     ///
     /// # Errors
     /// Returns an error when the session cannot be loaded or initialized.
+    #[cfg(test)]
     pub(crate) fn with_context_window_tools_and_database(
         session_id: SessionId,
         context_window: ContextWindowConfig,
+        config: SessionConfig,
+        tools: ToolRegistry,
+        database: SessionDatabase,
+    ) -> Result<Self> {
+        Self::with_context_window_compaction_tools_and_database(
+            session_id,
+            context_window,
+            CompactionConfig::disabled(),
+            config,
+            tools,
+            database,
+        )
+    }
+
+    /// Creates a compacting agent loop backed by durable SQLite session storage.
+    ///
+    /// # Errors
+    /// Returns an error when the session cannot be loaded or initialized.
+    pub(crate) fn with_context_window_compaction_tools_and_database(
+        session_id: SessionId,
+        context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
         config: SessionConfig,
         tools: ToolRegistry,
         database: SessionDatabase,
@@ -822,13 +1068,14 @@ impl AgentLoop {
                 InMemorySessionStore::new(session_id, config)
             }
         };
-        store.prune_history(context_window);
+        store.prune_history_with_compaction(context_window, compaction);
         if store.status() == SessionStatus::Idle {
             database.set_session_status(session_id, SessionStatus::Idle)?;
         }
         Ok(Self {
             store,
             context_window,
+            compaction,
             tools,
             database: Some(database),
         })
@@ -956,7 +1203,10 @@ impl AgentLoop {
                 error,
             );
         }
-        self.store.prune_history(self.context_window);
+        self.store
+            .prune_history_with_compaction(self.context_window, self.compaction);
+        self.maybe_auto_compact(model, &cancellation, reasoning_effort, &mut emit)
+            .await?;
         let result = self
             .run_until_done(model, &cancellation, reasoning_effort, &mut emit)
             .await;
@@ -966,12 +1216,14 @@ impl AgentLoop {
                 Ok(())
             }
             Err(error) if is_turn_cancelled(&error) => {
-                self.store.prune_history(self.context_window);
+                self.store
+                    .prune_history_with_compaction(self.context_window, self.compaction);
                 self.set_status(SessionStatus::Idle, &mut emit)?;
                 Err(error)
             }
             Err(error) => {
-                self.store.prune_history(self.context_window);
+                self.store
+                    .prune_history_with_compaction(self.context_window, self.compaction);
                 self.set_status(SessionStatus::Failed, &mut emit)?;
                 let message = error.to_string();
                 emit(AgentEvent::Error {
@@ -1040,7 +1292,8 @@ impl AgentLoop {
         let result = self
             .execute_terminal_command(command, user_id, &cancellation, &mut emit)
             .await;
-        self.store.prune_history(self.context_window);
+        self.store
+            .prune_history_with_compaction(self.context_window, self.compaction);
         match result {
             Ok(result) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
@@ -1139,19 +1392,46 @@ impl AgentLoop {
         reasoning_effort: Option<&str>,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
+        let mut recovered_overflow = false;
         for _ in 0..MAX_TOOL_ROUNDS {
             cancellation.ensure_not_cancelled()?;
-            let tool_calls = self
+            let tool_calls = match self
                 .run_once(model, cancellation, reasoning_effort, emit)
-                .await?;
+                .await
+            {
+                Ok(tool_calls) => tool_calls,
+                Err(error)
+                    if self.compaction.enabled()
+                        && !recovered_overflow
+                        && is_context_overflow_error(&error.to_string()) =>
+                {
+                    recovered_overflow = true;
+                    self.run_compaction(
+                        model,
+                        cancellation,
+                        reasoning_effort,
+                        None,
+                        CompactionReason::Overflow,
+                        emit,
+                    )
+                    .await
+                    .with_context(|| format!("context overflow recovery failed: {error}"))?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if tool_calls.is_empty() {
-                self.store.prune_history(self.context_window);
+                self.maybe_auto_compact(model, cancellation, reasoning_effort, emit)
+                    .await?;
+                self.store
+                    .prune_history_with_compaction(self.context_window, self.compaction);
                 return Ok(());
             }
 
             self.execute_tool_calls(tool_calls, cancellation, emit)
                 .await?;
-            self.store.prune_history(self.context_window);
+            self.store
+                .prune_history_with_compaction(self.context_window, self.compaction);
         }
 
         anyhow::bail!("tool call limit exceeded")
@@ -1164,7 +1444,9 @@ impl AgentLoop {
         reasoning_effort: Option<&str>,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
-        let history = self.store.conversation_window(self.context_window);
+        let history = self
+            .store
+            .conversation_window_with_compaction(self.context_window, self.compaction);
         let session_id = self.session_id();
         let selected_model = self.store.model();
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
@@ -1209,6 +1491,176 @@ impl AgentLoop {
             })?;
         }
         Ok(model_response.tool_calls)
+    }
+
+    /// Manually compacts the session context.
+    ///
+    /// # Errors
+    /// Returns an error if the session is running, cancellation is requested, or summarization fails.
+    pub(crate) async fn compact_with_cancellation(
+        &mut self,
+        model: &impl ModelStreamer,
+        cancellation: TurnCancellation,
+        reasoning_effort: Option<&str>,
+        custom_instructions: Option<&str>,
+        mut emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<CompactionResult> {
+        anyhow::ensure!(
+            self.store.status() != SessionStatus::Running,
+            "session is already running"
+        );
+        cancellation.ensure_not_cancelled()?;
+        self.begin_running(&mut emit)?;
+        let result = self
+            .run_compaction(
+                model,
+                &cancellation,
+                reasoning_effort,
+                custom_instructions,
+                CompactionReason::Manual,
+                &mut emit,
+            )
+            .await;
+        match result {
+            Ok(result) => {
+                self.set_status(SessionStatus::Idle, &mut emit)?;
+                Ok(result)
+            }
+            Err(error) if is_turn_cancelled(&error) => {
+                self.set_status(SessionStatus::Idle, &mut emit)?;
+                Err(error)
+            }
+            Err(error) => {
+                self.set_status(SessionStatus::Failed, &mut emit)?;
+                let message = error.to_string();
+                emit(AgentEvent::Error {
+                    session_id: self.session_id(),
+                    message: &message,
+                })?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn maybe_auto_compact(
+        &mut self,
+        model: &impl ModelStreamer,
+        cancellation: &TurnCancellation,
+        reasoning_effort: Option<&str>,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
+    ) -> Result<Option<CompactionResult>> {
+        let context_tokens = crate::compaction::estimate_session_tokens(self.store.messages());
+        if !self.compaction.should_compact(context_tokens) {
+            return Ok(None);
+        }
+        self.run_compaction(
+            model,
+            cancellation,
+            reasoning_effort,
+            None,
+            CompactionReason::Threshold,
+            emit,
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn run_compaction(
+        &mut self,
+        model: &impl ModelStreamer,
+        cancellation: &TurnCancellation,
+        reasoning_effort: Option<&str>,
+        custom_instructions: Option<&str>,
+        reason: CompactionReason,
+        emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
+    ) -> Result<CompactionResult> {
+        cancellation.ensure_not_cancelled()?;
+        let preparation = prepare_compaction(self.store.messages(), self.compaction)
+            .context("nothing to compact")?;
+        emit(AgentEvent::CompactionStarted {
+            session_id: self.session_id(),
+            reason,
+        })?;
+
+        let mut summary = self
+            .generate_compaction_summary(
+                model,
+                &preparation,
+                cancellation,
+                reasoning_effort,
+                custom_instructions,
+            )
+            .await?;
+        summary = with_file_operations(summary, &preparation.details);
+        let result = CompactionResult {
+            summary,
+            first_kept_message_id: preparation.first_kept_message_id,
+            tokens_before: preparation.tokens_before,
+            details: preparation.details,
+        };
+        let stored_result = result.clone();
+        let compaction_id = self.store.append_compaction(stored_result);
+        self.persist_message(compaction_id)?;
+        self.store
+            .prune_history_with_compaction(self.context_window, self.compaction);
+        emit(AgentEvent::CompactionCompleted {
+            session_id: self.session_id(),
+            reason,
+            result: &result,
+        })?;
+        Ok(result)
+    }
+
+    async fn generate_compaction_summary(
+        &self,
+        model: &impl ModelStreamer,
+        preparation: &CompactionPreparation,
+        cancellation: &TurnCancellation,
+        reasoning_effort: Option<&str>,
+        custom_instructions: Option<&str>,
+    ) -> Result<String> {
+        let session_id = self.session_id();
+        let selected_model = self.store.model();
+        if preparation.is_split_turn && !preparation.turn_prefix_messages.is_empty() {
+            let history_prompt = summary_prompt(preparation, custom_instructions);
+            let prefix_prompt = turn_prefix_prompt(preparation);
+            let (history_summary, prefix_summary) = tokio::try_join!(
+                async {
+                    if preparation.messages_to_summarize.is_empty() {
+                        Ok("No prior history.".to_string())
+                    } else {
+                        cancellation.ensure_not_cancelled()?;
+                        model
+                            .compact_conversation(
+                                &history_prompt,
+                                session_id,
+                                selected_model,
+                                reasoning_effort,
+                            )
+                            .await
+                    }
+                },
+                async {
+                    cancellation.ensure_not_cancelled()?;
+                    model
+                        .compact_conversation(
+                            &prefix_prompt,
+                            session_id,
+                            selected_model,
+                            reasoning_effort,
+                        )
+                        .await
+                }
+            )?;
+            return Ok(format!(
+                "{history_summary}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_summary}"
+            ));
+        }
+
+        let prompt = summary_prompt(preparation, custom_instructions);
+        model
+            .compact_conversation(&prompt, session_id, selected_model, reasoning_effort)
+            .await
     }
 
     async fn execute_tool_calls(
@@ -1798,6 +2250,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_compaction_stores_summary_and_keeps_recent_tail() {
+        let mut agent = AgentLoop::with_context_window_and_compaction(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            CompactionConfig::for_test(100, 10, 8),
+            SessionConfig::new("test-model"),
+        );
+        agent
+            .store
+            .append_message(MessageRole::User, "old user text");
+        agent
+            .store
+            .append_message(MessageRole::Assistant, "old answer text");
+        agent
+            .store
+            .append_message(MessageRole::User, "recent request");
+        agent
+            .store
+            .append_message(MessageRole::Assistant, "recent answer");
+        let calls = AtomicUsize::new(0);
+        let streamer = FnStreamer::new(
+            |history: &[ConversationMessage<'_>],
+             tools: &[ToolSpec],
+             parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert!(tools.is_empty());
+                assert!(!parallel_tool_calls);
+                assert_eq!(history.len(), 1);
+                let ConversationMessage::Message { text, .. } = &history[0] else {
+                    panic!("compaction prompt must be a user message");
+                };
+                assert!(text.contains("<conversation>"));
+                assert!(text.contains("old user text"));
+                assert!(text.contains("Additional focus: paths"));
+                Ok("checkpoint summary".to_string())
+            },
+        );
+        let mut events = Vec::new();
+
+        let result = agent
+            .compact_with_cancellation(
+                &streamer,
+                TurnCancellation::new(),
+                None,
+                Some("paths"),
+                |event| {
+                    events.push(format_event(event));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.summary, "checkpoint summary");
+        assert_eq!(result.first_kept_message_id, MessageId::new(3));
+        assert!(matches!(
+            agent.messages().last().unwrap().item(),
+            AgentItem::Compaction { summary, .. } if summary == "checkpoint summary"
+        ));
+        let context = agent
+            .store
+            .conversation_window_with_compaction(agent.context_window, agent.compaction);
+        assert_eq!(context.len(), 3);
+        assert!(matches!(
+            &context[0],
+            ConversationMessage::Message { text, .. }
+                if text.contains("checkpoint summary")
+        ));
+        assert_eq!(context[1], ConversationMessage::user("recent request"));
+        assert_eq!(context[2], ConversationMessage::assistant("recent answer"));
+        assert_eq!(
+            events,
+            [
+                "status:Running",
+                "compaction-start:manual",
+                "compaction-end:manual:3",
+                "status:Idle",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn sends_selected_model_to_streamer() {
         let mut agent = AgentLoop::with_context_window(
             SessionId::new(7),
@@ -2380,7 +2917,7 @@ mod tests {
                         "tool output {call_id} did not have a retained function call"
                     );
                 }
-                AgentItem::Message { .. } => call_ids.clear(),
+                AgentItem::Message { .. } | AgentItem::Compaction { .. } => call_ids.clear(),
             }
         }
     }
@@ -2395,6 +2932,14 @@ mod tests {
             AgentEvent::CacheHealth { cache_health, .. } => {
                 format!("cache:{}", cache_health.cache_status.as_str())
             }
+            AgentEvent::CompactionStarted { reason, .. } => {
+                format!("compaction-start:{}", reason.as_str())
+            }
+            AgentEvent::CompactionCompleted { reason, result, .. } => format!(
+                "compaction-end:{}:{}",
+                reason.as_str(),
+                result.first_kept_message_id.get()
+            ),
             AgentEvent::ToolCallStarted {
                 tool_call_id,
                 tool_name,

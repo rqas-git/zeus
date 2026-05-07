@@ -28,6 +28,10 @@ const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
 const DEFAULT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_HISTORY_MAX_MESSAGES: usize = 200;
 const DEFAULT_HISTORY_MAX_BYTES: usize = 256 * 1024;
+const DEFAULT_COMPACTION_ENABLED: bool = true;
+const DEFAULT_COMPACTION_CONTEXT_TOKENS: u64 = 272_000;
+const DEFAULT_COMPACTION_RESERVE_TOKENS: u64 = 16_384;
+const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS: u64 = 20_000;
 const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
@@ -44,6 +48,7 @@ const DEFAULT_TOOL_MODE: &str = "read-only";
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AppConfig {
     pub(crate) client: ClientConfig,
+    pub(crate) compaction: CompactionConfig,
     pub(crate) context: ContextWindowConfig,
     pub(crate) models: ModelConfig,
     pub(crate) output: OutputConfig,
@@ -61,6 +66,7 @@ impl AppConfig {
     pub(crate) fn from_env() -> Result<Self> {
         Ok(Self {
             client: ClientConfig::from_env()?,
+            compaction: CompactionConfig::from_env()?,
             context: ContextWindowConfig::from_env()?,
             models: ModelConfig::from_env()?,
             output: OutputConfig::from_env()?,
@@ -397,6 +403,101 @@ impl Default for ContextWindowConfig {
             max_bytes: DEFAULT_CONTEXT_MAX_BYTES,
             history_max_messages: DEFAULT_HISTORY_MAX_MESSAGES,
             history_max_bytes: DEFAULT_HISTORY_MAX_BYTES,
+        }
+    }
+}
+
+/// Semantic compaction settings matching pi's defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompactionConfig {
+    enabled: bool,
+    context_window_tokens: u64,
+    reserve_tokens: u64,
+    keep_recent_tokens: u64,
+}
+
+impl CompactionConfig {
+    /// Loads compaction settings from environment variables.
+    ///
+    /// # Errors
+    /// Returns an error if a numeric or boolean environment variable is invalid.
+    pub(crate) fn from_env() -> Result<Self> {
+        let context_window_tokens = env_parse_u64(
+            "RUST_AGENT_COMPACTION_CONTEXT_TOKENS",
+            DEFAULT_COMPACTION_CONTEXT_TOKENS,
+        )?
+        .max(1);
+        let reserve_tokens = env_parse_u64(
+            "RUST_AGENT_COMPACTION_RESERVE_TOKENS",
+            DEFAULT_COMPACTION_RESERVE_TOKENS,
+        )?;
+        let keep_recent_tokens = env_parse_u64(
+            "RUST_AGENT_COMPACTION_KEEP_RECENT_TOKENS",
+            DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+        )?
+        .max(1);
+        Ok(Self {
+            enabled: env_parse_bool("RUST_AGENT_COMPACTION_ENABLED", DEFAULT_COMPACTION_ENABLED)?,
+            context_window_tokens,
+            reserve_tokens,
+            keep_recent_tokens,
+        })
+    }
+
+    /// Creates compaction settings for focused tests.
+    #[cfg(test)]
+    pub(crate) const fn for_test(
+        context_window_tokens: u64,
+        reserve_tokens: u64,
+        keep_recent_tokens: u64,
+    ) -> Self {
+        Self {
+            enabled: true,
+            context_window_tokens,
+            reserve_tokens,
+            keep_recent_tokens,
+        }
+    }
+
+    /// Returns disabled compaction settings.
+    pub(crate) const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            context_window_tokens: DEFAULT_COMPACTION_CONTEXT_TOKENS,
+            reserve_tokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+            keep_recent_tokens: DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+        }
+    }
+
+    /// Returns whether automatic compaction is enabled.
+    pub(crate) const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the token threshold for automatic compaction.
+    pub(crate) const fn auto_threshold_tokens(self) -> u64 {
+        self.context_window_tokens
+            .saturating_sub(self.reserve_tokens)
+    }
+
+    /// Returns the recent-token budget preserved verbatim.
+    pub(crate) const fn keep_recent_tokens(self) -> u64 {
+        self.keep_recent_tokens
+    }
+
+    /// Returns true when the session should compact automatically.
+    pub(crate) const fn should_compact(self, context_tokens: u64) -> bool {
+        self.enabled && context_tokens > self.auto_threshold_tokens()
+    }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_COMPACTION_ENABLED,
+            context_window_tokens: DEFAULT_COMPACTION_CONTEXT_TOKENS,
+            reserve_tokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+            keep_recent_tokens: DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
         }
     }
 }
