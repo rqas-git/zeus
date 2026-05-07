@@ -37,6 +37,7 @@ const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
 const DEFAULT_SERVER_HTTP_ADDR: &str = "127.0.0.1:4096";
 const DEFAULT_SERVER_H3_ADDR: &str = "127.0.0.1:4433";
+const DEFAULT_SERVER_ALLOW_REMOTE_HTTP: bool = false;
 const DEFAULT_SERVER_EVENT_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_SERVER_MAX_SESSIONS: usize = 128;
 const DEFAULT_SERVER_MAX_EVENT_CHANNELS: usize = 128;
@@ -579,11 +580,14 @@ impl ServerConfig {
     /// # Errors
     /// Returns an error if an address or numeric environment variable is invalid.
     pub(crate) fn from_env() -> Result<Self> {
+        let http_addr =
+            env_parse_socket_addr("RUST_AGENT_SERVER_HTTP_ADDR", DEFAULT_SERVER_HTTP_ADDR)?;
+        let allow_remote_http = env_parse_bool(
+            "RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP",
+            DEFAULT_SERVER_ALLOW_REMOTE_HTTP,
+        )?;
         Ok(Self {
-            http_addr: env_parse_socket_addr(
-                "RUST_AGENT_SERVER_HTTP_ADDR",
-                DEFAULT_SERVER_HTTP_ADDR,
-            )?,
+            http_addr: validate_http_addr(http_addr, allow_remote_http)?,
             h3_addr: env_parse_socket_addr("RUST_AGENT_SERVER_H3_ADDR", DEFAULT_SERVER_H3_ADDR)?,
             tls_cert_path: env_optional_path("RUST_AGENT_SERVER_TLS_CERT"),
             tls_key_path: env_optional_path("RUST_AGENT_SERVER_TLS_KEY"),
@@ -895,6 +899,17 @@ fn env_parse_socket_addr(name: &str, default: &str) -> Result<SocketAddr> {
         .map_err(|error| anyhow::anyhow!("failed to parse {name}={raw:?}: {error}"))
 }
 
+fn validate_http_addr(addr: SocketAddr, allow_remote_http: bool) -> Result<SocketAddr> {
+    if allow_remote_http || addr.ip().is_loopback() {
+        return Ok(addr);
+    }
+
+    anyhow::bail!(
+        "RUST_AGENT_SERVER_HTTP_ADDR={addr} binds plaintext HTTP to a non-loopback address; \
+         set RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true only for trusted deployments"
+    );
+}
+
 fn env_parse_u32(name: &str, default: u32) -> Result<u32> {
     parse_env(name, default)
 }
@@ -1175,6 +1190,18 @@ mod tests {
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "1").is_err());
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "0").is_err());
         assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "not-a-pid").is_err());
+    }
+
+    #[test]
+    fn validates_plain_http_bind_scope() {
+        let loopback_v4 = "127.0.0.1:4096".parse().unwrap();
+        let loopback_v6 = "[::1]:4096".parse().unwrap();
+        let remote = "0.0.0.0:4096".parse().unwrap();
+
+        assert_eq!(validate_http_addr(loopback_v4, false).unwrap(), loopback_v4);
+        assert_eq!(validate_http_addr(loopback_v6, false).unwrap(), loopback_v6);
+        assert!(validate_http_addr(remote, false).is_err());
+        assert_eq!(validate_http_addr(remote, true).unwrap(), remote);
     }
 
     #[test]

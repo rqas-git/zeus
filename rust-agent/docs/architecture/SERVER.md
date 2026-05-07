@@ -11,7 +11,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
    before binding listeners, without waiting for the scan to finish.
 3. `ServerConfig` supplies the HTTP compatibility address, HTTP/3 address, TLS
    identity, bearer token, session bounds, event queue capacity, QUIC stream
-   limits, idle timeout, and optional parent process to watch for shutdown.
+   limits, idle timeout, remote-HTTP opt-in, and optional parent process to
+   watch for shutdown.
 4. One Axum router is built with shared `ServerState`.
 5. A TCP listener serves HTTP/1.1 and HTTP/2 compatibility traffic.
 6. A Quinn endpoint serves HTTP/3 over QUIC with ALPN `h3`.
@@ -69,9 +70,11 @@ router through both HTTP compatibility and native HTTP/3 transports.
 
 `GET /`, `GET /healthz`, and `GET /capabilities` are public. All other routes
 require `Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a
-stable token; otherwise startup prints a generated token to stderr. Numeric
-session IDs must come from `POST /sessions` or an existing local SQLite row
-discovered
+stable token; otherwise startup prints a generated token to stderr. The
+plaintext HTTP compatibility listener rejects non-loopback bind addresses unless
+`RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a trusted deployment.
+Numeric session IDs must come from `POST /sessions` or an existing local SQLite
+row discovered
 through `GET /sessions`, `GET /sessions/{session_id}`, or restored through
 `POST /sessions:restore`; generated IDs stay within JavaScript's JSON-safe
 integer range.
@@ -171,10 +174,11 @@ response, and event types and is used by Swift contract checks.
 ## Current Scope
 
 The server is process-local and uses one bearer token for non-health routes.
-Bind to loopback by default, set `RUST_AGENT_SERVER_TOKEN` when scripts need a
-stable token, and read the startup readiness line when a supervisor needs the
+Bind plaintext HTTP to loopback, set `RUST_AGENT_SERVER_TOKEN` when scripts need
+a stable token, and read the startup readiness line when a supervisor needs the
 actual token or OS-assigned ports. Treat generated tokens as a local-development
-convenience.
+convenience. Set `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` only for trusted
+deployments where remote plaintext HTTP access is acceptable.
 Server-issued session IDs are random and the active registry is process-local,
 while session content is durable in SQLite. Clients can restore durable session
 rows by id, which re-adds that session id to the process-local active registry

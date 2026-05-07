@@ -41,6 +41,7 @@ telemetry, and tool configuration.
 - `RUST_AGENT_DELTA_FLUSH_INTERVAL_MS`
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
 - `RUST_AGENT_SERVER_HTTP_ADDR`
+- `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP`
 - `RUST_AGENT_SERVER_H3_ADDR`
 - `RUST_AGENT_SERVER_TOKEN`
 - `RUST_AGENT_SERVER_TLS_CERT`
@@ -74,10 +75,12 @@ telemetry, and tool configuration.
 - Prompt, history, and output limits are plain copyable values.
 - Compaction defaults match pi-style behavior: enabled, 272,000 context tokens,
   16,384 reserve tokens, and 20,000 recent tokens retained verbatim.
-- Server bind addresses, bearer token, session bounds, queue capacity, stream
-  limits, idle timeout, and optional parent-process watch are loaded once before
-  listeners start. Set either server address to port `0` to let the OS assign a
-  free port and read the selected address from the startup readiness JSON.
+- Server bind addresses, remote-HTTP opt-in, bearer token, session bounds,
+  queue capacity, stream limits, idle timeout, and optional parent-process watch
+  are loaded once before listeners start. Set either server address to port `0`
+  to let the OS assign a free port and read the selected address from the
+  startup readiness JSON. Plaintext HTTP binds must stay on loopback unless
+  `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a trusted deployment.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`

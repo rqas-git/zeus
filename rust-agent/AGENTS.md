@@ -63,7 +63,9 @@ Set `RUST_AGENT_SERVER_TOKEN` for a stable bearer token. If it is unset, server
 startup emits a JSON readiness line containing the generated bearer token, bound
 HTTP and HTTP/3 addresses, protocol version, workspace root, and process id. Set
 either server address to port `0` when a supervisor should let the OS choose a
-free port and read it from the readiness line.
+free port and read it from the readiness line. The plaintext HTTP listener must
+bind to loopback unless `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a
+trusted deployment.
 
 Useful smoke checks:
 
@@ -98,6 +100,7 @@ curl -s -X POST \
 Server configuration:
 
 - `RUST_AGENT_SERVER_HTTP_ADDR`
+- `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP`
 - `RUST_AGENT_SERVER_H3_ADDR`
 - `RUST_AGENT_SERVER_TOKEN`
 - `RUST_AGENT_SERVER_TLS_CERT`
