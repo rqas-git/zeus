@@ -11,7 +11,36 @@ private enum FooterMenuID {
     case model
     case effort
     case permissions
+    case shortcuts
 }
+
+private struct ShortcutItem: Identifiable {
+    let shortcut: String
+    let action: String
+
+    var id: String {
+        shortcut
+    }
+}
+
+private let shortcutItems = [
+    ShortcutItem(shortcut: "Cmd+N", action: "Open a new Zeus window"),
+    ShortcutItem(shortcut: "Cmd+B", action: "Open branch menu"),
+    ShortcutItem(shortcut: "Cmd+M", action: "Open model menu"),
+    ShortcutItem(shortcut: "Cmd+E", action: "Open effort menu"),
+    ShortcutItem(shortcut: "Cmd+P", action: "Open permissions menu"),
+    ShortcutItem(shortcut: "Cmd+F", action: "Open transcript search"),
+    ShortcutItem(shortcut: "Cmd+G", action: "Next search match"),
+    ShortcutItem(shortcut: "Cmd+Shift+G", action: "Previous search match"),
+    ShortcutItem(shortcut: "Cmd+T", action: "Toggle terminal passthrough"),
+    ShortcutItem(shortcut: "Ctrl+C", action: "Clear input"),
+    ShortcutItem(shortcut: "Ctrl+Enter", action: "Insert newline"),
+    ShortcutItem(shortcut: "Up Arrow", action: "Previous message, open footer menu, or previous option"),
+    ShortcutItem(shortcut: "Down Arrow", action: "Next message, exit footer controls, or close menu"),
+    ShortcutItem(shortcut: "Left / Right Arrow", action: "Move between footer controls"),
+    ShortcutItem(shortcut: "Return / Enter", action: "Activate footer control or menu option"),
+    ShortcutItem(shortcut: "Esc", action: "Close search, footer navigation, or footer menu")
+]
 
 private enum KeyCode {
     static let returnKey: UInt16 = 36
@@ -19,11 +48,14 @@ private enum KeyCode {
     static let keypadEnter: UInt16 = 76
     static let downArrow: UInt16 = 125
     static let upArrow: UInt16 = 126
+    static let leftArrow: UInt16 = 123
+    static let rightArrow: UInt16 = 124
 }
 
 struct ChatWindow: View {
     @ObservedObject var viewModel: ChatViewModel
     @State private var activeFooterMenu: FooterMenuID?
+    @State private var focusedFooterMenu: FooterMenuID?
     @State private var branchMenuHighlightedOption: String?
     @State private var modelMenuHighlightedOption: String?
     @State private var effortMenuHighlightedOption: String?
@@ -64,6 +96,7 @@ struct ChatWindow: View {
                     onSubmit: viewModel.sendDraft,
                     onHistoryPrevious: viewModel.selectPreviousSubmittedMessage,
                     onHistoryNext: viewModel.selectNextSubmittedMessage,
+                    onMoveDownFromCurrent: focusFirstFooterMenu,
                     isCancelVisible: viewModel.canCancelTurn,
                     onCancel: viewModel.cancelCurrentTurn
                 )
@@ -87,6 +120,7 @@ struct ChatWindow: View {
                     isPermissionsMenuEnabled: viewModel.canChangePermissions,
                     tokenUsage: viewModel.tokenUsage,
                     activeMenu: $activeFooterMenu,
+                    focusedMenu: $focusedFooterMenu,
                     branchHighlightedOption: branchMenuHighlightedOption,
                     modelHighlightedOption: modelMenuHighlightedOption,
                     effortHighlightedOption: effortMenuHighlightedOption,
@@ -126,9 +160,10 @@ struct ChatWindow: View {
         case .keyDown:
             return handleKeyDown(event)
         case .leftMouseUp, .rightMouseUp:
-            if activeFooterMenu != nil {
+            if activeFooterMenu != nil || focusedFooterMenu != nil {
                 DispatchQueue.main.async {
                     activeFooterMenu = nil
+                    focusedFooterMenu = nil
                 }
             }
             return false
@@ -179,24 +214,85 @@ struct ChatWindow: View {
             openPermissionsMenu()
             return true
         }
+        if focusedFooterMenu != nil || activeFooterMenu != nil {
+            if handleFooterNavigationKey(event) {
+                return true
+            }
+            focusedFooterMenu = nil
+            activeFooterMenu = nil
+            return false
+        }
 
-        guard activeFooterMenu != nil else { return false }
+        return false
+    }
 
+    private func handleFooterNavigationKey(_ event: NSEvent) -> Bool {
+        guard hasNoKeyModifiers(event) else { return false }
+
+        if focusedFooterMenu == nil {
+            focusedFooterMenu = activeFooterMenu ?? footerNavigationMenus.first
+        }
+
+        guard activeFooterMenu != nil else {
+            return handleFocusedFooterKey(event)
+        }
+
+        return handleOpenFooterMenuKey(event)
+    }
+
+    private func handleFocusedFooterKey(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case KeyCode.escape:
+            focusedFooterMenu = nil
+            return true
+        case KeyCode.returnKey, KeyCode.keypadEnter:
+            openFocusedFooterMenu()
+            return true
+        case KeyCode.upArrow:
+            openFocusedFooterMenu()
+            return true
+        case KeyCode.downArrow:
+            focusedFooterMenu = nil
+            return true
+        case KeyCode.rightArrow:
+            moveFocusedFooterMenu(by: 1)
+            return true
+        case KeyCode.leftArrow:
+            moveFocusedFooterMenu(by: -1)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func handleOpenFooterMenuKey(_ event: NSEvent) -> Bool {
         switch event.keyCode {
         case KeyCode.escape:
             activeFooterMenu = nil
             return true
+        case KeyCode.returnKey, KeyCode.keypadEnter:
+            return selectActiveMenuOption()
         case KeyCode.downArrow:
-            moveActiveMenuHighlight(by: 1)
+            activeFooterMenu = nil
             return true
         case KeyCode.upArrow:
             moveActiveMenuHighlight(by: -1)
             return true
-        case KeyCode.returnKey, KeyCode.keypadEnter:
-            return selectActiveMenuOption()
+        case KeyCode.rightArrow:
+            moveFocusedFooterMenu(by: 1)
+            return true
+        case KeyCode.leftArrow:
+            moveFocusedFooterMenu(by: -1)
+            return true
         default:
             return false
         }
+    }
+
+    private func hasNoKeyModifiers(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let disallowed: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+        return flags.intersection(disallowed).isEmpty
     }
 
     private func isModelShortcut(_ event: NSEvent) -> Bool {
@@ -262,6 +358,7 @@ struct ChatWindow: View {
         modelMenuHighlightedOption = options.contains(viewModel.selectedModel)
             ? viewModel.selectedModel
             : options.first
+        focusedFooterMenu = .model
         activeFooterMenu = .model
     }
 
@@ -271,6 +368,7 @@ struct ChatWindow: View {
         branchMenuHighlightedOption = options.contains(viewModel.workspace.branch)
             ? viewModel.workspace.branch
             : options.first
+        focusedFooterMenu = .branch
         activeFooterMenu = .branch
     }
 
@@ -280,6 +378,7 @@ struct ChatWindow: View {
         effortMenuHighlightedOption = options.contains(viewModel.effort)
             ? viewModel.effort
             : options.first
+        focusedFooterMenu = .effort
         activeFooterMenu = .effort
     }
 
@@ -289,7 +388,41 @@ struct ChatWindow: View {
         permissionsMenuHighlightedOption = options.contains(viewModel.selectedPermission)
             ? viewModel.selectedPermission
             : options.first
+        focusedFooterMenu = .permissions
         activeFooterMenu = .permissions
+    }
+
+    private func focusFirstFooterMenu() {
+        activeFooterMenu = nil
+        focusedFooterMenu = footerNavigationMenus.first
+    }
+
+    private func openFocusedFooterMenu() {
+        switch focusedFooterMenu {
+        case .branch:
+            openBranchMenu()
+        case .model:
+            openModelMenu()
+        case .effort:
+            openEffortMenu()
+        case .permissions:
+            openPermissionsMenu()
+        case .shortcuts:
+            activeFooterMenu = .shortcuts
+        case nil:
+            focusFirstFooterMenu()
+        }
+    }
+
+    private func moveFocusedFooterMenu(by offset: Int) {
+        let menus = footerNavigationMenus
+        guard !menus.isEmpty else { return }
+        let current = focusedFooterMenu
+            .flatMap { menus.firstIndex(of: $0) }
+            ?? 0
+        let next = (current + offset + menus.count) % menus.count
+        activeFooterMenu = nil
+        focusedFooterMenu = menus[next]
     }
 
     private func moveActiveMenuHighlight(by offset: Int) {
@@ -302,6 +435,8 @@ struct ChatWindow: View {
             moveEffortHighlight(by: offset)
         case .permissions:
             movePermissionsHighlight(by: offset)
+        case .shortcuts:
+            break
         case nil:
             break
         }
@@ -314,6 +449,7 @@ struct ChatWindow: View {
                 return false
             }
             activeFooterMenu = nil
+            focusedFooterMenu = nil
             viewModel.selectBranch(branch)
             return true
         case .model:
@@ -321,6 +457,7 @@ struct ChatWindow: View {
                 return false
             }
             activeFooterMenu = nil
+            focusedFooterMenu = nil
             viewModel.selectModel(model)
             return true
         case .effort:
@@ -328,6 +465,7 @@ struct ChatWindow: View {
                 return false
             }
             activeFooterMenu = nil
+            focusedFooterMenu = nil
             viewModel.selectEffort(effort)
             return true
         case .permissions:
@@ -335,7 +473,11 @@ struct ChatWindow: View {
                 return false
             }
             activeFooterMenu = nil
+            focusedFooterMenu = nil
             viewModel.selectPermissions(permissions)
+            return true
+        case .shortcuts:
+            activeFooterMenu = nil
             return true
         case nil:
             return false
@@ -391,6 +533,24 @@ struct ChatWindow: View {
 
     private var permissionsMenuOptions: [String] {
         viewModel.permissionOptions.isEmpty ? [viewModel.selectedPermission] : viewModel.permissionOptions
+    }
+
+    private var footerNavigationMenus: [FooterMenuID] {
+        var menus: [FooterMenuID] = []
+        if viewModel.canChangeBranch {
+            menus.append(.branch)
+        }
+        if viewModel.canChangeModel {
+            menus.append(.model)
+        }
+        if viewModel.canChangeEffort {
+            menus.append(.effort)
+        }
+        if viewModel.canChangePermissions {
+            menus.append(.permissions)
+        }
+        menus.append(.shortcuts)
+        return menus
     }
 }
 
@@ -857,6 +1017,7 @@ private struct InputPrompt: View {
     let onSubmit: () -> Void
     let onHistoryPrevious: () -> Bool
     let onHistoryNext: () -> Bool
+    let onMoveDownFromCurrent: () -> Void
     let isCancelVisible: Bool
     let onCancel: () -> Void
 
@@ -871,7 +1032,11 @@ private struct InputPrompt: View {
                 placeholder: placeholder,
                 onSubmit: onSubmit,
                 onHistoryPrevious: onHistoryPrevious,
-                onHistoryNext: onHistoryNext
+                onHistoryNext: onHistoryNext,
+                onMoveDownFromCurrent: {
+                    onMoveDownFromCurrent()
+                    return true
+                }
             )
                 .frame(height: 18)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -909,6 +1074,7 @@ private struct FooterBar: View {
     let isPermissionsMenuEnabled: Bool
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
+    @Binding var focusedMenu: FooterMenuID?
     let branchHighlightedOption: String?
     let modelHighlightedOption: String?
     let effortHighlightedOption: String?
@@ -939,6 +1105,7 @@ private struct FooterBar: View {
                     isEnabled: isBranchMenuEnabled,
                     enabledColor: TerminalPalette.green,
                     activeMenu: $activeMenu,
+                    focusedMenu: $focusedMenu,
                     optionTitle: { $0 },
                     menuWidth: 164,
                     help: "Branch",
@@ -953,6 +1120,7 @@ private struct FooterBar: View {
                     highlightedOption: modelHighlightedOption,
                     isEnabled: isModelMenuEnabled,
                     activeMenu: $activeMenu,
+                    focusedMenu: $focusedMenu,
                     optionTitle: modelTitle,
                     menuWidth: 178,
                     help: "Model",
@@ -967,6 +1135,7 @@ private struct FooterBar: View {
                     highlightedOption: effortHighlightedOption,
                     isEnabled: isEffortMenuEnabled,
                     activeMenu: $activeMenu,
+                    focusedMenu: $focusedMenu,
                     optionTitle: { $0 },
                     menuWidth: 88,
                     help: "Reasoning Effort",
@@ -981,6 +1150,7 @@ private struct FooterBar: View {
                     highlightedOption: permissionsHighlightedOption,
                     isEnabled: isPermissionsMenuEnabled,
                     activeMenu: $activeMenu,
+                    focusedMenu: $focusedMenu,
                     optionTitle: permissionTitle,
                     menuWidth: 88,
                     help: "Permissions",
@@ -993,10 +1163,14 @@ private struct FooterBar: View {
 
             Spacer(minLength: pathSpacing)
 
-            footerText(workspace.displayPath, color: TerminalPalette.dimText)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 260, alignment: .trailing)
+            HStack(spacing: 18) {
+                FooterShortcutsMenu(activeMenu: $activeMenu, focusedMenu: $focusedMenu)
+
+                footerText(workspace.displayPath, color: TerminalPalette.dimText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: 360, alignment: .trailing)
         }
         .font(.system(size: 11, weight: .regular, design: .monospaced))
         .frame(height: 18)
@@ -1010,6 +1184,95 @@ private struct FooterBar: View {
     }
 }
 
+private struct FooterShortcutsMenu: View {
+    @Binding var activeMenu: FooterMenuID?
+    @Binding var focusedMenu: FooterMenuID?
+
+    private var isOpen: Bool {
+        activeMenu == .shortcuts
+    }
+
+    private var isFocused: Bool {
+        focusedMenu == .shortcuts
+    }
+
+    var body: some View {
+        Text("shortcuts")
+            .foregroundStyle(TerminalPalette.cyan)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(height: 18, alignment: .center)
+            .padding(.horizontal, 3)
+            .background(
+                Rectangle()
+                    .fill(isFocused ? TerminalPalette.cyan.opacity(0.12) : .clear)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isOpen {
+                    activeMenu = nil
+                    focusedMenu = .shortcuts
+                } else {
+                    DispatchQueue.main.async {
+                        focusedMenu = .shortcuts
+                        activeMenu = .shortcuts
+                    }
+                }
+            }
+            .help("Shortcuts")
+            .overlay(alignment: .bottomTrailing) {
+                if isOpen {
+                    ShortcutsDropdown(items: shortcutItems)
+                        .offset(y: -23)
+                        .zIndex(30)
+                }
+            }
+            .zIndex(isOpen ? 30 : 0)
+    }
+}
+
+private struct ShortcutsDropdown: View {
+    let items: [ShortcutItem]
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(items) { item in
+                    HStack(spacing: 12) {
+                        Text(item.shortcut)
+                            .foregroundStyle(TerminalPalette.cyan)
+                            .frame(width: 96, alignment: .leading)
+
+                        Text(item.action)
+                            .foregroundStyle(TerminalPalette.primaryText)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                }
+            }
+            .frame(width: 386)
+            .background(Rectangle().fill(TerminalPalette.background))
+            .overlay(
+                Rectangle()
+                    .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
+            )
+            .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
+
+            Rectangle()
+                .fill(TerminalPalette.background)
+                .frame(width: 10, height: 10)
+                .rotationEffect(.degrees(45))
+                .padding(.trailing, 28)
+                .offset(y: -5)
+        }
+        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
 private struct FooterMenu: View {
     let id: FooterMenuID
     let title: String
@@ -1019,6 +1282,7 @@ private struct FooterMenu: View {
     let isEnabled: Bool
     var enabledColor = TerminalPalette.cyan
     @Binding var activeMenu: FooterMenuID?
+    @Binding var focusedMenu: FooterMenuID?
     let optionTitle: (String) -> String
     let menuWidth: CGFloat
     let help: String
@@ -1033,19 +1297,30 @@ private struct FooterMenu: View {
         activeMenu == id
     }
 
+    private var isFocused: Bool {
+        focusedMenu == id
+    }
+
     var body: some View {
         Text(title)
             .foregroundStyle(isEnabled ? enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .frame(height: 18, alignment: .center)
+            .padding(.horizontal, 3)
+            .background(
+                Rectangle()
+                    .fill(isFocused ? enabledColor.opacity(0.12) : .clear)
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 guard isEnabled else { return }
                 if isOpen {
                     activeMenu = nil
+                    focusedMenu = id
                 } else {
                     DispatchQueue.main.async {
+                        focusedMenu = id
                         activeMenu = id
                     }
                 }
@@ -1061,6 +1336,7 @@ private struct FooterMenu: View {
                         menuWidth: menuWidth
                     ) { option in
                         activeMenu = nil
+                        focusedMenu = nil
                         onSelect(option)
                     } onHighlight: { option in
                         onHighlight(option)
@@ -1072,6 +1348,9 @@ private struct FooterMenu: View {
             .onChange(of: isEnabled) { newValue in
                 if !newValue {
                     activeMenu = nil
+                    if focusedMenu == id {
+                        focusedMenu = nil
+                    }
                 }
             }
             .zIndex(isOpen ? 30 : 0)
