@@ -133,7 +133,7 @@ private struct CodeBlockView: View {
         )
         .overlay(
             Rectangle()
-                .stroke(TerminalPalette.dimText.opacity(0.38), lineWidth: 1)
+                .stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1)
         )
         .frame(maxWidth: .infinity, alignment: .leading)
     }

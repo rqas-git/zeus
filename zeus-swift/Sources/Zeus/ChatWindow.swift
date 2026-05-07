@@ -407,7 +407,7 @@ private struct TerminalBackground: View {
                 endPoint: .bottomTrailing
             )
             Rectangle()
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+                .strokeBorder(TerminalPalette.border.opacity(0.24), lineWidth: 1)
         }
         .ignoresSafeArea()
     }
@@ -488,9 +488,9 @@ private struct SettingsDropdown: View {
         )
         .overlay(
             Rectangle()
-                .stroke(TerminalPalette.dimText.opacity(0.48), lineWidth: 1)
+                .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 6)
+        .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
     }
 }
 
@@ -1101,9 +1101,9 @@ private struct FooterDropdown: View {
             .background(Rectangle().fill(TerminalPalette.background))
             .overlay(
                 Rectangle()
-                    .stroke(TerminalPalette.dimText.opacity(0.48), lineWidth: 1)
+                    .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
             )
-            .shadow(color: .black.opacity(0.28), radius: 8, x: 0, y: 6)
+            .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
 
             Rectangle()
                 .fill(TerminalPalette.background)
