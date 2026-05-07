@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 
 struct PromptTextField: NSViewRepresentable {
+    private static let textFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
     @Binding var text: String
     let placeholder: String
     let onSubmit: () -> Void
@@ -19,9 +21,9 @@ struct PromptTextField: NSViewRepresentable {
         textField.isBordered = false
         textField.drawsBackground = false
         textField.focusRingType = .none
-        textField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textField.font = Self.textFont
         textField.textColor = NSColor(TerminalPalette.primaryText)
-        textField.placeholderString = placeholder
+        textField.placeholderAttributedString = attributedPlaceholder
         textField.cell?.sendsActionOnEndEditing = false
         textField.lineBreakMode = .byTruncatingTail
         textField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -43,8 +45,8 @@ struct PromptTextField: NSViewRepresentable {
         if textField.stringValue != text {
             textField.stringValue = text
         }
-        if textField.placeholderString != placeholder {
-            textField.placeholderString = placeholder
+        if textField.placeholderAttributedString?.string != placeholder {
+            textField.placeholderAttributedString = attributedPlaceholder
         }
     }
 
@@ -67,6 +69,16 @@ struct PromptTextField: NSViewRepresentable {
             let end = textField.stringValue.utf16.count
             editor.setSelectedRange(NSRange(location: end, length: 0))
         }
+    }
+
+    private var attributedPlaceholder: NSAttributedString {
+        NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .foregroundColor: NSColor(TerminalPalette.dimText),
+                .font: Self.textFont
+            ]
+        )
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
