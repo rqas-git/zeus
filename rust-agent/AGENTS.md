@@ -36,7 +36,10 @@ cargo run
 Then type messages after the `You:` prompt. Session history is stored in SQLite
 at `~/.rust-agent/sessions.db` by default and restored for the default terminal
 session across restarts. Recent in-memory history is bounded by
-`RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Submit a
+`RUST_AGENT_HISTORY_MAX_MESSAGES` and `RUST_AGENT_HISTORY_MAX_BYTES`. Semantic
+compaction is enabled by default and preserves a summary plus recent tail when
+the configured token threshold is reached. Use `/compact` in interactive mode to
+compact manually, or `/compact <instructions>` to add a summary focus. Submit a
 blank line to exit.
 
 ## Server Mode
@@ -85,6 +88,11 @@ curl -N -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"message":"Say hello in one sentence"}' \
   "http://127.0.0.1:4096/sessions/$SESSION_ID/turns:stream"
+curl -s -X POST \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"instructions":"preserve current task state"}' \
+  "http://127.0.0.1:4096/sessions/$SESSION_ID/compact"
 ```
 
 Server configuration:
@@ -102,6 +110,10 @@ Server configuration:
 - `RUST_AGENT_PARENT_PID`
 - `RUST_AGENT_STATE_DB`
 - `RUST_AGENT_WORKSPACE`
+- `RUST_AGENT_COMPACTION_ENABLED`
+- `RUST_AGENT_COMPACTION_CONTEXT_TOKENS`
+- `RUST_AGENT_COMPACTION_RESERVE_TOKENS`
+- `RUST_AGENT_COMPACTION_KEEP_RECENT_TOKENS`
 
 ## Tool Mode
 

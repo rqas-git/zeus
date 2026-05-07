@@ -15,9 +15,10 @@ transport state for every request.
 4. `AgentService` finds or creates the matching session handle, loading any
    durable SQLite state for that `SessionId`.
 5. The service locks only that session while a turn is running.
-6. The session loop streams the selected model response, executes any requested
-   built-in tools, and emits `AgentEvent`s, including tool lifecycle events and
-   the completed assistant message.
+6. The session loop compacts context when needed, streams the selected model
+   response, executes any requested built-in tools, and emits `AgentEvent`s,
+   including compaction events, tool lifecycle events, and the completed
+   assistant message.
 7. Metadata requests read compact SQLite session rows and annotate them with
    process-local active-session state.
 8. The caller decides how to translate events into terminal output or server
@@ -35,6 +36,8 @@ transport state for every request.
 - `AgentService` enforces the configured model allowlist.
 - `AgentService` can request cancellation of the currently running turn without
   waiting on that session's execution lock.
+- `AgentService` exposes manual compaction with optional caller-provided summary
+  focus instructions.
 - `AgentService` serializes work per session without serializing unrelated
   sessions.
 - `AgentLoop` still owns per-session ordering, tool execution, and message
@@ -51,6 +54,8 @@ transport state for every request.
   session only, so different sessions can stream and execute tools concurrently.
 - Session history is pruned by each session loop according to the configured
   history limits.
+- Compaction settings are passed into each session loop at creation time, so
+  restored and newly created sessions share the same process configuration.
 - Session model changes do not rebuild the HTTP client.
 - Session metadata reads stay outside per-session execution locks and only use
   the session map to mark whether a durable session is currently active.
@@ -79,9 +84,9 @@ Production startup configures a SQLite database, so sessions and ordered
 messages are durable. The database uses WAL mode, `synchronous=NORMAL`, foreign
 keys, a busy timeout, and cascade deletion of session messages. `AgentLoop`
 continues to keep only bounded recent history in memory; SQLite remains the
-canonical store for the full ordered message list. Session metadata queries are
-ordered by `updated_at_ms` and include counts plus a capped preview of the latest
-user or assistant message.
+canonical store for the full ordered message list, including compaction
+checkpoints. Session metadata queries are ordered by `updated_at_ms` and include
+counts plus a capped preview of the latest user or assistant message.
 
 ## Current Scope
 

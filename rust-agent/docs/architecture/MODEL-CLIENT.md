@@ -19,9 +19,11 @@ specific backend provider.
 7. Assistant text deltas are forwarded immediately through the callback.
 8. Completed `function_call` output items are captured as raw-argument tool
    calls for the session loop to execute.
-9. Completed response metadata is parsed from the terminal SSE event only when
+9. Compaction summary requests use the same transport with a summarization
+   system prompt, no tools, and no streamed user-visible deltas.
+10. Completed response metadata is parsed from the terminal SSE event only when
    cache telemetry is enabled for the client.
-10. Assistant text, tool calls, and cache-health telemetry are returned to the
+11. Assistant text, tool calls, and cache-health telemetry are returned to the
    session loop.
 
 ## Responsibilities
@@ -79,7 +81,7 @@ list and individual commands.
 Request cancellation is caller-driven by dropping the streaming future; the
 client does not expose provider-side cancellation ids. The client does not yet
 support general retries, websocket transport, provider failover, remote
-compaction, provider-specific tool repair, or hard byte caps on backend SSE
-streams. The only transport retry is the targeted one-shot auth refresh after a
-`401 Unauthorized` response. Add stream caps before using this client with
-untrusted providers.
+provider-managed compaction, provider-specific tool repair, or hard byte caps on
+backend SSE streams. The only transport retry is the targeted one-shot auth
+refresh after a `401 Unauthorized` response. Add stream caps before using this
+client with untrusted providers.

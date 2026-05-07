@@ -1,8 +1,8 @@
 # Configuration Architecture
 
 `AppConfig` collects runtime settings from environment variables and splits them
-into client, model, context-window, output, server, storage, telemetry, and tool
-configuration.
+into client, model, context-window, compaction, output, server, storage,
+telemetry, and tool configuration.
 
 ## Flow
 
@@ -10,12 +10,13 @@ configuration.
 2. `ClientConfig` configures model transport.
 3. `ModelConfig` configures the default model and backend allowlist.
 4. `ContextWindowConfig` configures prompt history bounds.
-5. `OutputConfig` configures terminal delta buffering.
-6. `ServerConfig` configures HTTP compatibility and native HTTP/3 listeners.
-7. `StorageConfig` configures the SQLite session database path.
-8. `TelemetryConfig` configures optional terminal telemetry output.
-9. `ToolConfig` configures which built-in tools are exposed to the model.
-10. The resulting values are passed into long-lived services.
+5. `CompactionConfig` configures semantic compaction thresholds.
+6. `OutputConfig` configures terminal delta buffering.
+7. `ServerConfig` configures HTTP compatibility and native HTTP/3 listeners.
+8. `StorageConfig` configures the SQLite session database path.
+9. `TelemetryConfig` configures optional terminal telemetry output.
+10. `ToolConfig` configures which built-in tools are exposed to the model.
+11. The resulting values are passed into long-lived services.
 
 ## Environment Variables
 
@@ -33,6 +34,10 @@ configuration.
 - `RUST_AGENT_CONTEXT_MAX_BYTES`
 - `RUST_AGENT_HISTORY_MAX_MESSAGES`
 - `RUST_AGENT_HISTORY_MAX_BYTES`
+- `RUST_AGENT_COMPACTION_ENABLED`
+- `RUST_AGENT_COMPACTION_CONTEXT_TOKENS`
+- `RUST_AGENT_COMPACTION_RESERVE_TOKENS`
+- `RUST_AGENT_COMPACTION_KEEP_RECENT_TOKENS`
 - `RUST_AGENT_DELTA_FLUSH_INTERVAL_MS`
 - `RUST_AGENT_DELTA_FLUSH_BYTES`
 - `RUST_AGENT_SERVER_HTTP_ADDR`
@@ -67,6 +72,8 @@ configuration.
 - Configuration is loaded once, not per turn.
 - Model changes validate against an in-memory allowlist.
 - Prompt, history, and output limits are plain copyable values.
+- Compaction defaults match pi-style behavior: enabled, 272,000 context tokens,
+  16,384 reserve tokens, and 20,000 recent tokens retained verbatim.
 - Server bind addresses, bearer token, session bounds, queue capacity, stream
   limits, idle timeout, and optional parent-process watch are loaded once before
   listeners start. Set either server address to port `0` to let the OS assign a

@@ -16,14 +16,17 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
    session `1` until the user enters a blank line.
 6. `/model` shows or changes the session model through `AgentService`.
 7. `/models` lists the backend allowlist.
-8. `TextDelta` events are buffered and written to stdout.
-9. When `RUST_AGENT_CACHE_HEALTH=1`, cache-health events are printed to stderr.
+8. `/compact` manually compacts the active session; text after the command is
+   passed as summary focus instructions.
+9. `TextDelta` events are buffered and written to stdout.
+10. When `RUST_AGENT_CACHE_HEALTH=1`, cache-health events are printed to stderr.
 
 ## Responsibilities
 
 - `main.rs` owns terminal prompts and stdout formatting.
 - Login commands own terminal auth output and do not build the model service.
 - Interactive commands stay local to the harness and call service methods.
+- Manual compaction prints the token estimate and first retained message id.
 - `DeltaWriter` batches assistant text deltas.
 - Cache-health telemetry is opt-in and stays off stdout.
 - Tool mode is loaded once at startup; `workspace-write` exposes `apply_patch`

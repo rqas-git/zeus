@@ -30,6 +30,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 14. Clients can explicitly delete server sessions when they no longer need the
    state.
 15. Turn requests submit work to `AgentService` and stream named SSE frames.
+16. Compaction requests summarize the active session and publish session events
+   for passive subscribers.
 
 ## Routes
 
@@ -60,6 +62,9 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `POST /sessions/{session_id}/terminal:run` runs a user-initiated terminal
   command through the `exec_command` tool and records the command plus output in
   the session transcript without changing the session's model tool policy.
+- `POST /sessions/{session_id}/compact` manually compacts the session and
+  returns the generated summary, first retained message id, token estimate, and
+  file operation details.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
 
 `GET /`, `GET /healthz`, and `GET /capabilities` are public. All other routes
@@ -109,6 +114,8 @@ Important event names include:
 - `message.text_delta`
 - `message.completed`
 - `cache.health`
+- `compaction.started`
+- `compaction.completed`
 - `tool_call.started`
 - `tool_call.completed`
 - `turn.completed`
@@ -124,6 +131,8 @@ event shape.
 Terminal command requests emit the same user-message, session-status, and
 tool-call lifecycle events as model-initiated tool calls, but the route returns a
 bounded JSON result instead of an SSE turn stream.
+Compaction requests emit status and compaction lifecycle events and return a
+bounded JSON summary result.
 
 ## Contract
 
@@ -171,10 +180,11 @@ while session content is durable in SQLite. Clients can restore durable session
 rows by id, which re-adds that session id to the process-local active registry
 and returns ordered message, function-call, and function-output transcript
 records for UI replay. Clients can list durable sessions and fetch individual
-session metadata without restoring transcripts. Clients can explicitly delete
-sessions, which removes future route access, deletes durable rows, and closes
-the session event stream; it does not cancel an already-running direct turn
-stream. Use
+session metadata without restoring transcripts. Restored transcripts may include
+compaction records alongside messages, function calls, and function outputs.
+Clients can explicitly delete sessions, which removes future route access,
+deletes durable rows, and closes the session event stream; it does not cancel an
+already-running direct turn stream. Use
 `POST /sessions/{session_id}/turns:cancel` before deletion when the active turn
 should stop. Per-user authorization and multi-process coordination are not
 implemented. Use `workspace-write` and `workspace-exec` only for trusted local

@@ -14,10 +14,11 @@ transport, and session state separate.
 4. The service locks the selected session so unrelated sessions can run
    concurrently while same-session turns remain ordered.
 5. The loop appends the user message, marks the session `Running`, prunes stored
-   history, builds a bounded borrowed prompt window, streams the selected model
-   response, emits text deltas and cache telemetry, stores assistant text, stores
-   any completed tool-call items, executes those tools, stores tool outputs, and
-   repeats until the model returns no more tool calls.
+   history, compacts oversized context when configured, builds the prompt
+   window, streams the selected model response, emits text deltas and cache
+   telemetry, stores assistant text, stores any completed tool-call items,
+   executes those tools, stores tool outputs, and repeats until the model
+   returns no more tool calls.
 6. Tool calls are bounded by a fixed per-turn round limit so a malformed or
    looping model response cannot run forever.
 7. A shared cancellation signal can stop an active model stream or command-backed
@@ -44,6 +45,10 @@ transport, and session state separate.
 - `AgentService` owns the long-lived model client and session map expected by a
   backend service. It validates model changes before updating a session and
   exposes cancellation for the currently running turn.
+- Compaction creates a `Compaction` transcript item with the generated summary,
+  the first retained message id, pre-compaction token estimate, and file
+  operation details. Model context sees that item as a user summary message
+  followed by the retained recent tail.
 - `AgentService` holds only a per-session async lock while a turn streams, so
   different sessions can progress independently.
 - `ChatGptClient` sends typed async Responses requests to the Codex backend and
@@ -59,6 +64,10 @@ transport, and session state separate.
   budgets. Consecutive function-call and function-output transcript items are
   retained or dropped as one unit so follow-up requests do not contain orphaned
   tool outputs. The latest message or tool transcript unit is always retained.
+- Semantic compaction uses pi-style defaults: compact when estimated context
+  exceeds the model window minus reserve tokens, summarize older history, and
+  keep a recent token tail verbatim. If a cut splits a turn, the split prefix is
+  summarized separately and merged into the checkpoint.
 - Stored session history is retained within configurable message and byte
   budgets in memory. SQLite keeps the full ordered message history, and the
   loop reloads then prunes it to the configured in-memory limits.
@@ -95,9 +104,10 @@ transport, and session state separate.
 ## Events
 
 `AgentEvent` reports status changes, streamed assistant text, cache-health
-telemetry, tool-call start/completion, completed messages, and errors. The
-terminal harness renders a subset to stdout, while the server converts events
-into named SSE frames over HTTP compatibility and HTTP/3 transports.
+telemetry, compaction start/completion, tool-call start/completion, completed
+messages, and errors. The terminal harness renders a subset to stdout, while
+the server converts events into named SSE frames over HTTP compatibility and
+HTTP/3 transports.
 
 ## Error Handling
 
@@ -115,9 +125,9 @@ built-in tool set is read-only (`read_file`, `read_file_range`, `list_dir`,
 `search_files`, and `search_text`).
 `RUST_AGENT_TOOL_MODE=workspace-write` adds `apply_patch`, and
 `RUST_AGENT_TOOL_MODE=workspace-exec` adds trusted local command execution.
-Cancellation is process-local and applies to the active turn;
-semantic context compaction remains out of scope until product behavior requires
-it.
+Cancellation is process-local and applies to the active turn. Semantic
+compaction is local to the current model client and session database; no
+provider-managed compaction state is used.
 
 ## Related Docs
 
