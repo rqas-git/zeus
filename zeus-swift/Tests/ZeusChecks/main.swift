@@ -17,6 +17,10 @@ struct ZeusChecks {
         checks.run("ToolMetadata maps display names", ZeusCoreChecks.testToolDisplayNames)
         checks.run("ToolMetadata summarizes arguments", ZeusCoreChecks.testToolTargets)
         checks.run("AgentServerEvent decodes typed events", ZeusCoreChecks.testAgentServerEvents)
+        checks.run(
+            "rust-agent API contract fixtures decode",
+            ZeusCoreChecks.testRustAgentAPIContractFixtures
+        )
         checks.run("PathDisplay abbreviates home paths", ZeusCoreChecks.testPathDisplay)
         checks.run("PromptHistory navigates like a terminal", ZeusCoreChecks.testPromptHistoryNavigation)
         checks.run("PromptHistory resets and restores entries", ZeusCoreChecks.testPromptHistoryResetAndReplace)

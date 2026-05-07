@@ -32,6 +32,11 @@ func agentServerEventDecodesTypedEvents() throws {
 }
 
 @Test
+func rustAgentAPIContractFixturesDecode() throws {
+    try ZeusCoreChecks.testRustAgentAPIContractFixtures()
+}
+
+@Test
 func pathDisplayAbbreviatesHomePaths() throws {
     try ZeusCoreChecks.testPathDisplay()
 }

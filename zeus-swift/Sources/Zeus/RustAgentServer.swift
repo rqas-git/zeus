@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Security
+import ZeusCore
 
 final class RustAgentServer: AgentServerProtocol {
     private let requiredProtocolVersion = 1
@@ -251,16 +252,7 @@ enum RustAgentServerError: LocalizedError {
     }
 }
 
-private struct ServerReadyMessage: Decodable {
-    let event: String
-    let name: String
-    let protocolVersion: Int
-    let httpAddr: String
-    let h3Addr: String
-    let token: String
-    let workspaceRoot: String
-    let pid: UInt32
-
+extension ServerReadyMessage {
     var baseURL: URL {
         get throws {
             guard let url = URL(string: "http://\(httpAddr)") else {
@@ -268,17 +260,6 @@ private struct ServerReadyMessage: Decodable {
             }
             return url
         }
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case event
-        case name
-        case protocolVersion = "protocol_version"
-        case httpAddr = "http_addr"
-        case h3Addr = "h3_addr"
-        case token
-        case workspaceRoot = "workspace_root"
-        case pid
     }
 }
 
