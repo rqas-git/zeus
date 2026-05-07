@@ -633,9 +633,7 @@ private struct TranscriptView: View {
             .onChange(of: lines) { newLines in
                 guard selectedSearchLineID == nil else { return }
                 guard let last = newLines.last else { return }
-                withAnimation(.easeOut(duration: 0.16)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
             .onChange(of: selectedSearchLineID) { lineID in
                 guard let lineID else { return }
