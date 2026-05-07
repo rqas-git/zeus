@@ -67,7 +67,8 @@ final class ChatViewModel: ObservableObject {
     }
 
     var inputPlaceholder: String {
-        isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
+        guard !lines.contains(where: { $0.kind == .user }) else { return "" }
+        return isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
     }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
