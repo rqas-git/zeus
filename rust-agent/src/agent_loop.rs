@@ -1205,11 +1205,13 @@ impl AgentLoop {
         }
         self.store
             .prune_history_with_compaction(self.context_window, self.compaction);
-        self.maybe_auto_compact(model, &cancellation, reasoning_effort, &mut emit)
-            .await?;
-        let result = self
-            .run_until_done(model, &cancellation, reasoning_effort, &mut emit)
-            .await;
+        let result = async {
+            self.maybe_auto_compact(model, &cancellation, reasoning_effort, &mut emit)
+                .await?;
+            self.run_until_done(model, &cancellation, reasoning_effort, &mut emit)
+                .await
+        }
+        .await;
         match result {
             Ok(()) => {
                 self.set_status(SessionStatus::Idle, &mut emit)?;
@@ -2733,6 +2735,73 @@ mod tests {
                 "error:backend failed",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_failure_does_not_stick_session_running() {
+        let mut agent = AgentLoop::with_context_window_and_compaction(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            CompactionConfig::for_test(1, 0, 1),
+            SessionConfig::new("test-model"),
+        );
+        agent
+            .store
+            .append_message(MessageRole::User, "old user text");
+        agent
+            .store
+            .append_message(MessageRole::Assistant, "old answer text");
+        let mut events = Vec::new();
+        let failing_compactor = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                assert!(tools.is_empty());
+                anyhow::bail!("summary failed")
+            },
+        );
+
+        let error = agent
+            .submit_user_message("new request", &failing_compactor, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(error, "summary failed");
+        assert_eq!(agent.store.status(), SessionStatus::Failed);
+        assert_eq!(
+            events,
+            [
+                "message:user:new request",
+                "status:Running",
+                "compaction-start:threshold",
+                "status:Failed",
+                "error:summary failed",
+            ]
+        );
+
+        agent.compaction = CompactionConfig::disabled();
+        let ok_streamer = FnStreamer::new(
+            |_history: &[ConversationMessage<'_>],
+             _tools: &[ToolSpec],
+             _parallel_tool_calls: bool,
+             _model: &str,
+             _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                Ok("ok".to_string())
+            },
+        );
+        agent
+            .submit_user_message("retry", &ok_streamer, |_| Ok(()))
+            .await
+            .unwrap();
+
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert_eq!(agent.messages().last().unwrap().text(), "ok");
     }
 
     #[tokio::test]
