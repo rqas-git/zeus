@@ -1,0 +1,197 @@
+{
+  "version": 1,
+  "responses": {
+    "server_ready": {
+      "event": "server_ready",
+      "name": "rust-agent",
+      "protocol_version": 1,
+      "http_addr": "127.0.0.1:4096",
+      "h3_addr": "127.0.0.1:4433",
+      "token": "contract-token",
+      "workspace_root": "/workspace",
+      "pid": 1234
+    },
+    "root": {
+      "name": "rust-agent",
+      "protocol": "http/1.1,http/2,http/3",
+      "workspace_root": "/workspace"
+    },
+    "models": {
+      "default_model": "gpt-5.5",
+      "allowed_models": ["gpt-5.5", "gpt-5.4"],
+      "default_reasoning_effort": "medium",
+      "reasoning_efforts": ["low", "medium", "high"]
+    },
+    "permissions": {
+      "default_tool_policy": "read-only",
+      "allowed_tool_policies": [
+        "read-only",
+        "workspace-write",
+        "workspace-exec"
+      ]
+    },
+    "workspace": {
+      "workspace_root": "/workspace",
+      "branch": "main",
+      "branches": ["main", "feature"],
+      "git": true
+    },
+    "switch_workspace_branch": {
+      "previous_branch": "main",
+      "branch": "feature",
+      "stashed_changes": true,
+      "workspace": {
+        "workspace_root": "/workspace",
+        "branch": "feature",
+        "branches": ["main", "feature"],
+        "git": true
+      }
+    },
+    "create_session": {
+      "session_id": 42,
+      "model": "gpt-5.5",
+      "tool_policy": "read-only"
+    },
+    "restore_session": {
+      "session_id": 42,
+      "model": "gpt-5.5",
+      "tool_policy": "workspace-write",
+      "messages": [
+        {
+          "message_id": 1,
+          "kind": "message",
+          "role": "user",
+          "text": "read Cargo.toml",
+          "tool_call_id": null,
+          "tool_name": null,
+          "tool_arguments": null,
+          "success": null
+        },
+        {
+          "message_id": 2,
+          "kind": "function_call",
+          "role": null,
+          "text": null,
+          "tool_call_id": "call_read",
+          "tool_name": "read_file",
+          "tool_arguments": "{\"path\":\"Cargo.toml\"}",
+          "success": null
+        },
+        {
+          "message_id": 3,
+          "kind": "function_output",
+          "role": null,
+          "text": "name = \"rust-agent\"",
+          "tool_call_id": "call_read",
+          "tool_name": null,
+          "tool_arguments": null,
+          "success": true
+        },
+        {
+          "message_id": 4,
+          "kind": "message",
+          "role": "assistant",
+          "text": "done",
+          "tool_call_id": null,
+          "tool_name": null,
+          "tool_arguments": null,
+          "success": null
+        }
+      ]
+    },
+    "session_model": {
+      "model": "gpt-5.5"
+    },
+    "session_permissions": {
+      "tool_policy": "workspace-write"
+    },
+    "cancel_turn": {
+      "cancelled": true
+    },
+    "terminal_command": {
+      "output": "ok\n",
+      "success": true
+    },
+    "error": {
+      "error": "session not found"
+    }
+  },
+  "events": {
+    "server.connected": {
+      "type": "server_connected",
+      "session_id": 42
+    },
+    "server.heartbeat": {
+      "type": "server_heartbeat",
+      "session_id": 42
+    },
+    "server.events_lagged": {
+      "type": "events_lagged",
+      "session_id": 42,
+      "skipped": 3
+    },
+    "session.status_changed": {
+      "type": "status_changed",
+      "session_id": 42,
+      "status": "running"
+    },
+    "message.text_delta": {
+      "type": "text_delta",
+      "session_id": 42,
+      "delta": "hello"
+    },
+    "message.completed": {
+      "type": "message_completed",
+      "session_id": 42,
+      "role": "assistant",
+      "text": "hello"
+    },
+    "cache.health": {
+      "type": "cache_health",
+      "session_id": 42,
+      "cache": {
+        "model": "gpt-5.5",
+        "prompt_cache_key": "contract-cache-key",
+        "stable_prefix_hash": "000000000000002a",
+        "stable_prefix_bytes": 128,
+        "message_count": 4,
+        "input_bytes": 1024,
+        "response_id": "resp_contract",
+        "usage": {
+          "input_tokens": 100,
+          "cached_input_tokens": 80,
+          "output_tokens": 12,
+          "total_tokens": 112
+        },
+        "cache_status": "reused_prefix"
+      }
+    },
+    "tool_call.started": {
+      "type": "tool_call_started",
+      "session_id": 42,
+      "tool_call_id": "call_read",
+      "tool_name": "read_file",
+      "args": "{\"path\":\"Cargo.toml\"}"
+    },
+    "tool_call.completed": {
+      "type": "tool_call_completed",
+      "session_id": 42,
+      "tool_call_id": "call_read",
+      "tool_name": "read_file",
+      "success": true
+    },
+    "session.error": {
+      "type": "error",
+      "session_id": 42,
+      "message": "not logged in"
+    },
+    "turn.completed": {
+      "type": "turn_completed",
+      "session_id": 42
+    },
+    "turn.cancelled": {
+      "type": "turn_cancelled",
+      "session_id": 42
+    }
+  }
+}
