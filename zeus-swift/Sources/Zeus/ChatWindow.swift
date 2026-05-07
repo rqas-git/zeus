@@ -418,31 +418,31 @@ private struct HeaderBar: View {
     @State private var isShowingSettings = false
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            HStack {
-                Text("zeus")
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .foregroundStyle(TerminalPalette.dimText)
-                    .padding(.leading, 66)
-                    .allowsHitTesting(false)
+        HStack {
+            Text("zeus")
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .foregroundStyle(TerminalPalette.dimText)
+                .padding(.leading, 66)
+                .allowsHitTesting(false)
 
-                Spacer()
+            Spacer()
 
-                Button {
-                    isShowingSettings.toggle()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundStyle(
-                            isShowingSettings ? TerminalPalette.cyan : TerminalPalette.dimText
-                        )
-                        .frame(width: 18, height: 16)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Settings")
+            Button {
+                isShowingSettings.toggle()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(
+                        isShowingSettings ? TerminalPalette.cyan : TerminalPalette.dimText
+                    )
+                    .frame(width: 18, height: 16)
+                    .contentShape(Rectangle())
             }
-
+            .buttonStyle(.plain)
+            .help("Settings")
+        }
+        .frame(height: 16)
+        .overlay(alignment: .topTrailing) {
             if isShowingSettings {
                 SettingsDropdown {
                     isShowingSettings = false
@@ -452,7 +452,6 @@ private struct HeaderBar: View {
                 .zIndex(20)
             }
         }
-        .frame(height: 16)
         .zIndex(20)
     }
 }
