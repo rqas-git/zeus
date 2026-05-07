@@ -5,6 +5,7 @@ mod auth;
 #[cfg(test)]
 mod bench_support;
 mod client;
+mod compaction;
 mod config;
 mod server;
 mod service;
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
 async fn run_agent(message: Option<String>) -> Result<()> {
     let AppConfig {
         client: client_config,
+        compaction,
         context,
         models,
         output,
@@ -72,8 +74,9 @@ async fn run_agent(message: Option<String>) -> Result<()> {
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
             let database = SessionDatabase::open(storage.database_path())?;
-            let service =
-                AgentService::with_tools(client, context, models, tools).with_database(database);
+            let service = AgentService::with_tools(client, context, models, tools)
+                .with_database(database)
+                .with_compaction(compaction);
             print_agent_response(&service, session_id, output, telemetry, message).await
         }
         None => {
@@ -81,8 +84,9 @@ async fn run_agent(message: Option<String>) -> Result<()> {
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
             let database = SessionDatabase::open(storage.database_path())?;
-            let service =
-                AgentService::with_tools(client, context, models, tools).with_database(database);
+            let service = AgentService::with_tools(client, context, models, tools)
+                .with_database(database)
+                .with_compaction(compaction);
             run_interactive_loop(&service, session_id, output, telemetry).await
         }
     }
@@ -91,6 +95,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
 async fn run_server() -> Result<()> {
     let AppConfig {
         client: client_config,
+        compaction,
         context,
         models,
         output: _,
@@ -111,6 +116,7 @@ async fn run_server() -> Result<()> {
     let database = SessionDatabase::open(storage.database_path())?;
     let service = AgentService::with_tools(client, context, models, tools)
         .with_database(database)
+        .with_compaction(compaction)
         .with_session_limit(server.max_sessions());
     server::serve(service, server, workspace_root).await
 }
@@ -240,8 +246,27 @@ async fn run_interactive_loop(
             InteractiveInput::ListModels => {
                 println!("Models: {}", service.allowed_models().join(", "));
             }
+            InteractiveInput::Compact(instructions) => {
+                compact_session(service, session_id, instructions.as_deref()).await?;
+            }
         }
     }
+}
+
+async fn compact_session(
+    service: &AgentService<ChatGptClient>,
+    session_id: SessionId,
+    instructions: Option<&str>,
+) -> Result<()> {
+    let result = service
+        .compact_session(session_id, instructions, None, |_| Ok(()))
+        .await?;
+    println!(
+        "Compacted {} tokens; kept from message {}.",
+        result.tokens_before,
+        result.first_kept_message_id.get()
+    );
+    Ok(())
 }
 
 async fn print_agent_response(
@@ -380,6 +405,7 @@ where
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum InteractiveInput {
     Message(String),
+    Compact(Option<String>),
     ShowModel,
     SetModel(String),
     ListModels,
@@ -403,6 +429,12 @@ fn parse_interactive_input(input: &str) -> Option<InteractiveInput> {
     }
     if input == "/models" {
         return Some(InteractiveInput::ListModels);
+    }
+    if input.split_whitespace().next() == Some("/compact") {
+        let instructions = input.trim_start_matches("/compact").trim();
+        return Some(InteractiveInput::Compact(
+            (!instructions.is_empty()).then(|| instructions.to_string()),
+        ));
     }
     if input.split_whitespace().next() == Some("/model") {
         let model = input.trim_start_matches("/model").trim();

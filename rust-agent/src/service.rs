@@ -16,6 +16,8 @@ use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TerminalCommandResult;
 use crate::agent_loop::TurnCancellation;
+use crate::compaction::CompactionResult;
+use crate::config::CompactionConfig;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
 use crate::storage::SessionDatabase;
@@ -31,6 +33,7 @@ use crate::workspace::WorkspaceSnapshot;
 pub(crate) struct AgentService<M> {
     model: M,
     context_window: ContextWindowConfig,
+    compaction: CompactionConfig,
     model_config: ModelConfig,
     tools: ToolRegistry,
     database: Option<SessionDatabase>,
@@ -142,6 +145,7 @@ where
         Self {
             model,
             context_window,
+            compaction: CompactionConfig::disabled(),
             model_config,
             tools,
             database: None,
@@ -153,6 +157,12 @@ where
     /// Enables SQLite-backed session storage.
     pub(crate) fn with_database(mut self, database: SessionDatabase) -> Self {
         self.database = Some(database);
+        self
+    }
+
+    /// Enables semantic context compaction.
+    pub(crate) fn with_compaction(mut self, compaction: CompactionConfig) -> Self {
+        self.compaction = compaction;
         self
     }
 
@@ -177,6 +187,7 @@ where
             Self::new_session(
                 session_id,
                 self.context_window,
+                self.compaction,
                 SessionConfig::new(self.model_config.default_model()),
                 self.tools.clone(),
                 self.database.clone(),
@@ -209,6 +220,7 @@ where
                 let session = Self::new_session(
                     session_id,
                     self.context_window,
+                    self.compaction,
                     stored.config,
                     self.tools.clone(),
                     Some(database.clone()),
@@ -361,6 +373,7 @@ where
                 let session = Self::new_session(
                     session_id,
                     self.context_window,
+                    self.compaction,
                     SessionConfig::new(model.clone()),
                     self.tools.clone(),
                     self.database.clone(),
@@ -410,6 +423,7 @@ where
                 let session = Self::new_session(
                     session_id,
                     self.context_window,
+                    self.compaction,
                     SessionConfig::new(self.model_config.default_model()),
                     self.tools.with_policy(policy),
                     self.database.clone(),
@@ -488,6 +502,33 @@ where
         result
     }
 
+    /// Manually compacts a session context.
+    ///
+    /// # Errors
+    /// Returns an error when the session cannot be created, is running, or summarization fails.
+    pub(crate) async fn compact_session(
+        &self,
+        session_id: SessionId,
+        custom_instructions: Option<&str>,
+        reasoning_effort: Option<&str>,
+        emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<CompactionResult> {
+        let session = self.session_or_insert_default(session_id)?;
+        let mut agent = session.agent.lock().await;
+        let cancellation = session.begin_turn()?;
+        let result = agent
+            .compact_with_cancellation(
+                &self.model,
+                cancellation,
+                reasoning_effort,
+                custom_instructions,
+                emit,
+            )
+            .await;
+        session.clear_turn()?;
+        result
+    }
+
     fn session(&self, session_id: SessionId) -> Result<Option<SharedSession>> {
         Ok(self.lock_sessions()?.get(&session_id).map(Arc::clone))
     }
@@ -501,6 +542,7 @@ where
         let session = Self::new_session(
             session_id,
             self.context_window,
+            self.compaction,
             SessionConfig::new(self.model_config.default_model()),
             self.tools.clone(),
             self.database.clone(),
@@ -512,21 +554,27 @@ where
     fn new_session(
         session_id: SessionId,
         context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
         config: SessionConfig,
         tools: ToolRegistry,
         database: Option<SessionDatabase>,
     ) -> Result<SharedSession> {
         let agent = match database {
-            Some(database) => AgentLoop::with_context_window_tools_and_database(
+            Some(database) => AgentLoop::with_context_window_compaction_tools_and_database(
                 session_id,
                 context_window,
+                compaction,
                 config,
                 tools,
                 database,
             )?,
-            None => {
-                AgentLoop::with_context_window_and_tools(session_id, context_window, config, tools)
-            }
+            None => AgentLoop::with_context_window_compaction_and_tools(
+                session_id,
+                context_window,
+                compaction,
+                config,
+                tools,
+            ),
         };
         Ok(Arc::new(SessionHandle::new(agent)))
     }

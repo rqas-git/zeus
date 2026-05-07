@@ -23,6 +23,7 @@ use crate::agent_loop::MessageRole;
 use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::SessionStatus;
+use crate::compaction::CompactionDetails;
 
 const BUSY_TIMEOUT_MS: i32 = 5_000;
 const MAX_SESSION_PREVIEW_CHARS: i64 = 240;
@@ -441,7 +442,8 @@ fn load_session_messages(
     session_id: SessionId,
 ) -> Result<Vec<AgentMessage>> {
     let mut statement = connection.prepare(
-        "SELECT message_id, kind, role, text, item_id, call_id, name, arguments, output, success \
+        "SELECT message_id, kind, role, text, item_id, call_id, name, arguments, output, success, \
+                first_kept_message_id, tokens_before, details_json \
          FROM messages \
          WHERE session_id = ?1 \
          ORDER BY message_id",
@@ -481,6 +483,29 @@ fn decode_message_row(statement: &Statement<'_>) -> Result<AgentMessage> {
             output: statement.column_optional_text(8)?.unwrap_or_default(),
             success: statement.column_optional_i64(9)?.unwrap_or(0) != 0,
         },
+        "compaction" => {
+            let first_kept = statement
+                .column_optional_i64(10)?
+                .context("stored compaction row is missing first_kept_message_id")?;
+            let tokens_before = statement
+                .column_optional_i64(11)?
+                .context("stored compaction row is missing tokens_before")?;
+            let details = match statement.column_optional_text(12)? {
+                Some(json) => {
+                    serde_json::from_str(&json).context("stored compaction details are invalid")?
+                }
+                None => CompactionDetails::default(),
+            };
+            AgentItem::Compaction {
+                summary: required_text(statement, 3, "compaction summary")?,
+                first_kept_message_id: MessageId::new(i64_to_u64(
+                    first_kept,
+                    "first kept message id",
+                )?),
+                tokens_before: i64_to_u64(tokens_before, "compaction tokens_before")?,
+                details,
+            }
+        }
         _ => anyhow::bail!("stored message row has invalid kind {kind:?}"),
     };
     Ok(AgentMessage::from_parts(message_id, item))
@@ -496,8 +521,8 @@ fn insert_message(
     connection.transaction(|connection| {
         connection.execute(
             "INSERT INTO messages \
-             (session_id, message_id, kind, role, text, item_id, call_id, name, arguments, output, success, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (session_id, message_id, kind, role, text, item_id, call_id, name, arguments, output, success, created_at_ms, first_kept_message_id, tokens_before, details_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             |statement| values.bind(statement),
         )?;
         connection.execute(
@@ -522,56 +547,99 @@ struct MessageInsert<'a> {
     arguments: Option<&'a str>,
     output: Option<&'a str>,
     success: Option<bool>,
+    first_kept_message_id: Option<MessageId>,
+    tokens_before: Option<u64>,
+    details_json: Option<String>,
     created_at_ms: i64,
 }
 
 impl<'a> MessageInsert<'a> {
     fn new(session_id: SessionId, message: &'a AgentMessage, created_at_ms: i64) -> Result<Self> {
-        let (kind, role, text, item_id, call_id, name, arguments, output, success) =
-            match message.item() {
-                AgentItem::Message { role, text } => (
-                    "message",
-                    Some(role.as_str()),
-                    Some(text.as_str()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                AgentItem::FunctionCall {
-                    item_id,
-                    call_id,
-                    name,
-                    arguments,
-                } => (
-                    "function_call",
-                    None,
-                    None,
-                    item_id.as_deref(),
-                    Some(call_id.as_str()),
-                    Some(name.as_str()),
-                    Some(arguments.as_str()),
-                    None,
-                    None,
-                ),
-                AgentItem::FunctionOutput {
-                    call_id,
-                    output,
-                    success,
-                } => (
-                    "function_output",
-                    None,
-                    None,
-                    None,
-                    Some(call_id.as_str()),
-                    None,
-                    None,
-                    Some(output.as_str()),
-                    Some(*success),
-                ),
-            };
+        let (
+            kind,
+            role,
+            text,
+            item_id,
+            call_id,
+            name,
+            arguments,
+            output,
+            success,
+            first_kept_message_id,
+            tokens_before,
+            details_json,
+        ) = match message.item() {
+            AgentItem::Message { role, text } => (
+                "message",
+                Some(role.as_str()),
+                Some(text.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            AgentItem::FunctionCall {
+                item_id,
+                call_id,
+                name,
+                arguments,
+            } => (
+                "function_call",
+                None,
+                None,
+                item_id.as_deref(),
+                Some(call_id.as_str()),
+                Some(name.as_str()),
+                Some(arguments.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            AgentItem::FunctionOutput {
+                call_id,
+                output,
+                success,
+            } => (
+                "function_output",
+                None,
+                None,
+                None,
+                Some(call_id.as_str()),
+                None,
+                None,
+                Some(output.as_str()),
+                Some(*success),
+                None,
+                None,
+                None,
+            ),
+            AgentItem::Compaction {
+                summary,
+                first_kept_message_id,
+                tokens_before,
+                details,
+            } => (
+                "compaction",
+                None,
+                Some(summary.as_str()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(*first_kept_message_id),
+                Some(*tokens_before),
+                Some(serde_json::to_string(details)?),
+            ),
+        };
         Ok(Self {
             session_id,
             message_id: message.id(),
@@ -584,6 +652,9 @@ impl<'a> MessageInsert<'a> {
             arguments,
             output,
             success,
+            first_kept_message_id,
+            tokens_before,
+            details_json,
             created_at_ms,
         })
     }
@@ -603,7 +674,13 @@ impl<'a> MessageInsert<'a> {
             Some(success) => statement.bind_i64(11, i64::from(success))?,
             None => statement.bind_null(11)?,
         }
-        statement.bind_i64(12, self.created_at_ms)
+        statement.bind_i64(12, self.created_at_ms)?;
+        statement.bind_optional_i64(
+            13,
+            self.first_kept_message_id.map(message_id_i64).transpose()?,
+        )?;
+        statement.bind_optional_i64(14, self.tokens_before.map(u64_to_i64).transpose()?)?;
+        statement.bind_optional_text(15, self.details_json.as_deref())
     }
 }
 
@@ -678,12 +755,45 @@ impl Connection {
                 output TEXT,
                 success INTEGER,
                 created_at_ms INTEGER NOT NULL,
+                first_kept_message_id INTEGER,
+                tokens_before INTEGER,
+                details_json TEXT,
                 PRIMARY KEY (session_id, message_id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS messages_session_order_idx
                 ON messages(session_id, message_id);",
+        )?;
+        self.ensure_messages_column(
+            "first_kept_message_id",
+            "ALTER TABLE messages ADD COLUMN first_kept_message_id INTEGER",
+        )?;
+        self.ensure_messages_column(
+            "tokens_before",
+            "ALTER TABLE messages ADD COLUMN tokens_before INTEGER",
+        )?;
+        self.ensure_messages_column(
+            "details_json",
+            "ALTER TABLE messages ADD COLUMN details_json TEXT",
         )
+    }
+
+    fn ensure_messages_column(&mut self, column: &str, alter_sql: &str) -> Result<()> {
+        if self.table_has_column("messages", column)? {
+            return Ok(());
+        }
+        self.exec(alter_sql)
+    }
+
+    fn table_has_column(&mut self, table: &str, column: &str) -> Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = self.prepare(&pragma)?;
+        while statement.step()? == StepResult::Row {
+            if statement.column_text(1)? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn exec(&mut self, sql: &str) -> Result<()> {
@@ -801,6 +911,13 @@ impl Statement<'_> {
     fn bind_optional_text(&mut self, index: i32, value: Option<&str>) -> Result<()> {
         match value {
             Some(value) => self.bind_text(index, value),
+            None => self.bind_null(index),
+        }
+    }
+
+    fn bind_optional_i64(&mut self, index: i32, value: Option<i64>) -> Result<()> {
+        match value {
+            Some(value) => self.bind_i64(index, value),
             None => self.bind_null(index),
         }
     }
@@ -1038,6 +1155,46 @@ mod tests {
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].text(), "hello");
         assert_eq!(loaded.messages[1].text(), "ok");
+    }
+
+    #[test]
+    fn stores_compaction_messages_in_sqlite() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(7);
+        let details = CompactionDetails {
+            read_files: vec!["Cargo.toml".to_string()],
+            modified_files: vec!["src/main.rs".to_string()],
+        };
+        database.ensure_session(session_id, "test-model").unwrap();
+        database
+            .insert_message(
+                session_id,
+                &AgentMessage::from_parts(
+                    MessageId::new(9),
+                    AgentItem::Compaction {
+                        summary: "checkpoint".to_string(),
+                        first_kept_message_id: MessageId::new(5),
+                        tokens_before: 1234,
+                        details: details.clone(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let loaded = database.load_session(session_id).unwrap().unwrap();
+
+        assert!(matches!(
+            loaded.messages[0].item(),
+            AgentItem::Compaction {
+                summary,
+                first_kept_message_id,
+                tokens_before,
+                details: stored_details,
+            } if summary == "checkpoint"
+                && *first_kept_message_id == MessageId::new(5)
+                && *tokens_before == 1234
+                && stored_details == &details
+        ));
     }
 
     #[test]
