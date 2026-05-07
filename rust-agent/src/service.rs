@@ -90,7 +90,13 @@ impl SessionHandle {
     }
 
     fn begin_turn(&self) -> Result<TurnCancellation> {
-        let cancellation = TurnCancellation::new();
+        self.begin_turn_with_cancellation(TurnCancellation::new())
+    }
+
+    fn begin_turn_with_cancellation(
+        &self,
+        cancellation: TurnCancellation,
+    ) -> Result<TurnCancellation> {
         let mut active_turn = self
             .active_turn
             .lock()
@@ -465,9 +471,31 @@ where
         reasoning_effort: Option<&str>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
+        self.submit_user_message_with_reasoning_effort_and_cancellation(
+            session_id,
+            message,
+            reasoning_effort,
+            TurnCancellation::new(),
+            emit,
+        )
+        .await
+    }
+
+    /// Submits a user message to a session with an explicit cancellation signal.
+    ///
+    /// # Errors
+    /// Returns an error when model streaming or event publishing fails.
+    pub(crate) async fn submit_user_message_with_reasoning_effort_and_cancellation(
+        &self,
+        session_id: SessionId,
+        message: impl Into<String>,
+        reasoning_effort: Option<&str>,
+        cancellation: TurnCancellation,
+        emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
+    ) -> Result<()> {
         let session = self.session_or_insert_default(session_id)?;
         let mut agent = session.agent.lock().await;
-        let cancellation = session.begin_turn()?;
+        let cancellation = session.begin_turn_with_cancellation(cancellation)?;
         let result = agent
             .submit_user_message_with_cancellation(
                 message,

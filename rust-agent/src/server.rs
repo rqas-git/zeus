@@ -39,10 +39,11 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::agent_loop::is_turn_cancelled;
+use crate::agent_loop::turn_cancelled_error;
 use crate::agent_loop::AgentEvent;
 use crate::agent_loop::AgentItem;
 use crate::agent_loop::AgentMessage;
@@ -51,6 +52,7 @@ use crate::agent_loop::MessageRole;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
+use crate::agent_loop::TurnCancellation;
 use crate::compaction::CompactionDetails;
 use crate::compaction::CompactionResult;
 use crate::config::ServerConfig;
@@ -63,6 +65,7 @@ use crate::tools::ToolPolicy;
 const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const DIRECT_TURN_EVENT_QUEUE_CAPACITY: usize = 1024;
 const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const GENERATED_TOKEN_BYTES: usize = 32;
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
@@ -386,6 +389,7 @@ struct ServerState<M> {
     auth: ServerAuth,
     alt_svc: HeaderValue,
     workspace_root: Arc<PathBuf>,
+    turn_event_queue_capacity: usize,
 }
 
 impl<M> Clone for ServerState<M> {
@@ -397,6 +401,7 @@ impl<M> Clone for ServerState<M> {
             auth: self.auth.clone(),
             alt_svc: self.alt_svc.clone(),
             workspace_root: Arc::clone(&self.workspace_root),
+            turn_event_queue_capacity: self.turn_event_queue_capacity,
         }
     }
 }
@@ -437,6 +442,7 @@ impl<M> ServerState<M> {
             auth,
             alt_svc,
             workspace_root: Arc::new(workspace_root),
+            turn_event_queue_capacity: DIRECT_TURN_EVENT_QUEUE_CAPACITY,
         }
     }
 
@@ -1067,19 +1073,23 @@ where
         },
         None => None,
     };
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(state.turn_event_queue_capacity);
     let service = Arc::clone(&state.service);
+    let cancellation = TurnCancellation::new();
+    let stream_cancellation = cancellation.clone();
     tokio::spawn(async move {
         let mut error_forwarded = false;
+        let event_tx = tx.clone();
         let result = service
-            .submit_user_message_with_reasoning_effort(
+            .submit_user_message_with_reasoning_effort_and_cancellation(
                 session_id,
                 request.message,
                 reasoning_effort.as_deref(),
+                cancellation,
                 |event| {
                     let event = ServerEvent::from_agent_event(event);
                     let is_error = matches!(event, ServerEvent::Error { .. });
-                    let _ = tx.send(event);
+                    send_turn_event(&event_tx, event)?;
                     if is_error {
                         error_forwarded = true;
                     }
@@ -1093,26 +1103,26 @@ where
                 let event = ServerEvent::TurnCompleted {
                     session_id: session_id.get(),
                 };
-                let _ = tx.send(event);
+                let _ = send_turn_event(&tx, event);
             }
             Err(error) if is_turn_cancelled(&error) => {
                 let event = ServerEvent::TurnCancelled {
                     session_id: session_id.get(),
                 };
-                let _ = tx.send(event);
+                let _ = send_turn_event(&tx, event);
             }
             Err(error) if !error_forwarded => {
                 let event = ServerEvent::Error {
                     session_id: session_id.get(),
                     message: error.to_string(),
                 };
-                let _ = tx.send(event);
+                let _ = send_turn_event(&tx, event);
             }
             Err(_) => {}
         }
     });
 
-    sse_from_unbounded_mpsc(rx)
+    sse_from_mpsc(rx, stream_cancellation)
 }
 
 async fn cancel_turn<M>(
@@ -1222,11 +1232,39 @@ where
     }
 }
 
-fn sse_from_unbounded_mpsc(
-    receiver: mpsc::UnboundedReceiver<ServerEvent>,
+fn send_turn_event(tx: &mpsc::Sender<ServerEvent>, event: ServerEvent) -> Result<()> {
+    match tx.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(turn_cancelled_error()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            anyhow::bail!("turn event stream backpressure")
+        }
+    }
+}
+
+fn sse_from_mpsc(
+    receiver: mpsc::Receiver<ServerEvent>,
+    cancellation: TurnCancellation,
 ) -> axum::response::Response {
-    let stream = UnboundedReceiverStream::new(receiver).map(encode_sse);
+    let guard = TurnStreamGuard { cancellation };
+    let stream = stream! {
+        let _guard = guard;
+        let mut receiver = ReceiverStream::new(receiver);
+        while let Some(event) = receiver.next().await {
+            yield encode_sse(event);
+        }
+    };
     sse_response(Body::from_stream(stream))
+}
+
+struct TurnStreamGuard {
+    cancellation: TurnCancellation,
+}
+
+impl Drop for TurnStreamGuard {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 fn sse_from_broadcast(
@@ -3158,6 +3196,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_direct_turn_stream_cancels_running_turn() {
+        let started = Arc::new(Notify::new());
+        let turn = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::new(
+            DropCancelStreamer {
+                started: Arc::clone(&started),
+                turn: Arc::clone(&turn),
+            },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"block"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        started.notified().await;
+        drop(response);
+
+        let second_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"after drop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            to_bytes(second_response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("dropped turn stream should release the session for another turn")
+        .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(
+            "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"after drop\"}\n\n"
+        ));
+        assert!(body.contains(
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+        ));
+        assert_eq!(turn.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn dropping_old_direct_turn_stream_does_not_cancel_new_turn() {
+        let second_started = Arc::new(Notify::new());
+        let release_second = Arc::new(Notify::new());
+        let turn = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::new(
+            StaleDropStreamer {
+                second_started: Arc::clone(&second_started),
+                release_second: Arc::clone(&release_second),
+                turn: Arc::clone(&turn),
+            },
+            ContextWindowConfig::default(),
+            ModelConfig::new("test-default", ["test-default"]).unwrap(),
+        ));
+        let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
+        state.register_session_for_test(SessionId::new(7));
+        let app = router(state);
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"first"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_response.status(), StatusCode::OK);
+
+        let second_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/turns:stream")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"message":"second"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        second_started.notified().await;
+        drop(first_response);
+        release_second.notify_waiters();
+
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            to_bytes(second_response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("dropping an old stream should not cancel a newer turn")
+        .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains(
+            "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"second\"}\n\n"
+        ));
+        assert!(body.contains(
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+        ));
+        assert!(!body.contains("event: turn.cancelled\n"));
+        assert_eq!(turn.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn cancel_turn_reports_false_when_idle() {
         let service = Arc::new(AgentService::new(
             StaticStreamer::new("ok", []),
@@ -3791,6 +3963,61 @@ mod tests {
             self.started.notify_one();
             self.release.notified().await;
             Ok(ModelResponse::new("released"))
+        }
+    }
+
+    struct DropCancelStreamer {
+        started: Arc<Notify>,
+        turn: Arc<AtomicUsize>,
+    }
+
+    impl ModelStreamer for DropCancelStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            match self.turn.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    self.started.notify_one();
+                    std::future::pending::<()>().await;
+                    unreachable!("pending first turn should only finish if cancelled");
+                }
+                1 => Ok(ModelResponse::new("after drop")),
+                turn => panic!("unexpected turn {turn}"),
+            }
+        }
+    }
+
+    struct StaleDropStreamer {
+        second_started: Arc<Notify>,
+        release_second: Arc<Notify>,
+        turn: Arc<AtomicUsize>,
+    }
+
+    impl ModelStreamer for StaleDropStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            match self.turn.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(ModelResponse::new("first")),
+                1 => {
+                    self.second_started.notify_one();
+                    self.release_second.notified().await;
+                    Ok(ModelResponse::new("second"))
+                }
+                turn => panic!("unexpected turn {turn}"),
+            }
         }
     }
 

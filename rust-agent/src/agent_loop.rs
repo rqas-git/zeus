@@ -108,6 +108,11 @@ pub(crate) fn is_turn_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<TurnCancelled>().is_some()
 }
 
+/// Creates the canonical turn cancellation error.
+pub(crate) fn turn_cancelled_error() -> anyhow::Error {
+    TurnCancelled.into()
+}
+
 /// Strong identifier for an agent session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SessionId(u64);

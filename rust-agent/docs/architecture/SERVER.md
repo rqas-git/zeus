@@ -157,10 +157,9 @@ response, and event types and is used by Swift contract checks.
   path that waits on a blocking worker and then runs against the ready index.
 - HTTP/3 avoids TCP head-of-line blocking and supports concurrent QUIC streams.
 - The event queue capacity is configurable for session broadcast streams.
-  Direct turn streams use a per-turn unbounded channel so submitted-turn events
-  are not dropped when the response body is polled slowly. This is intentional
-  and matches pi-mono's trusted-local tradeoff: preserve all turn-local events
-  instead of dropping or backpressuring them.
+  Direct turn streams use a separate bounded per-turn queue. Dropping the
+  response body cancels the active turn, and a full turn queue stops the turn
+  instead of allowing unbounded memory growth.
 - SSE bodies are streamed from Tokio channels instead of buffering whole turns.
 - HTTP/3 concurrent bidirectional and unidirectional stream limits are
   configurable.
