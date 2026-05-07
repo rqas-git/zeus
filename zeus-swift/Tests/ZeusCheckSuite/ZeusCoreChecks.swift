@@ -158,6 +158,23 @@ public enum ZeusCoreChecks {
         )
         try require(textDelta == .textDelta(sessionID: 42, delta: "hello"), "unexpected text delta")
         try require(textDelta.isAssistantOutputEvent, "text delta should be assistant output")
+        try require(textDelta.sessionID == 42, "text delta session id should be available")
+
+        let connected = try decodeEvent(
+            #"{"type":"server_connected","session_id":42}"#
+        )
+        try require(
+            connected == .serverConnected(sessionID: 42),
+            "unexpected server connected event"
+        )
+
+        let lagged = try decodeEvent(
+            #"{"type":"events_lagged","session_id":42,"skipped":3}"#
+        )
+        try require(
+            lagged == .eventsLagged(sessionID: 42, skipped: 3),
+            "unexpected lagged event"
+        )
 
         let toolStarted = try decodeEvent(
             #"{"type":"tool_call_started","session_id":7,"tool_call_id":"call_read","tool_name":"read_file","args":"{\"path\":\"Cargo.toml\"}"}"#

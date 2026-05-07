@@ -1,6 +1,9 @@
 import Foundation
 
 public enum AgentServerEvent: Decodable, Equatable {
+    case serverConnected(sessionID: UInt64?)
+    case serverHeartbeat(sessionID: UInt64?)
+    case eventsLagged(sessionID: UInt64?, skipped: UInt64?)
     case statusChanged(sessionID: UInt64?, status: String?)
     case textDelta(sessionID: UInt64?, delta: String?)
     case messageCompleted(sessionID: UInt64?, role: String?, text: String?)
@@ -23,6 +26,26 @@ public enum AgentServerEvent: Decodable, Equatable {
     case turnCancelled(sessionID: UInt64?)
     case unknown(type: String, sessionID: UInt64?)
 
+    public var sessionID: UInt64? {
+        switch self {
+        case let .serverConnected(sessionID),
+             let .serverHeartbeat(sessionID),
+             let .statusChanged(sessionID, _),
+             let .textDelta(sessionID, _),
+             let .messageCompleted(sessionID, _, _),
+             let .toolCallStarted(sessionID, _, _, _),
+             let .toolCallCompleted(sessionID, _, _, _, _),
+             let .cacheHealth(sessionID, _),
+             let .error(sessionID, _),
+             let .turnCompleted(sessionID),
+             let .turnCancelled(sessionID),
+             let .unknown(_, sessionID):
+            return sessionID
+        case let .eventsLagged(sessionID, _):
+            return sessionID
+        }
+    }
+
     public var isAssistantOutputEvent: Bool {
         switch self {
         case .textDelta:
@@ -38,6 +61,12 @@ public enum AgentServerEvent: Decodable, Equatable {
         let payload = try AgentServerEventPayload(from: decoder)
 
         switch payload.type {
+        case "server_connected":
+            self = .serverConnected(sessionID: payload.sessionID)
+        case "server_heartbeat":
+            self = .serverHeartbeat(sessionID: payload.sessionID)
+        case "events_lagged":
+            self = .eventsLagged(sessionID: payload.sessionID, skipped: payload.skipped)
         case "status_changed":
             self = .statusChanged(sessionID: payload.sessionID, status: payload.status)
         case "text_delta":
@@ -105,6 +134,7 @@ private struct AgentServerEventPayload: Decodable {
     let toolName: String?
     let toolArguments: String?
     let success: Bool?
+    let skipped: UInt64?
     let cache: CacheHealthPayload?
 
     enum CodingKeys: String, CodingKey {
@@ -120,6 +150,7 @@ private struct AgentServerEventPayload: Decodable {
         case toolArguments = "tool_arguments"
         case args
         case success
+        case skipped
         case cache
     }
 
@@ -137,6 +168,7 @@ private struct AgentServerEventPayload: Decodable {
         toolArguments = try container.decodeIfPresent(String.self, forKey: .toolArguments)
             ?? container.decodeIfPresent(String.self, forKey: .args)
         success = try container.decodeIfPresent(Bool.self, forKey: .success)
+        skipped = try container.decodeIfPresent(UInt64.self, forKey: .skipped)
         cache = try container.decodeIfPresent(CacheHealthPayload.self, forKey: .cache)
     }
 }

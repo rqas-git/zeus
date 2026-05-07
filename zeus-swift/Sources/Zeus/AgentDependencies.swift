@@ -19,6 +19,10 @@ protocol AgentClientProtocol {
         reasoningEffort: String,
         onEvent: @escaping (AgentServerEvent) async -> Void
     ) async throws
+    func streamSessionEvents(
+        sessionID: UInt64,
+        onEvent: @escaping (AgentServerEvent) async -> Void
+    ) async throws
     func cancelTurn(sessionID: UInt64) async throws -> CancelTurnResponse
     func runTerminalCommand(
         sessionID: UInt64,

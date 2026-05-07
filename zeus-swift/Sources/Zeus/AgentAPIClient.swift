@@ -106,6 +106,44 @@ struct AgentAPIClient: AgentClientProtocol {
             reasoningEffort: reasoningEffort
         ))
 
+        try await streamEvents(request: request, onEvent: onEvent)
+    }
+
+    func streamSessionEvents(
+        sessionID: UInt64,
+        onEvent: @escaping (AgentServerEvent) async -> Void
+    ) async throws {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/events")
+        request.httpMethod = "GET"
+        request.setValue("text/event-stream", forHTTPHeaderField: "accept")
+        request.timeoutInterval = 24 * 60 * 60
+
+        try await streamEvents(request: request, onEvent: onEvent)
+    }
+
+    func cancelTurn(sessionID: UInt64) async throws -> CancelTurnResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/turns:cancel")
+        request.httpMethod = "POST"
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(CancelTurnResponse.self, from: data)
+    }
+
+    func runTerminalCommand(
+        sessionID: UInt64,
+        command: String
+    ) async throws -> TerminalCommandResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/terminal:run")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(TerminalCommandRequest(command: command))
+        let data = try await data(for: request)
+        return try JSONDecoder().decode(TerminalCommandResponse.self, from: data)
+    }
+
+    private func streamEvents(
+        request: URLRequest,
+        onEvent: @escaping (AgentServerEvent) async -> Void
+    ) async throws {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         try validate(response: response)
 
@@ -129,25 +167,6 @@ struct AgentAPIClient: AgentClientProtocol {
         if !receivedEvent {
             throw AgentClientError.noStreamEvents(parser.preview)
         }
-    }
-
-    func cancelTurn(sessionID: UInt64) async throws -> CancelTurnResponse {
-        var request = authenticatedRequest(path: "sessions/\(sessionID)/turns:cancel")
-        request.httpMethod = "POST"
-        let data = try await data(for: request)
-        return try JSONDecoder().decode(CancelTurnResponse.self, from: data)
-    }
-
-    func runTerminalCommand(
-        sessionID: UInt64,
-        command: String
-    ) async throws -> TerminalCommandResponse {
-        var request = authenticatedRequest(path: "sessions/\(sessionID)/terminal:run")
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(TerminalCommandRequest(command: command))
-        let data = try await data(for: request)
-        return try JSONDecoder().decode(TerminalCommandResponse.self, from: data)
     }
 
     private func authenticatedRequest(path: String) -> URLRequest {

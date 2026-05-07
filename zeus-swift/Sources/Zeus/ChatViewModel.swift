@@ -81,9 +81,11 @@ final class ChatViewModel: ObservableObject {
     private var toolLineIDsByCallID: [String: UUID] = [:]
     private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     private var streamTask: Task<Void, Never>?
+    private var sessionEventTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
     private var branchSwitchTask: Task<Void, Never>?
     private var terminalTask: Task<Void, Never>?
+    private var isSessionEventStreamConnected = false
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
     private var searchMatchedLineIDsInOrder: [UUID] = []
@@ -103,6 +105,7 @@ final class ChatViewModel: ObservableObject {
 
     deinit {
         streamTask?.cancel()
+        sessionEventTask?.cancel()
         loginTask?.cancel()
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
@@ -133,6 +136,8 @@ final class ChatViewModel: ObservableObject {
             sessionID = session.sessionID
             applySessionModel(session.model)
             applySessionPermissions(session.toolPolicy ?? selectedPermission)
+            append(kind: .status, text: "connecting session events...")
+            try await startSessionEventStream(sessionID: session.sessionID, client: client)
             isReady = true
             append(kind: .status, text: "ready. session \(session.sessionID)")
             await refreshAuthStatus()
@@ -194,9 +199,6 @@ final class ChatViewModel: ObservableObject {
         showAssistantPlaceholder("sending...")
 
         streamTask = Task {
-            var receivedEvent = false
-            var receivedAssistantOutput = false
-            var receivedCancellation = false
             do {
                 try await withTaskCancellationHandler {
                     try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
@@ -210,36 +212,15 @@ final class ChatViewModel: ObservableObject {
                         sessionID: sessionID,
                         message: message,
                         reasoningEffort: reasoningEffort
-                    ) { event in
-                        if case let .statusChanged(_, status) = event, status == "running" {
-                            try? await Task.sleep(nanoseconds: self.pendingStateDwellNanoseconds)
-                        }
-                        await MainActor.run {
-                            receivedEvent = true
-                            if event.isAssistantOutputEvent {
-                                receivedAssistantOutput = true
-                            }
-                            if case .turnCancelled = event {
-                                receivedCancellation = true
-                            }
-                            self.handle(event)
-                        }
-                    }
+                    ) { _ in }
                 } onCancel: {
                     Task {
                         _ = try? await client.cancelTurn(sessionID: sessionID)
                     }
                 }
-                if receivedCancellation {
-                    finishCancelledTurn()
-                    return
+                if isSending {
+                    finishTurn()
                 }
-                if !receivedEvent {
-                    append(kind: .error, text: "rust-agent returned no stream events")
-                } else if !receivedAssistantOutput {
-                    append(kind: .status, text: "turn finished without assistant output")
-                }
-                finishTurn()
             } catch {
                 if Self.isCancellation(error) {
                     finishCancelledTurn()
@@ -258,6 +239,9 @@ final class ChatViewModel: ObservableObject {
     func shutdown() {
         streamTask?.cancel()
         streamTask = nil
+        sessionEventTask?.cancel()
+        sessionEventTask = nil
+        isSessionEventStreamConnected = false
         loginTask?.cancel()
         loginTask = nil
         branchSwitchTask?.cancel()
@@ -452,6 +436,10 @@ final class ChatViewModel: ObservableObject {
             do {
                 let restored = try await client.restoreSession(sessionID: targetSessionID)
                 applyRestoredSession(restored)
+                try await startSessionEventStream(
+                    sessionID: restored.sessionID,
+                    client: client
+                )
                 append(kind: .status, text: "restored session \(restored.sessionID)")
             } catch {
                 append(kind: .error, text: error.localizedDescription)
@@ -494,9 +482,17 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func handle(_ event: AgentServerEvent) {
+        if let eventSessionID = event.sessionID, eventSessionID != sessionID {
+            return
+        }
+
         switch event {
+        case .serverConnected, .serverHeartbeat:
+            break
+        case let .eventsLagged(_, skipped):
+            append(kind: .error, text: "missed \(skipped ?? 0) session events")
         case let .statusChanged(_, status):
-            if status == "running" {
+            if status == "running", isSending {
                 showAssistantPlaceholder("thinking...")
             }
         case let .textDelta(_, delta):
@@ -535,10 +531,13 @@ final class ChatViewModel: ObservableObject {
             if message.contains("not logged in") {
                 append(kind: .status, text: "type /login to authorize rust-agent")
             }
+            if isSending {
+                finishErroredTurn()
+            }
         case .turnCompleted:
-            break
+            finishTurn()
         case .turnCancelled:
-            break
+            finishCancelledTurn()
         case .unknown:
             break
         }
@@ -563,6 +562,15 @@ final class ChatViewModel: ObservableObject {
         if wasCancellable {
             append(kind: .status, text: "turn cancelled")
         }
+    }
+
+    private func finishErroredTurn() {
+        isSending = false
+        canCancelTurn = false
+        streamTask = nil
+        removeAssistantPlaceholder()
+        currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
     }
 
     private func failTurn(_ error: Error) {
@@ -779,6 +787,58 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func startSessionEventStream(
+        sessionID: UInt64,
+        client: any AgentClientProtocol
+    ) async throws {
+        sessionEventTask?.cancel()
+        sessionEventTask = nil
+        isSessionEventStreamConnected = false
+
+        let startup = SessionEventStreamStartup()
+        sessionEventTask = Task { [weak self] in
+            do {
+                try await client.streamSessionEvents(sessionID: sessionID) { event in
+                    await MainActor.run {
+                        guard let self, self.sessionID == sessionID else { return }
+                        if !self.isSessionEventStreamConnected {
+                            self.isSessionEventStreamConnected = true
+                            startup.succeed()
+                        }
+                        self.handle(event)
+                    }
+                }
+                startup.fail(SessionEventStreamError.disconnected)
+                await MainActor.run {
+                    guard let self, self.sessionID == sessionID else { return }
+                    self.isSessionEventStreamConnected = false
+                    self.isReady = false
+                    if self.isSending {
+                        self.finishErroredTurn()
+                    }
+                    self.append(kind: .error, text: "session event stream disconnected")
+                }
+            } catch {
+                if Self.isCancellation(error) || Task.isCancelled {
+                    startup.fail(CancellationError())
+                    return
+                }
+                startup.fail(error)
+                await MainActor.run {
+                    guard let self, self.sessionID == sessionID else { return }
+                    self.isSessionEventStreamConnected = false
+                    self.isReady = false
+                    if self.isSending {
+                        self.finishErroredTurn()
+                    }
+                    self.append(kind: .error, text: error.localizedDescription)
+                }
+            }
+        }
+
+        try await startup.wait()
+    }
+
     private func refreshAuthStatus() async {
         switch await auth.status() {
         case .loggedIn:
@@ -842,6 +902,7 @@ final class ChatViewModel: ObservableObject {
         applySessionModel(session.model)
         applySessionPermissions(session.toolPolicy ?? selectedPermission)
         replaceSubmittedMessages(with: [])
+        try await startSessionEventStream(sessionID: session.sessionID, client: client)
         append(kind: .status, text: "new session ready. session \(session.sessionID)")
     }
 
@@ -1039,5 +1100,59 @@ final class ChatViewModel: ObservableObject {
 
     private func resetDraftHistoryNavigation() {
         submittedMessageHistory.reset()
+    }
+}
+
+private enum SessionEventStreamError: LocalizedError {
+    case disconnected
+
+    var errorDescription: String? {
+        "session event stream disconnected"
+    }
+}
+
+private final class SessionEventStreamStartup {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            var resolved: Result<Void, Error>?
+            lock.lock()
+            if let result {
+                resolved = result
+            } else {
+                self.continuation = continuation
+            }
+            lock.unlock()
+
+            if let resolved {
+                continuation.resume(with: resolved)
+            }
+        }
+    }
+
+    func succeed() {
+        complete(.success(()))
+    }
+
+    func fail(_ error: Error) {
+        complete(.failure(error))
+    }
+
+    private func complete(_ result: Result<Void, Error>) {
+        let continuation: CheckedContinuation<Void, Error>?
+        lock.lock()
+        if self.result == nil {
+            self.result = result
+            continuation = self.continuation
+            self.continuation = nil
+        } else {
+            continuation = nil
+        }
+        lock.unlock()
+
+        continuation?.resume(with: result)
     }
 }
