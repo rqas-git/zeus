@@ -72,6 +72,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
+    private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
     private let server: any AgentServerProtocol
     private let auth: any AgentAuthProtocol
     private var client: (any AgentClientProtocol)?
@@ -86,6 +87,8 @@ final class ChatViewModel: ObservableObject {
     private var loginTask: Task<Void, Never>?
     private var branchSwitchTask: Task<Void, Never>?
     private var terminalTask: Task<Void, Never>?
+    private var assistantDeltaFlushTask: Task<Void, Never>?
+    private var pendingAssistantDelta = ""
     private var isSessionEventStreamConnected = false
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
@@ -110,6 +113,7 @@ final class ChatViewModel: ObservableObject {
         loginTask?.cancel()
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
+        assistantDeltaFlushTask?.cancel()
         auth.cancelLogin()
         server.stop()
     }
@@ -550,6 +554,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func finishTurn() {
+        flushPendingAssistantDelta()
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -559,6 +564,7 @@ final class ChatViewModel: ObservableObject {
 
     private func finishCancelledTurn() {
         let wasCancellable = canCancelTurn
+        flushPendingAssistantDelta()
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -571,6 +577,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func finishErroredTurn() {
+        flushPendingAssistantDelta()
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -580,6 +587,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func failTurn(_ error: Error) {
+        flushPendingAssistantDelta()
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -598,6 +606,39 @@ final class ChatViewModel: ObservableObject {
 
     private func appendAssistantDelta(_ delta: String) {
         guard !delta.isEmpty else { return }
+        _ = ensureAssistantLine()
+        pendingAssistantDelta += delta
+        scheduleAssistantDeltaFlush()
+    }
+
+    private func scheduleAssistantDeltaFlush() {
+        guard assistantDeltaFlushTask == nil else { return }
+        assistantDeltaFlushTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.assistantDeltaFlushNanoseconds)
+            } catch {
+                return
+            }
+            self?.flushPendingAssistantDelta()
+        }
+    }
+
+    private func flushPendingAssistantDelta() {
+        assistantDeltaFlushTask?.cancel()
+        assistantDeltaFlushTask = nil
+        guard !pendingAssistantDelta.isEmpty else { return }
+        let delta = pendingAssistantDelta
+        pendingAssistantDelta = ""
+        applyAssistantDelta(delta)
+    }
+
+    private func clearPendingAssistantDelta() {
+        assistantDeltaFlushTask?.cancel()
+        assistantDeltaFlushTask = nil
+        pendingAssistantDelta = ""
+    }
+
+    private func applyAssistantDelta(_ delta: String) {
         let id = ensureAssistantLine()
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         if assistantPlaceholderLineID == id {
@@ -609,6 +650,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func replaceAssistantText(_ text: String) {
+        clearPendingAssistantDelta()
         let id = ensureAssistantLine()
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         lines[index].text = text
