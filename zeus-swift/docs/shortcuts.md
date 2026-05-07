@@ -17,7 +17,7 @@
 | `Down Arrow` | Recall the next submitted message while the input field is focused, move to the footer controls when already at the current draft, exit footer controls, or close the open footer menu without selecting. |
 | `Left Arrow` / `Right Arrow` | Move between footer controls while footer navigation is active. |
 | `Return` / `Enter` | Activate the focused footer control, or select the highlighted option while a footer dropdown is open. |
-| `Esc` | Close transcript search, footer navigation, or the open footer dropdown menu. |
+| `Esc` | Cancel the current response, close transcript search, footer navigation, or the open footer dropdown menu. |
 
 ## Commands
 

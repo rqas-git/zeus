@@ -39,7 +39,7 @@ private let shortcutItems = [
     ShortcutItem(shortcut: "Down Arrow", action: "Next message, exit footer controls, or close menu"),
     ShortcutItem(shortcut: "Left / Right Arrow", action: "Move between footer controls"),
     ShortcutItem(shortcut: "Return / Enter", action: "Activate footer control or menu option"),
-    ShortcutItem(shortcut: "Esc", action: "Close search, footer navigation, or footer menu")
+    ShortcutItem(shortcut: "Esc", action: "Cancel response, close search, or close footer UI")
 ]
 
 private enum KeyCode {
@@ -173,6 +173,10 @@ struct ChatWindow: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if event.keyCode == KeyCode.escape, viewModel.canCancelTurn {
+            viewModel.cancelCurrentTurn()
+            return true
+        }
         if isSearchShortcut(event) {
             activeFooterMenu = nil
             viewModel.showSearch()
