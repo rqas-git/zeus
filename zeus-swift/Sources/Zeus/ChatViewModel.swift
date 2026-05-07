@@ -212,7 +212,12 @@ final class ChatViewModel: ObservableObject {
                         sessionID: sessionID,
                         message: message,
                         reasoningEffort: reasoningEffort
-                    ) { _ in }
+                    ) { event in
+                        await MainActor.run {
+                            guard self.sessionID == sessionID else { return }
+                            self.handle(event)
+                        }
+                    }
                 } onCancel: {
                     Task {
                         _ = try? await client.cancelTurn(sessionID: sessionID)
