@@ -9,6 +9,7 @@ struct PromptTextField: NSViewRepresentable {
     let onSubmit: () -> Void
     let onHistoryPrevious: () -> Bool
     let onHistoryNext: () -> Bool
+    var onMoveDownFromCurrent: () -> Bool = { false }
 
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField()
@@ -41,6 +42,7 @@ struct PromptTextField: NSViewRepresentable {
         context.coordinator.onSubmit = onSubmit
         context.coordinator.onHistoryPrevious = onHistoryPrevious
         context.coordinator.onHistoryNext = onHistoryNext
+        context.coordinator.onMoveDownFromCurrent = onMoveDownFromCurrent
 
         if textField.stringValue != text {
             textField.stringValue = text
@@ -55,7 +57,8 @@ struct PromptTextField: NSViewRepresentable {
             text: $text,
             onSubmit: onSubmit,
             onHistoryPrevious: onHistoryPrevious,
-            onHistoryNext: onHistoryNext
+            onHistoryNext: onHistoryNext,
+            onMoveDownFromCurrent: onMoveDownFromCurrent
         )
     }
 
@@ -86,18 +89,21 @@ struct PromptTextField: NSViewRepresentable {
         var onSubmit: () -> Void
         var onHistoryPrevious: () -> Bool
         var onHistoryNext: () -> Bool
+        var onMoveDownFromCurrent: () -> Bool
         var didApplyInitialFocus = false
 
         init(
             text: Binding<String>,
             onSubmit: @escaping () -> Void,
             onHistoryPrevious: @escaping () -> Bool,
-            onHistoryNext: @escaping () -> Bool
+            onHistoryNext: @escaping () -> Bool,
+            onMoveDownFromCurrent: @escaping () -> Bool
         ) {
             self.text = text
             self.onSubmit = onSubmit
             self.onHistoryPrevious = onHistoryPrevious
             self.onHistoryNext = onHistoryNext
+            self.onMoveDownFromCurrent = onMoveDownFromCurrent
         }
 
         @objc func submit() {
@@ -123,7 +129,9 @@ struct PromptTextField: NSViewRepresentable {
 
             if commandSelector == #selector(NSResponder.moveDown(_:)),
                hasNoNavigationModifiers {
-                guard onHistoryNext() else { return false }
+                guard onHistoryNext() else {
+                    return onMoveDownFromCurrent()
+                }
                 applyBoundText(to: textView)
                 return true
             }
