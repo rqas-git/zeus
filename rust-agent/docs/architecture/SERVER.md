@@ -36,6 +36,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `GET /` returns server identity, supported protocols, and the canonical
   workspace root used by built-in tools.
 - `GET /healthz` returns a lightweight health response.
+- `GET /capabilities` returns protocol version, contract hash, transports,
+  route groups, and feature flags for frontend compatibility checks.
 - `GET /workspace` returns the canonical workspace root plus Git branch
   metadata when the workspace is a Git repository.
 - `POST /workspace/branch` switches the workspace to a local branch, auto-stashes
@@ -60,10 +62,11 @@ router through both HTTP compatibility and native HTTP/3 transports.
   the session transcript without changing the session's model tool policy.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
 
-`GET /` and `GET /healthz` are public. All other routes require
-`Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a stable
-token; otherwise startup prints a generated token to stderr. Numeric session IDs
-must come from `POST /sessions` or an existing local SQLite row discovered
+`GET /`, `GET /healthz`, and `GET /capabilities` are public. All other routes
+require `Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a
+stable token; otherwise startup prints a generated token to stderr. Numeric
+session IDs must come from `POST /sessions` or an existing local SQLite row
+discovered
 through `GET /sessions`, `GET /sessions/{session_id}`, or restored through
 `POST /sessions:restore`; generated IDs stay within JavaScript's JSON-safe
 integer range.
@@ -121,6 +124,12 @@ event shape.
 Terminal command requests emit the same user-message, session-status, and
 tool-call lifecycle events as model-initiated tool calls, but the route returns a
 bounded JSON result instead of an SSE turn stream.
+
+## Contract
+
+`rust-agent contract` prints the Zeus API contract artifact. The checked-in
+`docs/contracts/zeus-api-contract.json` is generated from Rust request,
+response, and event types and is used by Swift contract checks.
 
 ## Performance Notes
 

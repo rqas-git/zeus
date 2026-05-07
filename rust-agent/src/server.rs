@@ -67,6 +67,27 @@ const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
 const MAX_SESSION_LIST_LIMIT: usize = 200;
 const SERVER_PROTOCOL_VERSION: u32 = 1;
+const CONTRACT_SCHEMA_HASH_PLACEHOLDER: &str = "contract-schema-hash";
+const SERVER_TRANSPORTS: &[&str] = &["http/1.1", "http/2", "http/3"];
+const SERVER_FEATURES: &[&str] = &[
+    "workspace",
+    "branch_switching",
+    "sessions",
+    "session_restore",
+    "turn_streaming",
+    "session_events",
+    "terminal_command",
+];
+const SERVER_ROUTE_GROUPS: &[&str] = &[
+    "identity",
+    "models",
+    "permissions",
+    "workspace",
+    "sessions",
+    "turns",
+    "terminal",
+    "events",
+];
 
 /// Runs the local server until interrupted.
 ///
@@ -154,6 +175,7 @@ where
     Router::new()
         .route("/", get(root::<M>))
         .route("/healthz", get(healthz))
+        .route("/capabilities", get(capabilities))
         .route("/models", get(models::<M>))
         .route("/permissions", get(permissions::<M>))
         .route("/workspace", get(workspace::<M>))
@@ -690,7 +712,7 @@ where
 }
 
 fn is_public_path(path: &str) -> bool {
-    path == "/" || path == "/healthz"
+    path == "/" || path == "/healthz" || path == "/capabilities"
 }
 
 fn unauthorized_response() -> Response<Body> {
@@ -722,6 +744,10 @@ where
 
 async fn healthz() -> impl IntoResponse {
     Json(HealthResponse { healthy: true })
+}
+
+async fn capabilities() -> impl IntoResponse {
+    Json(capabilities_response(contract_schema_hash()))
 }
 
 async fn models<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
@@ -1238,6 +1264,254 @@ fn error_response(status: StatusCode, error: anyhow::Error) -> axum::response::R
         .into_response()
 }
 
+pub(crate) fn zeus_api_contract_pretty() -> Result<String> {
+    serde_json::to_string_pretty(&zeus_api_contract_fixture())
+        .context("failed to serialize Zeus API contract")
+}
+
+fn contract_schema_hash() -> String {
+    let material = contract_fixture_with_schema_hash(CONTRACT_SCHEMA_HASH_PLACEHOLDER);
+    let bytes = serde_json::to_vec(&material).expect("contract fixture must serialize");
+    format!("{:016x}", fnv1a64(&bytes))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn capabilities_response(schema_hash: String) -> CapabilitiesResponse {
+    CapabilitiesResponse {
+        name: SERVER_NAME,
+        protocol_version: SERVER_PROTOCOL_VERSION,
+        schema_hash,
+        transports: SERVER_TRANSPORTS.to_vec(),
+        features: SERVER_FEATURES.to_vec(),
+        route_groups: SERVER_ROUTE_GROUPS.to_vec(),
+    }
+}
+
+fn zeus_api_contract_fixture() -> serde_json::Value {
+    contract_fixture_with_schema_hash(&contract_schema_hash())
+}
+
+fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "requests": {
+            "switch_workspace_branch": SwitchWorkspaceBranchRequest {
+                branch: "feature".to_string(),
+            },
+            "set_session_model": SetModelRequest {
+                model: "gpt-5.5".to_string(),
+            },
+            "set_session_permissions": SetPermissionsRequest {
+                tool_policy: "workspace-write".to_string(),
+            },
+            "restore_session": RestoreSessionRequest {
+                session_id: 42,
+            },
+            "list_sessions": ListSessionsQuery {
+                limit: Some(50),
+                offset: Some(0),
+            },
+            "turn": TurnRequest {
+                message: "hello".to_string(),
+                reasoning_effort: Some("medium".to_string()),
+            },
+            "terminal_command": TerminalCommandRequest {
+                command: "printf ok".to_string(),
+            },
+        },
+        "responses": {
+            "server_ready": ServerReadyMessage {
+                event: "server_ready",
+                name: SERVER_NAME,
+                protocol_version: SERVER_PROTOCOL_VERSION,
+                http_addr: "127.0.0.1:4096".to_string(),
+                h3_addr: "127.0.0.1:4433".to_string(),
+                token: "contract-token".to_string(),
+                workspace_root: "/workspace".to_string(),
+                pid: 1234,
+            },
+            "root": RootResponse {
+                name: SERVER_NAME,
+                protocol: "http/1.1,http/2,http/3",
+                workspace_root: "/workspace".to_string(),
+            },
+            "capabilities": capabilities_response(schema_hash.to_string()),
+            "models": ModelsResponse {
+                default_model: "gpt-5.5".to_string(),
+                allowed_models: vec![
+                    "gpt-5.5".to_string(),
+                    "gpt-5.4".to_string(),
+                ],
+                default_reasoning_effort: "medium".to_string(),
+                reasoning_efforts: vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                ],
+            },
+            "permissions": PermissionsResponse {
+                default_tool_policy: "read-only".to_string(),
+                allowed_tool_policies: vec![
+                    "read-only".to_string(),
+                    "workspace-write".to_string(),
+                    "workspace-exec".to_string(),
+                ],
+            },
+            "workspace": WorkspaceResponse {
+                workspace_root: "/workspace".to_string(),
+                branch: Some("main".to_string()),
+                branches: vec!["main".to_string(), "feature".to_string()],
+                git: true,
+            },
+            "switch_workspace_branch": SwitchWorkspaceBranchResponse {
+                previous_branch: Some("main".to_string()),
+                branch: "feature".to_string(),
+                stashed_changes: true,
+                workspace: WorkspaceResponse {
+                    workspace_root: "/workspace".to_string(),
+                    branch: Some("feature".to_string()),
+                    branches: vec!["main".to_string(), "feature".to_string()],
+                    git: true,
+                },
+            },
+            "create_session": CreateSessionResponse {
+                session_id: 42,
+                model: "gpt-5.5".to_string(),
+                tool_policy: "read-only".to_string(),
+            },
+            "restore_session": RestoreSessionResponse {
+                session_id: 42,
+                model: "gpt-5.5".to_string(),
+                tool_policy: "workspace-write".to_string(),
+                messages: vec![
+                    TranscriptMessageResponse {
+                        message_id: 1,
+                        kind: "message",
+                        role: Some("user"),
+                        text: Some("read Cargo.toml".to_string()),
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_arguments: None,
+                        success: None,
+                    },
+                    TranscriptMessageResponse {
+                        message_id: 2,
+                        kind: "function_call",
+                        role: None,
+                        text: None,
+                        tool_call_id: Some("call_read".to_string()),
+                        tool_name: Some("read_file".to_string()),
+                        tool_arguments: Some(r#"{"path":"Cargo.toml"}"#.to_string()),
+                        success: None,
+                    },
+                    TranscriptMessageResponse {
+                        message_id: 3,
+                        kind: "function_output",
+                        role: None,
+                        text: Some("name = \"rust-agent\"".to_string()),
+                        tool_call_id: Some("call_read".to_string()),
+                        tool_name: None,
+                        tool_arguments: None,
+                        success: Some(true),
+                    },
+                    TranscriptMessageResponse {
+                        message_id: 4,
+                        kind: "message",
+                        role: Some("assistant"),
+                        text: Some("done".to_string()),
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_arguments: None,
+                        success: None,
+                    },
+                ],
+            },
+            "session_model": SessionModelResponse {
+                model: "gpt-5.5".to_string(),
+            },
+            "session_permissions": SessionPermissionsResponse {
+                tool_policy: "workspace-write".to_string(),
+            },
+            "cancel_turn": CancelTurnResponse {
+                cancelled: true,
+            },
+            "terminal_command": TerminalCommandResponse {
+                output: "ok\n".to_string(),
+                success: true,
+            },
+            "error": ErrorResponse {
+                error: "session not found".to_string(),
+            },
+        },
+        "events": {
+            "server.connected": ServerEvent::ServerConnected { session_id: 42 },
+            "server.heartbeat": ServerEvent::ServerHeartbeat { session_id: 42 },
+            "server.events_lagged": ServerEvent::EventsLagged {
+                session_id: 42,
+                skipped: 3,
+            },
+            "session.status_changed": ServerEvent::StatusChanged {
+                session_id: 42,
+                status: "running",
+            },
+            "message.text_delta": ServerEvent::TextDelta {
+                session_id: 42,
+                delta: "hello".to_string(),
+            },
+            "message.completed": ServerEvent::MessageCompleted {
+                session_id: 42,
+                role: "assistant",
+                text: "hello".to_string(),
+            },
+            "cache.health": ServerEvent::CacheHealth {
+                session_id: 42,
+                cache: CacheHealthEvent {
+                    model: "gpt-5.5".to_string(),
+                    prompt_cache_key: "contract-cache-key".to_string(),
+                    stable_prefix_hash: "000000000000002a".to_string(),
+                    stable_prefix_bytes: 128,
+                    message_count: 4,
+                    input_bytes: 1024,
+                    response_id: Some("resp_contract".to_string()),
+                    usage: Some(TokenUsageEvent {
+                        input_tokens: Some(100),
+                        cached_input_tokens: Some(80),
+                        output_tokens: Some(12),
+                        total_tokens: Some(112),
+                    }),
+                    cache_status: "reused_prefix",
+                },
+            },
+            "tool_call.started": ServerEvent::ToolCallStarted {
+                session_id: 42,
+                tool_call_id: "call_read".to_string(),
+                tool_name: "read_file".to_string(),
+                args: r#"{"path":"Cargo.toml"}"#.to_string(),
+            },
+            "tool_call.completed": ServerEvent::ToolCallCompleted {
+                session_id: 42,
+                tool_call_id: "call_read".to_string(),
+                tool_name: "read_file".to_string(),
+                success: true,
+            },
+            "session.error": ServerEvent::Error {
+                session_id: 42,
+                message: "not logged in".to_string(),
+            },
+            "turn.completed": ServerEvent::TurnCompleted { session_id: 42 },
+            "turn.cancelled": ServerEvent::TurnCancelled { session_id: 42 },
+        },
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerEvent {
@@ -1457,6 +1731,16 @@ struct ServerReadyMessage {
 #[derive(Serialize)]
 struct HealthResponse {
     healthy: bool,
+}
+
+#[derive(Serialize)]
+struct CapabilitiesResponse {
+    name: &'static str,
+    protocol_version: u32,
+    schema_hash: String,
+    transports: Vec<&'static str>,
+    features: Vec<&'static str>,
+    route_groups: Vec<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -1690,39 +1974,39 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SetModelRequest {
     model: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SetPermissionsRequest {
     tool_policy: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RestoreSessionRequest {
     session_id: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ListSessionsQuery {
     limit: Option<usize>,
     offset: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct SwitchWorkspaceBranchRequest {
     branch: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct TurnRequest {
     message: String,
     reasoning_effort: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct TerminalCommandRequest {
     command: String,
 }
@@ -1798,6 +2082,31 @@ mod tests {
             health.headers().get(header::ALT_SVC).unwrap(),
             "h3=\":4433\"; ma=86400"
         );
+
+        let capabilities = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let body = to_bytes(capabilities.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let capabilities: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            capabilities["protocol_version"],
+            serde_json::json!(SERVER_PROTOCOL_VERSION)
+        );
+        assert!(capabilities["schema_hash"].as_str().unwrap().len() >= 16);
+        assert!(capabilities["features"]
+            .as_array()
+            .unwrap()
+            .contains(&"turn_streaming".into()));
 
         let models = app
             .clone()
@@ -2894,194 +3203,7 @@ mod tests {
     fn zeus_api_contract_fixture_matches_server_types() {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../docs/contracts/zeus-api-contract.json")).unwrap();
-        assert_eq!(zeus_api_contract_fixture(), expected);
-    }
-
-    fn zeus_api_contract_fixture() -> serde_json::Value {
-        serde_json::json!({
-            "version": 1,
-            "responses": {
-                "server_ready": ServerReadyMessage {
-                    event: "server_ready",
-                    name: SERVER_NAME,
-                    protocol_version: SERVER_PROTOCOL_VERSION,
-                    http_addr: "127.0.0.1:4096".to_string(),
-                    h3_addr: "127.0.0.1:4433".to_string(),
-                    token: "contract-token".to_string(),
-                    workspace_root: "/workspace".to_string(),
-                    pid: 1234,
-                },
-                "root": RootResponse {
-                    name: SERVER_NAME,
-                    protocol: "http/1.1,http/2,http/3",
-                    workspace_root: "/workspace".to_string(),
-                },
-                "models": ModelsResponse {
-                    default_model: "gpt-5.5".to_string(),
-                    allowed_models: vec![
-                        "gpt-5.5".to_string(),
-                        "gpt-5.4".to_string(),
-                    ],
-                    default_reasoning_effort: "medium".to_string(),
-                    reasoning_efforts: vec![
-                        "low".to_string(),
-                        "medium".to_string(),
-                        "high".to_string(),
-                    ],
-                },
-                "permissions": PermissionsResponse {
-                    default_tool_policy: "read-only".to_string(),
-                    allowed_tool_policies: vec![
-                        "read-only".to_string(),
-                        "workspace-write".to_string(),
-                        "workspace-exec".to_string(),
-                    ],
-                },
-                "workspace": WorkspaceResponse {
-                    workspace_root: "/workspace".to_string(),
-                    branch: Some("main".to_string()),
-                    branches: vec!["main".to_string(), "feature".to_string()],
-                    git: true,
-                },
-                "switch_workspace_branch": SwitchWorkspaceBranchResponse {
-                    previous_branch: Some("main".to_string()),
-                    branch: "feature".to_string(),
-                    stashed_changes: true,
-                    workspace: WorkspaceResponse {
-                        workspace_root: "/workspace".to_string(),
-                        branch: Some("feature".to_string()),
-                        branches: vec!["main".to_string(), "feature".to_string()],
-                        git: true,
-                    },
-                },
-                "create_session": CreateSessionResponse {
-                    session_id: 42,
-                    model: "gpt-5.5".to_string(),
-                    tool_policy: "read-only".to_string(),
-                },
-                "restore_session": RestoreSessionResponse {
-                    session_id: 42,
-                    model: "gpt-5.5".to_string(),
-                    tool_policy: "workspace-write".to_string(),
-                    messages: vec![
-                        TranscriptMessageResponse {
-                            message_id: 1,
-                            kind: "message",
-                            role: Some("user"),
-                            text: Some("read Cargo.toml".to_string()),
-                            tool_call_id: None,
-                            tool_name: None,
-                            tool_arguments: None,
-                            success: None,
-                        },
-                        TranscriptMessageResponse {
-                            message_id: 2,
-                            kind: "function_call",
-                            role: None,
-                            text: None,
-                            tool_call_id: Some("call_read".to_string()),
-                            tool_name: Some("read_file".to_string()),
-                            tool_arguments: Some(r#"{"path":"Cargo.toml"}"#.to_string()),
-                            success: None,
-                        },
-                        TranscriptMessageResponse {
-                            message_id: 3,
-                            kind: "function_output",
-                            role: None,
-                            text: Some("name = \"rust-agent\"".to_string()),
-                            tool_call_id: Some("call_read".to_string()),
-                            tool_name: None,
-                            tool_arguments: None,
-                            success: Some(true),
-                        },
-                        TranscriptMessageResponse {
-                            message_id: 4,
-                            kind: "message",
-                            role: Some("assistant"),
-                            text: Some("done".to_string()),
-                            tool_call_id: None,
-                            tool_name: None,
-                            tool_arguments: None,
-                            success: None,
-                        },
-                    ],
-                },
-                "session_model": SessionModelResponse {
-                    model: "gpt-5.5".to_string(),
-                },
-                "session_permissions": SessionPermissionsResponse {
-                    tool_policy: "workspace-write".to_string(),
-                },
-                "cancel_turn": CancelTurnResponse {
-                    cancelled: true,
-                },
-                "terminal_command": TerminalCommandResponse {
-                    output: "ok\n".to_string(),
-                    success: true,
-                },
-                "error": ErrorResponse {
-                    error: "session not found".to_string(),
-                },
-            },
-            "events": {
-                "server.connected": ServerEvent::ServerConnected { session_id: 42 },
-                "server.heartbeat": ServerEvent::ServerHeartbeat { session_id: 42 },
-                "server.events_lagged": ServerEvent::EventsLagged {
-                    session_id: 42,
-                    skipped: 3,
-                },
-                "session.status_changed": ServerEvent::StatusChanged {
-                    session_id: 42,
-                    status: "running",
-                },
-                "message.text_delta": ServerEvent::TextDelta {
-                    session_id: 42,
-                    delta: "hello".to_string(),
-                },
-                "message.completed": ServerEvent::MessageCompleted {
-                    session_id: 42,
-                    role: "assistant",
-                    text: "hello".to_string(),
-                },
-                "cache.health": ServerEvent::CacheHealth {
-                    session_id: 42,
-                    cache: CacheHealthEvent {
-                        model: "gpt-5.5".to_string(),
-                        prompt_cache_key: "contract-cache-key".to_string(),
-                        stable_prefix_hash: "000000000000002a".to_string(),
-                        stable_prefix_bytes: 128,
-                        message_count: 4,
-                        input_bytes: 1024,
-                        response_id: Some("resp_contract".to_string()),
-                        usage: Some(TokenUsageEvent {
-                            input_tokens: Some(100),
-                            cached_input_tokens: Some(80),
-                            output_tokens: Some(12),
-                            total_tokens: Some(112),
-                        }),
-                        cache_status: "reused_prefix",
-                    },
-                },
-                "tool_call.started": ServerEvent::ToolCallStarted {
-                    session_id: 42,
-                    tool_call_id: "call_read".to_string(),
-                    tool_name: "read_file".to_string(),
-                    args: r#"{"path":"Cargo.toml"}"#.to_string(),
-                },
-                "tool_call.completed": ServerEvent::ToolCallCompleted {
-                    session_id: 42,
-                    tool_call_id: "call_read".to_string(),
-                    tool_name: "read_file".to_string(),
-                    success: true,
-                },
-                "session.error": ServerEvent::Error {
-                    session_id: 42,
-                    message: "not logged in".to_string(),
-                },
-                "turn.completed": ServerEvent::TurnCompleted { session_id: 42 },
-                "turn.cancelled": ServerEvent::TurnCancelled { session_id: 42 },
-            },
-        })
+        assert_eq!(super::zeus_api_contract_fixture(), expected);
     }
 
     #[test]

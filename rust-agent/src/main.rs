@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
         CliCommand::Interactive => run_agent(None).await,
         CliCommand::Prompt(message) => run_agent(Some(message)).await,
         CliCommand::Serve => run_server().await,
+        CliCommand::Contract => print_contract(),
         CliCommand::LoginDeviceCode => run_device_code_login().await,
         CliCommand::LoginStatus => run_login_status().await,
         CliCommand::Logout => run_logout().await,
@@ -114,6 +115,11 @@ async fn run_server() -> Result<()> {
     server::serve(service, server, workspace_root).await
 }
 
+fn print_contract() -> Result<()> {
+    println!("{}", server::zeus_api_contract_pretty()?);
+    Ok(())
+}
+
 async fn run_device_code_login() -> Result<()> {
     let auth = AuthManager::new_default()?;
     let login = auth.start_device_login().await?;
@@ -160,6 +166,7 @@ enum CliCommand {
     Interactive,
     Prompt(String),
     Serve,
+    Contract,
     LoginDeviceCode,
     LoginStatus,
     Logout,
@@ -175,6 +182,10 @@ fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
         "serve" => {
             anyhow::ensure!(args.len() == 1, "usage: rust-agent serve");
             Ok(CliCommand::Serve)
+        }
+        "contract" => {
+            anyhow::ensure!(args.len() == 1, "usage: rust-agent contract");
+            Ok(CliCommand::Contract)
         }
         "logout" => {
             anyhow::ensure!(args.len() == 1, "usage: rust-agent logout");
@@ -513,6 +524,10 @@ mod tests {
         assert_eq!(
             parse_cli_command(vec!["login".to_string(), "--status".to_string()]).unwrap(),
             CliCommand::LoginStatus
+        );
+        assert_eq!(
+            parse_cli_command(vec!["contract".to_string()]).unwrap(),
+            CliCommand::Contract
         );
         assert_eq!(
             parse_cli_command(vec!["logout".to_string()]).unwrap(),
