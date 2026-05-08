@@ -587,23 +587,14 @@ where
         tools: ToolRegistry,
         database: Option<SessionDatabase>,
     ) -> Result<SharedSession> {
-        let agent = match database {
-            Some(database) => AgentLoop::with_context_window_compaction_tools_and_database(
-                session_id,
-                context_window,
-                compaction,
-                config,
-                tools,
-                database,
-            )?,
-            None => AgentLoop::with_context_window_compaction_and_tools(
-                session_id,
-                context_window,
-                compaction,
-                config,
-                tools,
-            ),
-        };
+        let mut builder = AgentLoop::builder(session_id, config)
+            .context_window(context_window)
+            .compaction(compaction)
+            .tools(tools);
+        if let Some(database) = database {
+            builder = builder.database(database);
+        }
+        let agent = builder.build()?;
         Ok(Arc::new(SessionHandle::new(agent)))
     }
 

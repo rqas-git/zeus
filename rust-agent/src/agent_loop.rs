@@ -1057,15 +1057,80 @@ pub(crate) struct AgentLoop {
     database: Option<SessionDatabase>,
 }
 
+/// Chainable construction for an agent loop session.
+#[derive(Debug)]
+pub(crate) struct AgentLoopBuilder {
+    session_id: SessionId,
+    config: SessionConfig,
+    context_window: ContextWindowConfig,
+    compaction: CompactionConfig,
+    tools: ToolRegistry,
+    database: Option<SessionDatabase>,
+}
+
+impl AgentLoopBuilder {
+    /// Sets context-window bounds.
+    pub(crate) const fn context_window(mut self, context_window: ContextWindowConfig) -> Self {
+        self.context_window = context_window;
+        self
+    }
+
+    /// Sets semantic compaction behavior.
+    pub(crate) const fn compaction(mut self, compaction: CompactionConfig) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
+    /// Sets the tool registry used by model turns.
+    pub(crate) fn tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Enables durable SQLite-backed storage.
+    pub(crate) fn database(mut self, database: SessionDatabase) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    /// Builds the configured agent loop.
+    ///
+    /// # Errors
+    /// Returns an error when durable storage cannot load or initialize the session.
+    pub(crate) fn build(self) -> Result<AgentLoop> {
+        let mut builder = self;
+        match builder.database.take() {
+            Some(database) => AgentLoop::from_database(builder, database),
+            None => Ok(AgentLoop {
+                store: InMemorySessionStore::new(builder.session_id, builder.config),
+                context_window: builder.context_window,
+                compaction: builder.compaction,
+                tools: builder.tools,
+                database: None,
+            }),
+        }
+    }
+}
+
 impl AgentLoop {
+    /// Starts an agent-loop builder for one session.
+    pub(crate) fn builder(session_id: SessionId, config: SessionConfig) -> AgentLoopBuilder {
+        AgentLoopBuilder {
+            session_id,
+            config,
+            context_window: ContextWindowConfig::default(),
+            compaction: CompactionConfig::disabled(),
+            tools: ToolRegistry::default(),
+            database: None,
+        }
+    }
+
     /// Creates an agent loop for one session.
     #[cfg(test)]
     pub(crate) fn new(session_id: SessionId) -> Self {
-        Self::with_context_window(
-            session_id,
-            ContextWindowConfig::default(),
-            SessionConfig::new("test-model"),
-        )
+        Self::builder(session_id, SessionConfig::new("test-model"))
+            .build()
+            .expect("in-memory agent loop construction should not fail")
     }
 
     /// Creates an agent loop with explicit context-window bounds.
@@ -1075,12 +1140,10 @@ impl AgentLoop {
         context_window: ContextWindowConfig,
         config: SessionConfig,
     ) -> Self {
-        Self::with_context_window_and_compaction(
-            session_id,
-            context_window,
-            CompactionConfig::disabled(),
-            config,
-        )
+        Self::builder(session_id, config)
+            .context_window(context_window)
+            .build()
+            .expect("in-memory agent loop construction should not fail")
     }
 
     /// Creates an agent loop with explicit context and compaction bounds.
@@ -1091,13 +1154,11 @@ impl AgentLoop {
         compaction: CompactionConfig,
         config: SessionConfig,
     ) -> Self {
-        Self::with_context_window_compaction_and_tools(
-            session_id,
-            context_window,
-            compaction,
-            config,
-            ToolRegistry::default(),
-        )
+        Self::builder(session_id, config)
+            .context_window(context_window)
+            .compaction(compaction)
+            .build()
+            .expect("in-memory agent loop construction should not fail")
     }
 
     /// Creates an agent loop with explicit context bounds and tool registry.
@@ -1108,30 +1169,11 @@ impl AgentLoop {
         config: SessionConfig,
         tools: ToolRegistry,
     ) -> Self {
-        Self::with_context_window_compaction_and_tools(
-            session_id,
-            context_window,
-            CompactionConfig::disabled(),
-            config,
-            tools,
-        )
-    }
-
-    /// Creates an agent loop with explicit context, compaction, and tools.
-    pub(crate) fn with_context_window_compaction_and_tools(
-        session_id: SessionId,
-        context_window: ContextWindowConfig,
-        compaction: CompactionConfig,
-        config: SessionConfig,
-        tools: ToolRegistry,
-    ) -> Self {
-        Self {
-            store: InMemorySessionStore::new(session_id, config),
-            context_window,
-            compaction,
-            tools,
-            database: None,
-        }
+        Self::builder(session_id, config)
+            .context_window(context_window)
+            .tools(tools)
+            .build()
+            .expect("in-memory agent loop construction should not fail")
     }
 
     /// Creates an agent loop backed by durable SQLite session storage.
@@ -1146,28 +1188,22 @@ impl AgentLoop {
         tools: ToolRegistry,
         database: SessionDatabase,
     ) -> Result<Self> {
-        Self::with_context_window_compaction_tools_and_database(
-            session_id,
-            context_window,
-            CompactionConfig::disabled(),
-            config,
-            tools,
-            database,
-        )
+        Self::builder(session_id, config)
+            .context_window(context_window)
+            .tools(tools)
+            .database(database)
+            .build()
     }
 
-    /// Creates a compacting agent loop backed by durable SQLite session storage.
-    ///
-    /// # Errors
-    /// Returns an error when the session cannot be loaded or initialized.
-    pub(crate) fn with_context_window_compaction_tools_and_database(
-        session_id: SessionId,
-        context_window: ContextWindowConfig,
-        compaction: CompactionConfig,
-        config: SessionConfig,
-        tools: ToolRegistry,
-        database: SessionDatabase,
-    ) -> Result<Self> {
+    fn from_database(builder: AgentLoopBuilder, database: SessionDatabase) -> Result<Self> {
+        let AgentLoopBuilder {
+            session_id,
+            config,
+            context_window,
+            compaction,
+            tools,
+            database: _,
+        } = builder;
         let mut store = match database.load_session(session_id)? {
             Some(stored) => InMemorySessionStore::from_stored(session_id, stored),
             None => {

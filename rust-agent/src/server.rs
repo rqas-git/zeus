@@ -137,15 +137,11 @@ where
         .context("failed to read HTTP compatibility listener address")?;
     let auth = ServerAuth::from_config(config.auth_token())?;
     emit_server_ready(http_addr, h3_addr, &auth, &workspace_root)?;
-    let state = ServerState::with_limits(
-        service,
-        config.event_queue_capacity(),
-        h3_addr,
-        auth,
-        config.max_sessions(),
-        config.max_event_channels(),
-        workspace_root,
-    );
+    let state_config =
+        ServerStateConfig::new(config.event_queue_capacity(), h3_addr, auth, workspace_root)
+            .max_sessions(config.max_sessions())
+            .max_event_channels(config.max_event_channels());
+    let state = ServerState::with_config(service, state_config);
     let app = router(state);
     let parent_pid = config.parent_pid();
     let http_app = app.clone();
@@ -455,6 +451,45 @@ struct ServerState<M> {
     turn_event_queue_capacity: usize,
 }
 
+struct ServerStateConfig {
+    event_queue_capacity: usize,
+    h3_addr: SocketAddr,
+    auth: ServerAuth,
+    max_sessions: usize,
+    max_event_channels: usize,
+    workspace_root: PathBuf,
+    turn_event_queue_capacity: usize,
+}
+
+impl ServerStateConfig {
+    fn new(
+        event_queue_capacity: usize,
+        h3_addr: SocketAddr,
+        auth: ServerAuth,
+        workspace_root: PathBuf,
+    ) -> Self {
+        Self {
+            event_queue_capacity,
+            h3_addr,
+            auth,
+            max_sessions: usize::MAX,
+            max_event_channels: usize::MAX,
+            workspace_root,
+            turn_event_queue_capacity: DIRECT_TURN_EVENT_QUEUE_CAPACITY,
+        }
+    }
+
+    const fn max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = max_sessions;
+        self
+    }
+
+    const fn max_event_channels(mut self, max_event_channels: usize) -> Self {
+        self.max_event_channels = max_event_channels;
+        self
+    }
+}
+
 impl<M> Clone for ServerState<M> {
     fn clone(&self) -> Self {
         Self {
@@ -476,36 +511,29 @@ impl<M> ServerState<M> {
         event_queue_capacity: usize,
         h3_addr: SocketAddr,
     ) -> Self {
-        Self::with_limits(
+        Self::with_config(
             service,
-            event_queue_capacity,
-            h3_addr,
-            ServerAuth::for_test(),
-            usize::MAX,
-            usize::MAX,
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ServerStateConfig::new(
+                event_queue_capacity,
+                h3_addr,
+                ServerAuth::for_test(),
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            ),
         )
     }
 
-    fn with_limits(
-        service: Arc<AgentService<M>>,
-        event_queue_capacity: usize,
-        h3_addr: SocketAddr,
-        auth: ServerAuth,
-        max_sessions: usize,
-        max_event_channels: usize,
-        workspace_root: PathBuf,
-    ) -> Self {
-        let alt_svc = HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", h3_addr.port()))
-            .expect("generated Alt-Svc header must be valid");
+    fn with_config(service: Arc<AgentService<M>>, config: ServerStateConfig) -> Self {
+        let alt_svc =
+            HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", config.h3_addr.port()))
+                .expect("generated Alt-Svc header must be valid");
         Self {
             service,
-            events: EventBus::new(event_queue_capacity, max_event_channels),
-            sessions: SessionRegistry::new(max_sessions),
-            auth,
+            events: EventBus::new(config.event_queue_capacity, config.max_event_channels),
+            sessions: SessionRegistry::new(config.max_sessions),
+            auth: config.auth,
             alt_svc,
-            workspace_root: Arc::new(workspace_root),
-            turn_event_queue_capacity: DIRECT_TURN_EVENT_QUEUE_CAPACITY,
+            workspace_root: Arc::new(config.workspace_root),
+            turn_event_queue_capacity: config.turn_event_queue_capacity,
         }
     }
 
@@ -2520,14 +2548,14 @@ mod tests {
             ModelConfig::new("test-default", ["test-default"]).unwrap(),
             tools,
         ));
-        let state = ServerState::with_limits(
+        let state = ServerState::with_config(
             service,
-            16,
-            "127.0.0.1:4433".parse().unwrap(),
-            ServerAuth::for_test(),
-            usize::MAX,
-            usize::MAX,
-            canonical_root.clone(),
+            ServerStateConfig::new(
+                16,
+                "127.0.0.1:4433".parse().unwrap(),
+                ServerAuth::for_test(),
+                canonical_root.clone(),
+            ),
         );
         let app = router(state);
 
@@ -2731,14 +2759,15 @@ mod tests {
             )
             .with_session_limit(1),
         );
-        let state = ServerState::with_limits(
+        let state = ServerState::with_config(
             service,
-            16,
-            "127.0.0.1:4433".parse().unwrap(),
-            ServerAuth::for_test(),
-            1,
-            usize::MAX,
-            PathBuf::from("/workspace"),
+            ServerStateConfig::new(
+                16,
+                "127.0.0.1:4433".parse().unwrap(),
+                ServerAuth::for_test(),
+                PathBuf::from("/workspace"),
+            )
+            .max_sessions(1),
         );
         let app = router(state);
 
@@ -3051,14 +3080,15 @@ mod tests {
             )
             .with_session_limit(1),
         );
-        let state = ServerState::with_limits(
+        let state = ServerState::with_config(
             service,
-            16,
-            "127.0.0.1:4433".parse().unwrap(),
-            ServerAuth::for_test(),
-            1,
-            usize::MAX,
-            PathBuf::from("/workspace"),
+            ServerStateConfig::new(
+                16,
+                "127.0.0.1:4433".parse().unwrap(),
+                ServerAuth::for_test(),
+                PathBuf::from("/workspace"),
+            )
+            .max_sessions(1),
         );
         let app = router(state);
         let created = app
@@ -3125,14 +3155,15 @@ mod tests {
             ContextWindowConfig::default(),
             ModelConfig::new("test-default", ["test-default"]).unwrap(),
         ));
-        let state = ServerState::with_limits(
+        let state = ServerState::with_config(
             service,
-            16,
-            "127.0.0.1:4433".parse().unwrap(),
-            ServerAuth::for_test(),
-            usize::MAX,
-            1,
-            PathBuf::from("/workspace"),
+            ServerStateConfig::new(
+                16,
+                "127.0.0.1:4433".parse().unwrap(),
+                ServerAuth::for_test(),
+                PathBuf::from("/workspace"),
+            )
+            .max_event_channels(1),
         );
         state.register_session_for_test(SessionId::new(1));
         state.register_session_for_test(SessionId::new(2));
