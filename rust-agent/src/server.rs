@@ -1676,6 +1676,16 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                     cache_status: "reused_prefix",
                 },
             },
+            "turn.token_usage": ServerEvent::TurnTokenUsage {
+                session_id: 42,
+                usage: TokenUsageEvent {
+                    input_tokens: Some(300),
+                    cached_input_tokens: Some(200),
+                    output_tokens: Some(30),
+                    reasoning_output_tokens: Some(6),
+                    total_tokens: Some(330),
+                },
+            },
             "tool_call.started": ServerEvent::ToolCallStarted {
                 session_id: 42,
                 tool_call_id: "call_read".to_string(),
@@ -1743,6 +1753,10 @@ enum ServerEvent {
         session_id: u64,
         cache: CacheHealthEvent,
     },
+    TurnTokenUsage {
+        session_id: u64,
+        usage: TokenUsageEvent,
+    },
     CompactionStarted {
         session_id: u64,
         reason: &'static str,
@@ -1807,6 +1821,10 @@ impl ServerEvent {
                 session_id: session_id.get(),
                 cache: CacheHealthEvent::from_cache_health(cache_health),
             },
+            AgentEvent::TurnTokenUsage { session_id, usage } => Self::TurnTokenUsage {
+                session_id: session_id.get(),
+                usage: TokenUsageEvent::from_usage(usage),
+            },
             AgentEvent::CompactionStarted { session_id, reason } => Self::CompactionStarted {
                 session_id: session_id.get(),
                 reason: reason.as_str(),
@@ -1864,6 +1882,7 @@ impl ServerEvent {
             | Self::TextDelta { session_id, .. }
             | Self::MessageCompleted { session_id, .. }
             | Self::CacheHealth { session_id, .. }
+            | Self::TurnTokenUsage { session_id, .. }
             | Self::CompactionStarted { session_id, .. }
             | Self::CompactionCompleted { session_id, .. }
             | Self::ToolCallStarted { session_id, .. }
@@ -1883,6 +1902,7 @@ impl ServerEvent {
             Self::TextDelta { .. } => "message.text_delta",
             Self::MessageCompleted { .. } => "message.completed",
             Self::CacheHealth { .. } => "cache.health",
+            Self::TurnTokenUsage { .. } => "turn.token_usage",
             Self::CompactionStarted { .. } => "compaction.started",
             Self::CompactionCompleted { .. } => "compaction.completed",
             Self::ToolCallStarted { .. } => "tool_call.started",

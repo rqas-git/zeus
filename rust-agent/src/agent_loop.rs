@@ -352,6 +352,10 @@ pub(crate) enum AgentEvent<'a> {
         session_id: SessionId,
         cache_health: &'a CacheHealth,
     },
+    TurnTokenUsage {
+        session_id: SessionId,
+        usage: TokenUsage,
+    },
     CompactionStarted {
         session_id: SessionId,
         reason: CompactionReason,
@@ -433,6 +437,33 @@ impl TokenUsage {
             return None;
         }
         Some(self.cached_input_tokens.unwrap_or(0) as f64 / input_tokens as f64)
+    }
+
+    /// Returns whether any provider counter was reported.
+    pub(crate) fn is_reported(self) -> bool {
+        self.input_tokens.is_some()
+            || self.cached_input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.reasoning_output_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
+
+    /// Adds reported counters from another usage sample.
+    pub(crate) fn add_reported(&mut self, other: Self) {
+        add_optional_token_count(&mut self.input_tokens, other.input_tokens);
+        add_optional_token_count(&mut self.cached_input_tokens, other.cached_input_tokens);
+        add_optional_token_count(&mut self.output_tokens, other.output_tokens);
+        add_optional_token_count(
+            &mut self.reasoning_output_tokens,
+            other.reasoning_output_tokens,
+        );
+        add_optional_token_count(&mut self.total_tokens, other.total_tokens);
+    }
+}
+
+fn add_optional_token_count(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0).saturating_add(value));
     }
 }
 
@@ -1476,10 +1507,18 @@ impl AgentLoop {
     ) -> Result<()> {
         let mut recovered_overflow = false;
         let turn_state = ModelTurnState::new();
+        let mut turn_usage = TokenUsage::default();
         loop {
             cancellation.ensure_not_cancelled()?;
             let tool_calls = match self
-                .run_once(model, cancellation, reasoning_effort, &turn_state, emit)
+                .run_once(
+                    model,
+                    cancellation,
+                    reasoning_effort,
+                    &turn_state,
+                    &mut turn_usage,
+                    emit,
+                )
                 .await
             {
                 Ok(tool_calls) => tool_calls,
@@ -1508,6 +1547,12 @@ impl AgentLoop {
                     .await?;
                 self.store
                     .prune_history_with_compaction(self.context_window, self.compaction);
+                if turn_usage.is_reported() {
+                    emit(AgentEvent::TurnTokenUsage {
+                        session_id: self.session_id(),
+                        usage: turn_usage,
+                    })?;
+                }
                 return Ok(());
             }
 
@@ -1524,6 +1569,7 @@ impl AgentLoop {
         cancellation: &TurnCancellation,
         reasoning_effort: Option<&str>,
         turn_state: &ModelTurnState,
+        turn_usage: &mut TokenUsage,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
         let history = self
@@ -1547,6 +1593,9 @@ impl AgentLoop {
             ) => response?,
         };
         if let Some(cache_health) = model_response.cache_health.as_mut() {
+            if let Some(usage) = cache_health.usage {
+                turn_usage.add_reported(usage);
+            }
             cache_health.cache_status = self.store.cache_status(cache_health);
             emit(AgentEvent::CacheHealth {
                 session_id,
@@ -2554,11 +2603,13 @@ mod tests {
                 "status:Running",
                 "cache:first_request",
                 "message:assistant:first answer",
+                "turn-usage:100:80:10",
                 "status:Idle",
                 "message:user:second",
                 "status:Running",
                 "cache:reused_prefix",
                 "message:assistant:second answer",
+                "turn-usage:100:80:10",
                 "status:Idle",
             ]
         );
@@ -2592,6 +2643,30 @@ mod tests {
             store.cache_status(&cache_health),
             CacheStatus::InputPrefixChanged
         );
+    }
+
+    #[tokio::test]
+    async fn aggregates_turn_usage_across_tool_followups() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let streamer = UsageToolStreamer {
+            turn: AtomicUsize::new(0),
+        };
+        let mut events = Vec::new();
+
+        agent
+            .submit_user_message("read the manifest", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let turn_usage_events = events
+            .iter()
+            .filter(|event| event.starts_with("turn-usage:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(turn_usage_events, ["turn-usage:300:170:15"]);
     }
 
     #[tokio::test]
@@ -3182,6 +3257,14 @@ mod tests {
             AgentEvent::CacheHealth { cache_health, .. } => {
                 format!("cache:{}", cache_health.cache_status.as_str())
             }
+            AgentEvent::TurnTokenUsage { usage, .. } => {
+                format!(
+                    "turn-usage:{}:{}:{}",
+                    usage.input_tokens.unwrap_or(0),
+                    usage.cached_input_tokens.unwrap_or(0),
+                    usage.output_tokens.unwrap_or(0)
+                )
+            }
             AgentEvent::CompactionStarted { reason, .. } => {
                 format!("compaction-start:{}", reason.as_str())
             }
@@ -3260,6 +3343,29 @@ mod tests {
         turn: AtomicUsize,
     }
 
+    fn test_cache_health(
+        model: &str,
+        turn: usize,
+        request_input_hash: u64,
+        request_input_prefix_hashes: Vec<u64>,
+        message_count: usize,
+        usage: TokenUsage,
+    ) -> CacheHealth {
+        CacheHealth {
+            model: model.to_string(),
+            prompt_cache_key: format!("cache-key-{model}"),
+            stable_prefix_hash: 0x1234,
+            stable_prefix_bytes: 24,
+            request_input_hash,
+            request_input_prefix_hashes,
+            message_count,
+            input_bytes: 5,
+            response_id: Some(format!("resp_{turn}")),
+            usage: Some(usage),
+            cache_status: CacheStatus::FirstRequest,
+        }
+    }
+
     impl ModelStreamer for CacheStreamer {
         async fn stream_conversation<'a>(
             &'a self,
@@ -3279,26 +3385,65 @@ mod tests {
             Ok(ModelResponse::with_cache_health(
                 text,
                 [],
-                CacheHealth {
-                    model: model.to_string(),
-                    prompt_cache_key: format!("cache-key-{model}"),
-                    stable_prefix_hash: 0x1234,
-                    stable_prefix_bytes: 24,
-                    request_input_hash: 0x5678,
-                    request_input_prefix_hashes: vec![0, 0x5678],
-                    message_count: 1,
-                    input_bytes: 5,
-                    response_id: Some(format!("resp_{turn}")),
-                    usage: Some(TokenUsage::new(
-                        Some(100),
-                        Some(80),
-                        Some(10),
-                        Some(2),
-                        Some(110),
-                    )),
-                    cache_status: CacheStatus::FirstRequest,
-                },
+                test_cache_health(
+                    model,
+                    turn,
+                    0x5678,
+                    vec![0, 0x5678],
+                    1,
+                    TokenUsage::new(Some(100), Some(80), Some(10), Some(2), Some(110)),
+                ),
             ))
+        }
+    }
+
+    struct UsageToolStreamer {
+        turn: AtomicUsize,
+    }
+
+    impl ModelStreamer for UsageToolStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            _messages: &'a [ConversationMessage<'a>],
+            _tools: &'a [ToolSpec],
+            _parallel_tool_calls: bool,
+            _session_id: SessionId,
+            model: &'a str,
+            _on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            match turn {
+                0 => Ok(ModelResponse::with_cache_health(
+                    "",
+                    [ModelToolCall {
+                        item_id: Some("fc_read".to_string()),
+                        call_id: "call_read".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    }],
+                    test_cache_health(
+                        model,
+                        turn,
+                        0x10,
+                        vec![0, 0x10],
+                        1,
+                        TokenUsage::new(Some(100), Some(50), Some(5), Some(1), Some(105)),
+                    ),
+                )),
+                1 => Ok(ModelResponse::with_cache_health(
+                    "done",
+                    [],
+                    test_cache_health(
+                        model,
+                        turn,
+                        0x20,
+                        vec![0, 0x10, 0x18, 0x20],
+                        3,
+                        TokenUsage::new(Some(200), Some(120), Some(10), Some(2), Some(210)),
+                    ),
+                )),
+                _ => unreachable!("unexpected turn"),
+            }
         }
     }
 

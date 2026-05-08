@@ -74,7 +74,8 @@ specific backend provider.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained input hash, retained-message shape, response id, and provider token
   counters, including cached input and reasoning output tokens when the backend
-  reports them.
+  reports them. The loop aggregates those counters into one turn-level usage
+  event for clients that need per-turn totals.
 
 ## Benchmarks
 

@@ -110,11 +110,11 @@ transport, and session state separate.
 
 ## Events
 
-`AgentEvent` reports status changes, streamed assistant text, cache-health
-telemetry, compaction start/completion, tool-call start/completion, completed
-messages, and errors. The terminal harness renders a subset to stdout, while
-the server converts events into named SSE frames over HTTP compatibility and
-HTTP/3 transports.
+`AgentEvent` reports status changes, streamed assistant text, per-response
+cache-health telemetry, aggregated turn token usage, compaction start/completion,
+tool-call start/completion, completed messages, and errors. The terminal harness
+renders a subset to stdout, while the server converts events into named SSE
+frames over HTTP compatibility and HTTP/3 transports.
 
 ## Error Handling
 

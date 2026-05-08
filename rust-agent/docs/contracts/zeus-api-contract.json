@@ -98,6 +98,17 @@
     "turn.completed": {
       "session_id": 42,
       "type": "turn_completed"
+    },
+    "turn.token_usage": {
+      "session_id": 42,
+      "type": "turn_token_usage",
+      "usage": {
+        "cached_input_tokens": 200,
+        "input_tokens": 300,
+        "output_tokens": 30,
+        "reasoning_output_tokens": 6,
+        "total_tokens": 330
+      }
     }
   },
   "requests": {
@@ -157,7 +168,7 @@
         "compaction",
         "events"
       ],
-      "schema_hash": "789989c1a07f1286",
+      "schema_hash": "053e6f3a9cc3bf2d",
       "transports": [
         "http/1.1",
         "http/2",

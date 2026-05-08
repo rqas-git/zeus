@@ -117,6 +117,7 @@ Important event names include:
 - `message.text_delta`
 - `message.completed`
 - `cache.health`
+- `turn.token_usage`
 - `compaction.started`
 - `compaction.completed`
 - `tool_call.started`
@@ -130,6 +131,8 @@ Important event names include:
 `cache.health` includes prompt-cache status, stable/request input hashes, and
 provider token counters: input, cached input, output, reasoning output, and total
 tokens when reported.
+`turn.token_usage` aggregates the same provider counters across all model
+responses in the completed turn.
 `tool_call.started` includes the tool call id, tool name, and raw JSON `args` so
 clients can render the requested tool invocation before the tool result arrives.
 The short `args` field is intentional and follows pi-mono's tool execution start
