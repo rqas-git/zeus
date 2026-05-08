@@ -19,8 +19,8 @@ enum RustAgentLocator {
 
         let current = launchDirectoryURL()
         var candidates = [
-            current.deletingLastPathComponent().appendingPathComponent("rust-agent"),
-            current.appendingPathComponent("rust-agent")
+            current.appendingPathComponent("rust-agent"),
+            current.deletingLastPathComponent().appendingPathComponent("rust-agent")
         ]
 
         if let executable = Bundle.main.executableURL?.standardizedFileURL {
