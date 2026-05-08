@@ -19,8 +19,10 @@ transport, and session state separate.
    telemetry, stores assistant text, stores any completed tool-call items,
    executes those tools, stores tool outputs, and repeats until the model
    returns no more tool calls.
-6. Tool calls are bounded by a fixed per-turn round limit so a malformed or
-   looping model response cannot run forever.
+6. The loop continues through model follow-up requests while the model returns
+   tool calls. Runaway turns are controlled by cancellation, bounded tool
+   arguments and outputs, command timeouts, and context-window compaction rather
+   than a fixed tool-round limit.
 7. A shared cancellation signal can stop an active model stream or command-backed
    tool before the session returns to `Idle`.
 8. Interactive mode reuses the same service and session, and the default
