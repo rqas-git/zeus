@@ -4,12 +4,12 @@ Build a local installable DMG that embeds the `rust-agent` release binary inside
 `Zeus.app`:
 
 ```bash
-cd /Users/ajc/zeus-swift
-scripts/package-release.sh
+cd /Users/ajc/zeus
+zeus-swift/scripts/package-release.sh
 ```
 
-The default output is `dist/Zeus.dmg`. By default the app is signed ad-hoc for
-local testing.
+The default output is `zeus-swift/dist/Zeus.dmg`. By default the app is signed
+ad-hoc for local testing.
 
 Useful environment variables:
 

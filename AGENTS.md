@@ -9,8 +9,9 @@ This repository is a two-application workspace:
   validates the server readiness/capabilities contract, streams SSE events, and
   renders the terminal-style chat UI.
 
-There is no top-level build system. Run commands from the relevant subproject.
-Some inherited docs still show the old standalone checkout paths such as
+The repository root has a SwiftPM manifest for running the Zeus frontend from
+the combined checkout. Backend commands still run from `rust-agent/`. Some
+inherited docs still show the old standalone checkout paths such as
 `/Users/ajc/rust-agent` or `/Users/ajc/zeus-swift`; in this combined checkout,
 translate those to `rust-agent/` and `zeus-swift/` under the repository root.
 
@@ -71,8 +72,8 @@ change.
 
 ## Frontend Structure
 
-`zeus-swift/Package.swift` defines a Swift 6.2 package with Swift language mode
-5 targets:
+`Package.swift` at the repository root and `zeus-swift/Package.swift` define
+Swift 6.2 packages with Swift language mode 5 targets:
 
 - `ZeusCore`: shared, testable model and parsing code.
 - `Zeus`: the macOS SwiftUI executable.
@@ -196,7 +197,7 @@ cargo test --release -- --ignored --nocapture
 Frontend:
 
 ```bash
-cd zeus-swift
+cd /Users/ajc/zeus
 swift build
 swift test
 swift run zeus-checks
@@ -206,8 +207,8 @@ swift run zeus
 Package a local DMG that embeds a release `rust-agent` binary:
 
 ```bash
-cd zeus-swift
-RUST_AGENT_ROOT=../rust-agent scripts/package-release.sh
+cd /Users/ajc/zeus
+zeus-swift/scripts/package-release.sh
 ```
 
 For frontend manual runs against a nonstandard backend checkout, set
@@ -231,10 +232,11 @@ buffers, and preserve per-session ordering. In Swift, keep UI state mutations on
 `@MainActor`, keep protocol seams in `AgentDependencies.swift`, and keep
 testable pure logic in `ZeusCore`.
 
-Do not commit generated build artifacts such as `rust-agent/target/`,
-`zeus-swift/.build/`, or `zeus-swift/dist/`. The contract JSON is a checked-in
-artifact and should be updated when its Rust generator changes.
+Do not commit generated build artifacts such as `.build/`,
+`rust-agent/target/`, `zeus-swift/.build/`, or `zeus-swift/dist/`. The contract
+JSON is a checked-in artifact and should be updated when its Rust generator
+changes.
 
 Before finishing a change, run the narrowest relevant checks. For contract or
 integration changes, run both `cargo test` in `rust-agent/` and `swift test` or
-`swift run zeus-checks` in `zeus-swift/`.
+`swift run zeus-checks` from the repository root.
