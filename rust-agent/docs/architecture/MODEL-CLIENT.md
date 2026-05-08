@@ -61,7 +61,7 @@ specific backend provider.
   full-response byte caps. Like pi-mono's provider parsers, it assumes the
   configured backend is trusted and relies on context/history limits after
   parsing rather than truncating provider streams mid-response.
-- Prompt-cache keys are stable per configured namespace, session, and model.
+- Prompt-cache keys are stable per configured namespace and session.
   The same key is sent in the Responses body and session-affinity headers.
   Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
   not look like normal cache reuse.

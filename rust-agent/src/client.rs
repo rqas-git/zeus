@@ -248,7 +248,7 @@ impl ChatGptClient {
     ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
-        let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
+        let prompt_cache_key = self.config.prompt_cache_key(session_id.get());
         let stable_prefix = stable_prefix_stats(instructions, tools);
         let input_bytes = conversation_input_bytes(messages);
         let body = ResponsesRequest {
@@ -1233,15 +1233,13 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
         let requests = model_server.requests();
         assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.contains("session_id: reasoning-test-7"));
         assert!(requests[0]
             .headers
-            .contains("session_id: reasoning-test-7-gpt-test"));
-        assert!(requests[0]
-            .headers
-            .contains("x-client-request-id: reasoning-test-7-gpt-test"));
+            .contains("x-client-request-id: reasoning-test-7"));
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["reasoning"]["effort"], "xhigh");
-        assert_eq!(body["prompt_cache_key"], "reasoning-test-7-gpt-test");
+        assert_eq!(body["prompt_cache_key"], "reasoning-test-7");
         assert_eq!(
             response.cache_health.unwrap().usage,
             Some(TokenUsage::new(
@@ -1304,7 +1302,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
             .map(BenchMessage::as_conversation_message)
             .collect::<Vec<_>>();
         let tools = ToolRegistry::default();
-        let prompt_cache_key = "bench-serialization-7-gpt-bench";
+        let prompt_cache_key = "bench-serialization-7";
         let request = ResponsesRequest {
             model: "gpt-bench",
             instructions: "You are a concise assistant for benchmark serialization.",

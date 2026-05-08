@@ -157,8 +157,8 @@ impl ClientConfig {
     }
 
     /// Builds the stable per-session prompt-cache routing key.
-    pub(crate) fn prompt_cache_key(&self, session_id: u64, model: &str) -> String {
-        format!("{}-{session_id}-{model}", self.prompt_cache_namespace)
+    pub(crate) fn prompt_cache_key(&self, session_id: u64) -> String {
+        format!("{}-{session_id}", self.prompt_cache_namespace)
     }
 }
 
@@ -1173,11 +1173,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_key_is_stable_per_session_and_model() {
-        assert_eq!(
-            ClientConfig::default().prompt_cache_key(7, "gpt-test"),
-            "rust-agent-7-gpt-test"
-        );
+    fn prompt_cache_key_is_stable_per_session() {
+        assert_eq!(ClientConfig::default().prompt_cache_key(7), "rust-agent-7");
     }
 
     #[test]

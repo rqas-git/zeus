@@ -83,7 +83,7 @@ telemetry, and tool configuration.
   `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a trusted deployment.
 - Telemetry output is opt-in so normal assistant text stays clean.
 - Prompt-cache namespace lets backend deployments separate cache keys. The
-  effective key is stable per namespace, session, and model, and is also sent as
+  effective key is stable per namespace and session, and is also sent as
   Codex backend session-affinity metadata for cache routing.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
   to expose the `apply_patch` file editing tool.
