@@ -757,6 +757,8 @@ struct ResponseUsage {
     cached_input_tokens: Option<u64>,
     #[serde(default, alias = "prompt_tokens_details")]
     input_tokens_details: Option<InputTokenDetails>,
+    #[serde(default, alias = "completion_tokens_details")]
+    output_tokens_details: Option<OutputTokenDetails>,
 }
 
 impl ResponseUsage {
@@ -765,10 +767,14 @@ impl ResponseUsage {
             self.input_tokens_details
                 .and_then(|details| details.cached_tokens)
         });
+        let reasoning_output_tokens = self
+            .output_tokens_details
+            .and_then(|details| details.reasoning_tokens);
         TokenUsage::new(
             self.input_tokens,
             cached_input_tokens,
             self.output_tokens,
+            reasoning_output_tokens,
             self.total_tokens,
         )
     }
@@ -778,6 +784,12 @@ impl ResponseUsage {
 struct InputTokenDetails {
     #[serde(default, alias = "cached_input_tokens")]
     cached_tokens: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct OutputTokenDetails {
+    #[serde(default, alias = "reasoning_output_tokens")]
+    reasoning_tokens: Option<u64>,
 }
 
 fn assistant_text_from_item(item: Option<&RawValue>) -> String {
@@ -1088,7 +1100,7 @@ data: {"type":"response.failed","response":{"error":{"message":"nope"}}}
 data: {"type":"response.output_text.delta","delta":"hello"}
 
 event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":64},"output_tokens":7,"total_tokens":107}}}
+data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":64},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":3},"total_tokens":107}}}
 
 "#;
 
@@ -1099,7 +1111,13 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         assert_eq!(completion.response_id.as_deref(), Some("resp_1"));
         assert_eq!(
             completion.usage,
-            Some(TokenUsage::new(Some(100), Some(64), Some(7), Some(107)))
+            Some(TokenUsage::new(
+                Some(100),
+                Some(64),
+                Some(7),
+                Some(3),
+                Some(107)
+            ))
         );
     }
 

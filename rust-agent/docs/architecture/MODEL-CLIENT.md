@@ -62,7 +62,8 @@ specific backend provider.
   Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
   not look like normal cache reuse.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
-  retained-message shape, response id, and provider token counters.
+  retained-message shape, response id, and provider token counters, including
+  cached input and reasoning output tokens when the backend reports them.
 
 ## Benchmarks
 

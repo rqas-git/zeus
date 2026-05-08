@@ -14,6 +14,7 @@
           "cached_input_tokens": 80,
           "input_tokens": 100,
           "output_tokens": 12,
+          "reasoning_output_tokens": 4,
           "total_tokens": 112
         }
       },
@@ -155,7 +156,7 @@
         "compaction",
         "events"
       ],
-      "schema_hash": "1187345528e3a760",
+      "schema_hash": "eb65d28dc5f3d76f",
       "transports": [
         "http/1.1",
         "http/2",

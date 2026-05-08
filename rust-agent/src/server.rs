@@ -1577,6 +1577,7 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                         input_tokens: Some(100),
                         cached_input_tokens: Some(80),
                         output_tokens: Some(12),
+                        reasoning_output_tokens: Some(4),
                         total_tokens: Some(112),
                     }),
                     cache_status: "reused_prefix",
@@ -1834,6 +1835,7 @@ struct TokenUsageEvent {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 }
 
@@ -1843,6 +1845,7 @@ impl TokenUsageEvent {
             input_tokens: usage.input_tokens,
             cached_input_tokens: usage.cached_input_tokens,
             output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
             total_tokens: usage.total_tokens,
         }
     }

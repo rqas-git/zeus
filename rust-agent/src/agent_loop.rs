@@ -405,6 +405,7 @@ pub(crate) struct TokenUsage {
     pub(crate) input_tokens: Option<u64>,
     pub(crate) cached_input_tokens: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
+    pub(crate) reasoning_output_tokens: Option<u64>,
     pub(crate) total_tokens: Option<u64>,
 }
 
@@ -414,12 +415,14 @@ impl TokenUsage {
         input_tokens: Option<u64>,
         cached_input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        reasoning_output_tokens: Option<u64>,
         total_tokens: Option<u64>,
     ) -> Self {
         Self {
             input_tokens,
             cached_input_tokens,
             output_tokens,
+            reasoning_output_tokens,
             total_tokens,
         }
     }
@@ -3156,7 +3159,13 @@ mod tests {
                     message_count: 1,
                     input_bytes: 5,
                     response_id: Some(format!("resp_{turn}")),
-                    usage: Some(TokenUsage::new(Some(100), Some(80), Some(10), Some(110))),
+                    usage: Some(TokenUsage::new(
+                        Some(100),
+                        Some(80),
+                        Some(10),
+                        Some(2),
+                        Some(110),
+                    )),
                     cache_status: CacheStatus::FirstRequest,
                 },
             ))

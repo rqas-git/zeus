@@ -332,11 +332,12 @@ fn format_token_usage(usage: TokenUsage) -> String {
         .map(|ratio| format!("{:.1}%", ratio * 100.0))
         .unwrap_or_else(|| "n/a".to_string());
     format!(
-        "input_tokens={} cached_input_tokens={} cache_hit={} output_tokens={} total_tokens={}",
+        "input_tokens={} cached_input_tokens={} cache_hit={} output_tokens={} reasoning_output_tokens={} total_tokens={}",
         format_optional_u64(usage.input_tokens),
         format_optional_u64(usage.cached_input_tokens),
         cache_hit,
         format_optional_u64(usage.output_tokens),
+        format_optional_u64(usage.reasoning_output_tokens),
         format_optional_u64(usage.total_tokens),
     )
 }
