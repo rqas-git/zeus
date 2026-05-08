@@ -3568,6 +3568,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_terminal_commands_through_session_route() {
+        let _shell_guard = crate::tools::SHELL_TEST_LOCK.lock().await;
         let service = Arc::new(AgentService::new(
             StaticStreamer::new("ok", []),
             ContextWindowConfig::default(),

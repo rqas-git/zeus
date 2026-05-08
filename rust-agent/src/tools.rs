@@ -58,6 +58,10 @@ const SEARCH_TEXT_TOOL: &str = "search_text";
 const APPLY_PATCH_TOOL: &str = "apply_patch";
 const EXEC_COMMAND_TOOL: &str = "exec_command";
 pub(crate) const EXEC_COMMAND_TOOL_NAME: &str = EXEC_COMMAND_TOOL;
+// Shell cancellation tests send process-group signals; serialize them to avoid
+// cross-test interference under Cargo's default parallel test runner.
+#[cfg(test)]
+pub(crate) static SHELL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Read caps keep tool output inside the model context and prevent accidental
 // large-file loads from dominating terminal latency.
 const MAX_FILE_BYTES: usize = 64 * 1024;
@@ -3210,6 +3214,7 @@ mod tests {
 
     #[tokio::test]
     async fn executes_shell_commands_and_allows_git() {
+        let _shell_guard = SHELL_TEST_LOCK.lock().await;
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-exec-{}-{}",
             std::process::id(),
@@ -3334,6 +3339,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancels_running_shell_command() {
+        let _shell_guard = SHELL_TEST_LOCK.lock().await;
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-cancel-{}-{}",
             std::process::id(),
@@ -3873,6 +3879,7 @@ mod tests {
         const COMMAND_BYTES: usize = 8 * 1024 * 1024;
         const SAMPLES: usize = 10;
 
+        let _shell_guard = SHELL_TEST_LOCK.lock().await;
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-tools-command-bench-{}-{}",
             std::process::id(),

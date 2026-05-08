@@ -2820,6 +2820,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_command_is_recorded_in_context() {
+        let _shell_guard = crate::tools::SHELL_TEST_LOCK.lock().await;
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-loop-terminal-{}-{}",
             std::process::id(),
@@ -2848,7 +2849,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
+        assert!(result.success, "{}", result.output);
         assert!(result.output.contains("terminal-ok"));
         assert_eq!(agent.tool_policy(), ToolPolicy::WorkspaceExec);
         assert_eq!(
