@@ -3377,6 +3377,43 @@ mod tests {
                     .uri("/sessions/7/terminal:run")
                     .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
                     .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"command":"printf denied"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            r#"{"error":"terminal commands require workspace-exec tool policy"}"#
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/sessions/7/permissions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"tool_policy":"workspace-exec"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions/7/terminal:run")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"command":"printf server-terminal"}"#))
                     .unwrap(),
             )
@@ -3402,7 +3439,7 @@ mod tests {
         let body = to_bytes(permissions.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
-            r#"{"tool_policy":"read-only"}"#
+            r#"{"tool_policy":"workspace-exec"}"#
         );
     }
 
