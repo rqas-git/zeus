@@ -57,10 +57,10 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         context,
         models,
         output,
-        server: _,
         storage,
         telemetry,
         tools: tool_config,
+        ..
     } = AppConfig::from_env()?;
     let session_id = SessionId::new(1);
     let tools = ToolRegistry::for_root_with_policy_and_search_concurrency(
@@ -98,11 +98,10 @@ async fn run_server() -> Result<()> {
         compaction,
         context,
         models,
-        output: _,
         server,
         storage,
-        telemetry: _,
         tools: tool_config,
+        ..
     } = AppConfig::from_env()?;
     let tools = ToolRegistry::for_root_with_policy_and_search_concurrency(
         tool_config.workspace_root(),

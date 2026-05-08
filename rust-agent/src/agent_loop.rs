@@ -1202,7 +1202,7 @@ impl AgentLoop {
             context_window,
             compaction,
             tools,
-            database: _,
+            ..
         } = builder;
         let mut store = match database.load_session(session_id)? {
             Some(stored) => InMemorySessionStore::from_stored(session_id, stored),
