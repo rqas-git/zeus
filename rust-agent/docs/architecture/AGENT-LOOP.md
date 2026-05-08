@@ -54,7 +54,9 @@ transport, and session state separate.
 - `AgentService` holds only a per-session async lock while a turn streams, so
   different sessions can progress independently.
 - `ChatGptClient` sends typed async Responses requests to the Codex backend and
-  parses SSE output.
+  parses SSE output. The loop creates fresh model turn state for each
+  model-driven turn so backend sticky-routing headers are not reused across
+  turns.
 - `main.rs` handles terminal behavior by buffering `TextDelta` events before
   flushing stdout.
 

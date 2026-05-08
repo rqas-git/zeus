@@ -21,12 +21,15 @@ use crate::agent_loop::CacheStatus;
 use crate::agent_loop::ModelResponse;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::ModelToolCall;
+use crate::agent_loop::ModelTurnState;
 use crate::agent_loop::SessionId;
 use crate::agent_loop::TokenUsage;
 use crate::auth::AuthCredentials;
 use crate::auth::AuthManager;
 use crate::config::ClientConfig;
 use crate::tools::ToolSpec;
+
+const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 /// One message in the current in-memory conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,8 +147,10 @@ impl ChatGptClient {
         &'a self,
         body: &'a ResponsesRequest<'a>,
         credentials: &AuthCredentials,
+        turn_state: &ModelTurnState,
     ) -> Result<reqwest::Response> {
-        self.http
+        let mut request = self
+            .http
             .post(self.config.responses_url())
             .bearer_auth(credentials.access_token())
             .header("ChatGPT-Account-ID", credentials.account_id())
@@ -153,7 +158,13 @@ impl ChatGptClient {
             .header("version", self.config.version())
             .header("session_id", body.prompt_cache_key)
             .header("x-client-request-id", body.prompt_cache_key)
-            .header(header::ACCEPT, "text/event-stream")
+            .header(header::ACCEPT, "text/event-stream");
+        if let Some(state) = turn_state.codex_turn_state() {
+            if let Ok(value) = header::HeaderValue::from_str(state) {
+                request = request.header(X_CODEX_TURN_STATE_HEADER, value);
+            }
+        }
+        request
             .json(body)
             .send()
             .await
@@ -172,6 +183,7 @@ impl ModelStreamer for ChatGptClient {
         model: &'a str,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
+        let turn_state = ModelTurnState::new();
         self.stream_conversation_inner(
             messages,
             tools,
@@ -179,6 +191,7 @@ impl ModelStreamer for ChatGptClient {
             session_id,
             model,
             None,
+            &turn_state,
             self.config.instructions(),
             on_delta,
         )
@@ -195,6 +208,7 @@ impl ModelStreamer for ChatGptClient {
         reasoning_effort: Option<&'a str>,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
+        let turn_state = ModelTurnState::new();
         self.stream_conversation_inner(
             messages,
             tools,
@@ -202,6 +216,32 @@ impl ModelStreamer for ChatGptClient {
             session_id,
             model,
             reasoning_effort,
+            &turn_state,
+            self.config.instructions(),
+            on_delta,
+        )
+        .await
+    }
+
+    async fn stream_conversation_with_turn_state<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+        turn_state: &'a ModelTurnState,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> Result<ModelResponse> {
+        self.stream_conversation_inner(
+            messages,
+            tools,
+            parallel_tool_calls,
+            session_id,
+            model,
+            reasoning_effort,
+            turn_state,
             self.config.instructions(),
             on_delta,
         )
@@ -218,6 +258,7 @@ impl ModelStreamer for ChatGptClient {
         let messages = [ConversationMessage::user(prompt)];
         let tools: [ToolSpec; 0] = [];
         let mut ignore_delta = |_delta: &str| Ok(());
+        let turn_state = ModelTurnState::new();
         let response = self
             .stream_conversation_inner(
                 &messages,
@@ -226,6 +267,7 @@ impl ModelStreamer for ChatGptClient {
                 session_id,
                 model,
                 reasoning_effort,
+                &turn_state,
                 crate::compaction::SUMMARIZATION_SYSTEM_PROMPT,
                 &mut ignore_delta,
             )
@@ -243,6 +285,7 @@ impl ChatGptClient {
         session_id: SessionId,
         model: &'a str,
         reasoning_effort: Option<&'a str>,
+        turn_state: &'a ModelTurnState,
         instructions: &'a str,
         on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
     ) -> Result<ModelResponse> {
@@ -264,11 +307,15 @@ impl ChatGptClient {
             prompt_cache_key: &prompt_cache_key,
         };
         let credentials = self.auth.credentials().await?;
-        let mut response = self.send_responses_request(&body, &credentials).await?;
+        let mut response = self
+            .send_responses_request(&body, &credentials, turn_state)
+            .await?;
 
         if response.status() == StatusCode::UNAUTHORIZED {
             let credentials = self.auth.refresh().await?;
-            response = self.send_responses_request(&body, &credentials).await?;
+            response = self
+                .send_responses_request(&body, &credentials, turn_state)
+                .await?;
         }
 
         let status = response.status();
@@ -283,6 +330,7 @@ impl ChatGptClient {
             );
         }
 
+        capture_codex_turn_state(response.headers(), turn_state);
         let completion = read_assistant_text_stream(response, on_delta).await?;
         let cache_health = CacheHealth {
             model: model.to_string(),
@@ -318,6 +366,15 @@ async fn read_assistant_text_stream(
     parser.finish(&mut |data| state.handle_data(data, &mut on_delta))?;
 
     state.finish(&mut on_delta)
+}
+
+fn capture_codex_turn_state(headers: &header::HeaderMap, turn_state: &ModelTurnState) {
+    if let Some(value) = headers
+        .get(X_CODEX_TURN_STATE_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        turn_state.set_codex_turn_state(value);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1250,6 +1307,85 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
                 Some(107)
             ))
         );
+
+        remove_parent(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn replays_codex_turn_state_within_turn() {
+        let auth_path = temp_auth_file("client-turn-state");
+        let access = access_token(now_unix() + 600);
+        write_auth_file(&auth_path, "account-test", &access, "refresh-test");
+        let model_server = TestServer::new(vec![
+            TestResponse::sse(
+                200,
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n\
+                 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            )
+            .with_header(X_CODEX_TURN_STATE_HEADER, "turn-state-1"),
+            TestResponse::sse(
+                200,
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"second\"}\n\n\
+                 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\"}}\n\n",
+            ),
+        ]);
+        let auth =
+            AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:1".to_string()).unwrap();
+        let client = ChatGptClient::new(
+            auth,
+            ClientConfig::new(
+                "instructions",
+                format!("{}/responses", model_server.url()),
+                "originator",
+                "version",
+                Duration::from_secs(5),
+                "turn-state-test",
+            ),
+        )
+        .unwrap();
+        let turn_state = ModelTurnState::new();
+        let first_messages = [ConversationMessage::user("first")];
+        let second_messages = [
+            ConversationMessage::user("first"),
+            ConversationMessage::assistant("first"),
+            ConversationMessage::user("second"),
+        ];
+
+        let first = client
+            .stream_conversation_with_turn_state(
+                &first_messages,
+                &[],
+                true,
+                SessionId::new(7),
+                "gpt-test",
+                None,
+                &turn_state,
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap();
+        let second = client
+            .stream_conversation_with_turn_state(
+                &second_messages,
+                &[],
+                true,
+                SessionId::new(7),
+                "gpt-test",
+                None,
+                &turn_state,
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.text, "first");
+        assert_eq!(second.text, "second");
+        let requests = model_server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].headers.contains(X_CODEX_TURN_STATE_HEADER));
+        assert!(requests[1]
+            .headers
+            .contains("x-codex-turn-state: turn-state-1"));
 
         remove_parent(&auth_path);
     }

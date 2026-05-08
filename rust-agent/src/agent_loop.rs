@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -532,6 +533,31 @@ pub(crate) struct TerminalCommandResult {
     pub(crate) success: bool,
 }
 
+/// Codex routing state scoped to one model-driven turn.
+#[derive(Debug, Default)]
+pub(crate) struct ModelTurnState {
+    codex_turn_state: OnceLock<String>,
+}
+
+impl ModelTurnState {
+    /// Creates empty turn state for one user turn.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the Codex sticky-routing token captured for this turn.
+    pub(crate) fn codex_turn_state(&self) -> Option<&str> {
+        self.codex_turn_state.get().map(String::as_str)
+    }
+
+    /// Records the first Codex sticky-routing token observed in this turn.
+    pub(crate) fn set_codex_turn_state(&self, value: &str) {
+        if !value.is_empty() {
+            let _ = self.codex_turn_state.set(value.to_string());
+        }
+    }
+}
+
 /// Streams a prompt window into an assistant response.
 pub(crate) trait ModelStreamer: Sync {
     /// Sends the prompt window and streams assistant text deltas.
@@ -564,6 +590,33 @@ pub(crate) trait ModelStreamer: Sync {
                 parallel_tool_calls,
                 session_id,
                 model,
+                on_delta,
+            )
+            .await
+        }
+    }
+
+    /// Sends the prompt window with routing state scoped to the current turn.
+    fn stream_conversation_with_turn_state<'a>(
+        &'a self,
+        messages: &'a [ConversationMessage<'a>],
+        tools: &'a [ToolSpec],
+        parallel_tool_calls: bool,
+        session_id: SessionId,
+        model: &'a str,
+        reasoning_effort: Option<&'a str>,
+        turn_state: &'a ModelTurnState,
+        on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+    ) -> impl Future<Output = Result<ModelResponse>> + Send + 'a {
+        let _ = turn_state;
+        async move {
+            self.stream_conversation_with_reasoning(
+                messages,
+                tools,
+                parallel_tool_calls,
+                session_id,
+                model,
+                reasoning_effort,
                 on_delta,
             )
             .await
@@ -1405,10 +1458,11 @@ impl AgentLoop {
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         let mut recovered_overflow = false;
+        let turn_state = ModelTurnState::new();
         loop {
             cancellation.ensure_not_cancelled()?;
             let tool_calls = match self
-                .run_once(model, cancellation, reasoning_effort, emit)
+                .run_once(model, cancellation, reasoning_effort, &turn_state, emit)
                 .await
             {
                 Ok(tool_calls) => tool_calls,
@@ -1452,6 +1506,7 @@ impl AgentLoop {
         model: &impl ModelStreamer,
         cancellation: &TurnCancellation,
         reasoning_effort: Option<&str>,
+        turn_state: &ModelTurnState,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<Vec<ModelToolCall>> {
         let history = self
@@ -1463,13 +1518,14 @@ impl AgentLoop {
         let mut model_response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(TurnCancelled.into()),
-            response = model.stream_conversation_with_reasoning(
+            response = model.stream_conversation_with_turn_state(
                 &history,
                 self.tools.specs(),
                 true,
                 session_id,
                 selected_model,
                 reasoning_effort,
+                turn_state,
                 &mut on_delta,
             ) => response?,
         };

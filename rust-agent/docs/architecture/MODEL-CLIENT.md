@@ -37,6 +37,9 @@ specific backend provider.
   credentials for each backend request. It also sends the prompt-cache key as
   `session_id` and `x-client-request-id` so the Codex backend can keep repeated
   session prefixes on the same cache route.
+- During a model-driven turn, `ChatGptClient` captures the backend
+  `x-codex-turn-state` response header and replays it on later requests in that
+  same turn. The value is not persisted across turns.
 - The typed request structs shape Responses API payloads.
 - `AssistantText` accumulates streamed text, handles fallback completed items,
   captures completed function calls, and captures response id plus token usage
@@ -63,6 +66,8 @@ specific backend provider.
   parsing rather than truncating provider streams mid-response.
 - Prompt-cache keys are stable per configured namespace and session.
   The same key is sent in the Responses body and session-affinity headers.
+  Turn-scoped Codex sticky-routing state is replayed only inside the active
+  model-driven turn.
   Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
   not look like normal cache reuse.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,

@@ -14,6 +14,7 @@ pub(crate) struct TestResponse {
     status: u16,
     body: String,
     content_type: &'static str,
+    headers: Vec<(&'static str, String)>,
 }
 
 impl TestResponse {
@@ -22,6 +23,7 @@ impl TestResponse {
             status,
             body: body.into(),
             content_type: "application/json",
+            headers: Vec::new(),
         }
     }
 
@@ -30,7 +32,13 @@ impl TestResponse {
             status,
             body: body.into(),
             content_type: "text/event-stream",
+            headers: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
     }
 }
 
@@ -141,11 +149,14 @@ fn write_response(stream: &mut TcpStream, response: TestResponse) {
     let reason = if response.status == 200 { "OK" } else { "ERR" };
     write!(
         stream,
-        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.status,
         response.content_type,
         response.body.len(),
-        response.body
     )
     .unwrap();
+    for (name, value) in response.headers {
+        write!(stream, "{name}: {value}\r\n").unwrap();
+    }
+    write!(stream, "\r\n{}", response.body).unwrap();
 }
