@@ -7,6 +7,7 @@
         "message_count": 4,
         "model": "gpt-5.5",
         "prompt_cache_key": "contract-cache-key",
+        "request_input_hash": "0000000000000040",
         "response_id": "resp_contract",
         "stable_prefix_bytes": 128,
         "stable_prefix_hash": "000000000000002a",
@@ -156,7 +157,7 @@
         "compaction",
         "events"
       ],
-      "schema_hash": "eb65d28dc5f3d76f",
+      "schema_hash": "789989c1a07f1286",
       "transports": [
         "http/1.1",
         "http/2",

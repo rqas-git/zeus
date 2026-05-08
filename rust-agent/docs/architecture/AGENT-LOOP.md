@@ -105,7 +105,8 @@ transport, and session state separate.
   instead of serializing all sessions through one mutable service borrow.
 - Prompt-cache keys are stable per service/session namespace and are sent
   as Codex backend session-affinity headers so repeated session prefixes can be
-  reused by the provider cache.
+  reused by the provider cache. Cache status also compares the prior retained
+  input prefix against the next request so local compaction or pruning is visible.
 
 ## Events
 

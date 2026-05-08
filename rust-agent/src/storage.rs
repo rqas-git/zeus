@@ -282,14 +282,24 @@ impl SessionDatabase {
         self.with_connection(|connection| {
             connection.execute(
                 "UPDATE sessions \
-                 SET last_prompt_cache_key = ?2, last_stable_prefix_hash = ?3, updated_at_ms = ?4 \
+                 SET last_prompt_cache_key = ?2, last_stable_prefix_hash = ?3, \
+                     last_request_input_hash = ?4, last_request_input_message_count = ?5, \
+                     updated_at_ms = ?6 \
                  WHERE id = ?1",
                 |statement| {
                     statement.bind_i64(1, session_id_i64(session_id)?)?;
                     statement.bind_text(2, &observation.prompt_cache_key)?;
+                    statement.bind_i64(3, cache_hash_i64(observation.stable_prefix_hash))?;
                     statement
-                        .bind_i64(3, stable_prefix_hash_i64(observation.stable_prefix_hash))?;
-                    statement.bind_i64(4, now)
+                        .bind_optional_i64(4, observation.request_input_hash.map(cache_hash_i64))?;
+                    statement.bind_optional_i64(
+                        5,
+                        observation
+                            .request_input_message_count
+                            .map(|count| usize_to_i64(count, "request input message count"))
+                            .transpose()?,
+                    )?;
+                    statement.bind_i64(6, now)
                 },
             )
         })
@@ -409,7 +419,8 @@ fn load_session_header(
     session_id: SessionId,
 ) -> Result<Option<(SessionConfig, SessionStatus, Option<CacheObservation>)>> {
     let mut statement = connection.prepare(
-        "SELECT model, status, last_prompt_cache_key, last_stable_prefix_hash \
+        "SELECT model, status, last_prompt_cache_key, last_stable_prefix_hash, \
+                last_request_input_hash, last_request_input_message_count \
          FROM sessions WHERE id = ?1",
     )?;
     statement.bind_i64(1, session_id_i64(session_id)?)?;
@@ -424,7 +435,18 @@ fn load_session_header(
             ) {
                 (Some(prompt_cache_key), Some(stable_prefix_hash)) => Some(CacheObservation {
                     prompt_cache_key,
-                    stable_prefix_hash: stable_prefix_hash_from_i64(stable_prefix_hash),
+                    stable_prefix_hash: cache_hash_from_i64(stable_prefix_hash),
+                    request_input_hash: statement.column_optional_i64(4)?.map(cache_hash_from_i64),
+                    request_input_message_count: statement
+                        .column_optional_i64(5)?
+                        .map(|count| {
+                            i64_to_u64(count, "request input message count").and_then(|count| {
+                                count
+                                    .try_into()
+                                    .context("request input message count exceeds usize range")
+                            })
+                        })
+                        .transpose()?,
                 }),
                 _ => None,
             };
@@ -740,7 +762,9 @@ impl Connection {
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
                 last_prompt_cache_key TEXT,
-                last_stable_prefix_hash INTEGER
+                last_stable_prefix_hash INTEGER,
+                last_request_input_hash INTEGER,
+                last_request_input_message_count INTEGER
              );
              CREATE TABLE IF NOT EXISTS messages (
                 session_id INTEGER NOT NULL,
@@ -775,7 +799,22 @@ impl Connection {
         self.ensure_messages_column(
             "details_json",
             "ALTER TABLE messages ADD COLUMN details_json TEXT",
+        )?;
+        self.ensure_sessions_column(
+            "last_request_input_hash",
+            "ALTER TABLE sessions ADD COLUMN last_request_input_hash INTEGER",
+        )?;
+        self.ensure_sessions_column(
+            "last_request_input_message_count",
+            "ALTER TABLE sessions ADD COLUMN last_request_input_message_count INTEGER",
         )
+    }
+
+    fn ensure_sessions_column(&mut self, column: &str, alter_sql: &str) -> Result<()> {
+        if self.table_has_column("sessions", column)? {
+            return Ok(());
+        }
+        self.exec(alter_sql)
     }
 
     fn ensure_messages_column(&mut self, column: &str, alter_sql: &str) -> Result<()> {
@@ -1036,11 +1075,11 @@ fn i64_to_u64(value: i64, label: &str) -> Result<u64> {
         .with_context(|| format!("stored {label} is negative"))
 }
 
-fn stable_prefix_hash_i64(value: u64) -> i64 {
+fn cache_hash_i64(value: u64) -> i64 {
     i64::from_be_bytes(value.to_be_bytes())
 }
 
-fn stable_prefix_hash_from_i64(value: i64) -> u64 {
+fn cache_hash_from_i64(value: i64) -> u64 {
     u64::from_be_bytes(value.to_be_bytes())
 }
 
@@ -1214,6 +1253,8 @@ mod tests {
                 &CacheObservation {
                     prompt_cache_key: "cache-key".to_string(),
                     stable_prefix_hash: 0xfedc_ba98_7654_3210,
+                    request_input_hash: Some(0x1234),
+                    request_input_message_count: Some(2),
                 },
             )
             .unwrap();
@@ -1241,6 +1282,8 @@ mod tests {
             Some(CacheObservation {
                 prompt_cache_key: "cache-key".to_string(),
                 stable_prefix_hash: 0xfedc_ba98_7654_3210,
+                request_input_hash: Some(0x1234),
+                request_input_message_count: Some(2),
             })
         );
         assert_eq!(loaded.messages.len(), 1);

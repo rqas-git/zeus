@@ -127,8 +127,9 @@ Important event names include:
 - `server.heartbeat`
 - `server.events_lagged`
 
-`cache.health` includes prompt-cache status plus provider token counters:
-input, cached input, output, reasoning output, and total tokens when reported.
+`cache.health` includes prompt-cache status, stable/request input hashes, and
+provider token counters: input, cached input, output, reasoning output, and total
+tokens when reported.
 `tool_call.started` includes the tool call id, tool name, and raw JSON `args` so
 clients can render the requested tool invocation before the tool result arrives.
 The short `args` field is intentional and follows pi-mono's tool execution start

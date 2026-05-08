@@ -443,6 +443,7 @@ pub(crate) enum CacheStatus {
     ReusedPrefix,
     CacheKeyChanged,
     StablePrefixChanged,
+    InputPrefixChanged,
 }
 
 impl CacheStatus {
@@ -453,6 +454,7 @@ impl CacheStatus {
             Self::ReusedPrefix => "reused_prefix",
             Self::CacheKeyChanged => "cache_key_changed",
             Self::StablePrefixChanged => "stable_prefix_changed",
+            Self::InputPrefixChanged => "input_prefix_changed",
         }
     }
 }
@@ -464,6 +466,8 @@ pub(crate) struct CacheHealth {
     pub(crate) prompt_cache_key: String,
     pub(crate) stable_prefix_hash: u64,
     pub(crate) stable_prefix_bytes: usize,
+    pub(crate) request_input_hash: u64,
+    pub(crate) request_input_prefix_hashes: Vec<u64>,
     pub(crate) message_count: usize,
     pub(crate) input_bytes: usize,
     pub(crate) response_id: Option<String>,
@@ -982,6 +986,15 @@ impl InMemorySessionStore {
         if previous.stable_prefix_hash != cache_health.stable_prefix_hash {
             return CacheStatus::StablePrefixChanged;
         }
+        if let (Some(previous_hash), Some(previous_count)) = (
+            previous.request_input_hash,
+            previous.request_input_message_count,
+        ) {
+            match cache_health.request_input_prefix_hashes.get(previous_count) {
+                Some(current_prefix_hash) if *current_prefix_hash == previous_hash => {}
+                _ => return CacheStatus::InputPrefixChanged,
+            }
+        }
         CacheStatus::ReusedPrefix
     }
 
@@ -989,6 +1002,8 @@ impl InMemorySessionStore {
         self.last_cache_observation = Some(CacheObservation {
             prompt_cache_key: cache_health.prompt_cache_key.clone(),
             stable_prefix_hash: cache_health.stable_prefix_hash,
+            request_input_hash: Some(cache_health.request_input_hash),
+            request_input_message_count: Some(cache_health.message_count),
         });
     }
 }
@@ -997,6 +1012,8 @@ impl InMemorySessionStore {
 pub(crate) struct CacheObservation {
     pub(crate) prompt_cache_key: String,
     pub(crate) stable_prefix_hash: u64,
+    pub(crate) request_input_hash: Option<u64>,
+    pub(crate) request_input_message_count: Option<usize>,
 }
 
 /// Runs ordered turns for a single in-memory session.
@@ -2547,6 +2564,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cache_status_detects_changed_input_prefix() {
+        let mut store =
+            InMemorySessionStore::new(SessionId::new(7), SessionConfig::new("test-model"));
+        store.last_cache_observation = Some(CacheObservation {
+            prompt_cache_key: "cache-key".to_string(),
+            stable_prefix_hash: 0x1234,
+            request_input_hash: Some(0xaaaa),
+            request_input_message_count: Some(1),
+        });
+        let cache_health = CacheHealth {
+            model: "test-model".to_string(),
+            prompt_cache_key: "cache-key".to_string(),
+            stable_prefix_hash: 0x1234,
+            stable_prefix_bytes: 16,
+            request_input_hash: 0xbbbb,
+            request_input_prefix_hashes: vec![0, 0xbbbb],
+            message_count: 1,
+            input_bytes: 5,
+            response_id: None,
+            usage: None,
+            cache_status: CacheStatus::FirstRequest,
+        };
+
+        assert_eq!(
+            store.cache_status(&cache_health),
+            CacheStatus::InputPrefixChanged
+        );
+    }
+
     #[tokio::test]
     async fn executes_tool_calls_and_replays_outputs() {
         let mut agent = AgentLoop::new(SessionId::new(7));
@@ -3237,6 +3284,8 @@ mod tests {
                     prompt_cache_key: format!("cache-key-{model}"),
                     stable_prefix_hash: 0x1234,
                     stable_prefix_bytes: 24,
+                    request_input_hash: 0x5678,
+                    request_input_prefix_hashes: vec![0, 0x5678],
                     message_count: 1,
                     input_bytes: 5,
                     response_id: Some(format!("resp_{turn}")),

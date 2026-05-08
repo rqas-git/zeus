@@ -293,6 +293,7 @@ impl ChatGptClient {
 
         let prompt_cache_key = self.config.prompt_cache_key(session_id.get());
         let stable_prefix = stable_prefix_stats(instructions, tools);
+        let request_input = request_input_stats(messages);
         let input_bytes = conversation_input_bytes(messages);
         let body = ResponsesRequest {
             model,
@@ -337,6 +338,8 @@ impl ChatGptClient {
             prompt_cache_key,
             stable_prefix_hash: stable_prefix.hash,
             stable_prefix_bytes: stable_prefix.bytes,
+            request_input_hash: request_input.hash,
+            request_input_prefix_hashes: request_input.prefix_hashes,
             message_count: messages.len(),
             input_bytes,
             response_id: completion.response_id,
@@ -383,6 +386,12 @@ struct StablePrefixStats {
     bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestInputStats {
+    hash: u64,
+    prefix_hashes: Vec<u64>,
+}
+
 fn stable_prefix_stats(instructions: &str, tools: &[ToolSpec]) -> StablePrefixStats {
     let mut hash = Fnv1a64::new();
     hash.update("instructions\0");
@@ -405,6 +414,62 @@ fn stable_prefix_stats(instructions: &str, tools: &[ToolSpec]) -> StablePrefixSt
                     tool.name().len() + tool.description().len() + tool.parameters_cache_key().len()
                 })
                 .sum::<usize>(),
+    }
+}
+
+fn request_input_stats(messages: &[ConversationMessage<'_>]) -> RequestInputStats {
+    let mut hash = Fnv1a64::new();
+    hash.update("input\0");
+    let mut prefix_hashes = Vec::with_capacity(messages.len() + 1);
+    prefix_hashes.push(hash.finish());
+    for message in messages {
+        update_request_input_hash(&mut hash, message);
+        prefix_hashes.push(hash.finish());
+    }
+    RequestInputStats {
+        hash: hash.finish(),
+        prefix_hashes,
+    }
+}
+
+fn update_request_input_hash(hash: &mut Fnv1a64, message: &ConversationMessage<'_>) {
+    match message {
+        ConversationMessage::Message { role, text } => {
+            hash.update("message\0");
+            hash.update(role.as_str());
+            hash.update("\0");
+            hash.update(text);
+            hash.update("\0");
+        }
+        ConversationMessage::FunctionCall {
+            item_id,
+            call_id,
+            name,
+            arguments,
+        } => {
+            hash.update("function_call\0");
+            hash.update(item_id.unwrap_or_default());
+            hash.update("\0");
+            hash.update(call_id);
+            hash.update("\0");
+            hash.update(name);
+            hash.update("\0");
+            hash.update(arguments);
+            hash.update("\0");
+        }
+        ConversationMessage::FunctionOutput {
+            call_id,
+            output,
+            success,
+        } => {
+            hash.update("function_output\0");
+            hash.update(call_id);
+            hash.update("\0");
+            hash.update(output);
+            hash.update("\0");
+            hash.update(if *success { "success" } else { "failure" });
+            hash.update("\0");
+        }
     }
 }
 
@@ -1164,6 +1229,44 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
         assert_eq!(first.bytes, "You are concise.".len());
         assert_ne!(first.hash, second.hash);
+    }
+
+    #[test]
+    fn request_input_hash_tracks_reused_prefix() {
+        let first = [ConversationMessage::user("first")];
+        let second = [
+            ConversationMessage::user("first"),
+            ConversationMessage::assistant("first answer"),
+            ConversationMessage::user("second"),
+        ];
+        let changed = [
+            ConversationMessage::user("changed"),
+            ConversationMessage::assistant("first answer"),
+            ConversationMessage::user("second"),
+        ];
+
+        let first_stats = request_input_stats(&first);
+        let second_stats = request_input_stats(&second);
+        let changed_stats = request_input_stats(&changed);
+
+        assert_eq!(second_stats.prefix_hashes[first.len()], first_stats.hash);
+        assert_ne!(changed_stats.prefix_hashes[first.len()], first_stats.hash);
+    }
+
+    #[test]
+    fn serialized_input_reuses_previous_request_prefix() {
+        let first = [ConversationMessage::user("first")];
+        let second = [
+            ConversationMessage::user("first"),
+            ConversationMessage::assistant("first answer"),
+            ConversationMessage::user("second"),
+        ];
+        let first_input = serde_json::to_value(responses_input(&first)).unwrap();
+        let second_input = serde_json::to_value(responses_input(&second)).unwrap();
+        let first_items = first_input.as_array().unwrap();
+        let second_items = second_input.as_array().unwrap();
+
+        assert!(second_items.starts_with(first_items));
     }
 
     #[tokio::test]

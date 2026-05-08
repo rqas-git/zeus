@@ -68,11 +68,13 @@ specific backend provider.
   The same key is sent in the Responses body and session-affinity headers.
   Turn-scoped Codex sticky-routing state is replayed only inside the active
   model-driven turn.
-  Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
-  not look like normal cache reuse.
+  Cache-prefix telemetry includes the stable tool-spec shape and retained input
+  prefix hash so tool, compaction, or pruning changes do not look like normal
+  cache reuse.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
-  retained-message shape, response id, and provider token counters, including
-  cached input and reasoning output tokens when the backend reports them.
+  retained input hash, retained-message shape, response id, and provider token
+  counters, including cached input and reasoning output tokens when the backend
+  reports them.
 
 ## Benchmarks
 

@@ -313,12 +313,13 @@ fn format_cache_health(cache_health: &CacheHealth) -> String {
         .unwrap_or_else(|| "usage=unreported".to_string());
     let response_id = cache_health.response_id.as_deref().unwrap_or("none");
     format!(
-        "Cache: status={} model={} key={} prefix_hash={} prefix_bytes={} messages={} input_bytes={} response_id={} {}",
+        "Cache: status={} model={} key={} prefix_hash={} prefix_bytes={} input_hash={} messages={} input_bytes={} response_id={} {}",
         cache_health.cache_status.as_str(),
         cache_health.model,
         cache_health.prompt_cache_key,
         format_args!("{:016x}", cache_health.stable_prefix_hash),
         cache_health.stable_prefix_bytes,
+        format_args!("{:016x}", cache_health.request_input_hash),
         cache_health.message_count,
         cache_health.input_bytes,
         response_id,
