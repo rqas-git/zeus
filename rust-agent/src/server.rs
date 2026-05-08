@@ -177,7 +177,13 @@ async fn wait_for_parent_process(parent_pid: Option<libc::pid_t>) -> Result<()> 
 
     loop {
         if !process_is_running(parent_pid) {
-            eprintln!("rust-agent parent process {parent_pid} exited; shutting down");
+            log_server_event(
+                "server.parent.exited",
+                "parent process {process.pid} exited; shutting down",
+                serde_json::json!({
+                    "process.pid": parent_pid,
+                }),
+            );
             return Ok(());
         }
         tokio::time::sleep(PARENT_WATCH_INTERVAL).await;
@@ -250,7 +256,15 @@ async fn run_http_listener(app: Router, listener: TcpListener) -> Result<()> {
     let local_addr = listener
         .local_addr()
         .context("failed to read HTTP compatibility listener address")?;
-    eprintln!("rust-agent HTTP compatibility listening on http://{local_addr}");
+    log_server_event(
+        "server.http.listen.start",
+        "HTTP compatibility listener started at {server.address}",
+        serde_json::json!({
+            "server.address": local_addr.to_string(),
+            "network.protocol.name": "http",
+            "network.protocol.version": "1.1/2",
+        }),
+    );
     axum::serve(listener, app)
         .await
         .context("HTTP compatibility listener failed")
@@ -260,13 +274,27 @@ async fn run_h3_listener(app: Router, endpoint: quinn::Endpoint) -> Result<()> {
     let local_addr = endpoint
         .local_addr()
         .context("failed to read H3 listener address")?;
-    eprintln!("rust-agent HTTP/3 listening on https://{local_addr}");
+    log_server_event(
+        "server.h3.listen.start",
+        "HTTP/3 listener started at {server.address}",
+        serde_json::json!({
+            "server.address": local_addr.to_string(),
+            "network.protocol.name": "http",
+            "network.protocol.version": "3",
+        }),
+    );
 
     while let Some(incoming) = endpoint.accept().await {
         let app = app.clone();
         tokio::spawn(async move {
             if let Err(error) = handle_h3_connection(incoming, app).await {
-                eprintln!("rust-agent H3 connection error: {error}");
+                log_server_event(
+                    "server.h3.connection.error",
+                    "HTTP/3 connection failed with {error.message}",
+                    serde_json::json!({
+                        "error.message": error.to_string(),
+                    }),
+                );
             }
         });
     }
@@ -312,6 +340,15 @@ fn emit_server_ready(
     let message = serde_json::to_string(&ready).context("failed to serialize readiness message")?;
     eprintln!("{message}");
     Ok(())
+}
+
+fn log_server_event(name: &'static str, message: &'static str, fields: serde_json::Value) {
+    let entry = serde_json::json!({
+        "event": name,
+        "message": message,
+        "fields": fields,
+    });
+    eprintln!("{entry}");
 }
 
 fn server_ready_message(
@@ -391,7 +428,13 @@ async fn handle_h3_connection(incoming: quinn::Incoming, app: Router) -> Result<
                 let app = app.clone();
                 tokio::spawn(async move {
                     if let Err(error) = h3_axum::serve_h3_with_axum(app, resolver).await {
-                        eprintln!("rust-agent H3 request error: {error}");
+                        log_server_event(
+                            "server.h3.request.error",
+                            "HTTP/3 request failed with {error.message}",
+                            serde_json::json!({
+                                "error.message": error.to_string(),
+                            }),
+                        );
                     }
                 });
             }

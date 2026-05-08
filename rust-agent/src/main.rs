@@ -300,51 +300,45 @@ async fn print_agent_response(
     delta_writer.finish_line()?;
     if telemetry.cache_health() {
         if let Some(cache_health) = &cache_health {
-            eprintln!("{}", format_cache_health(cache_health));
+            log_cache_health(cache_health);
         }
     }
     response
 }
 
-fn format_cache_health(cache_health: &CacheHealth) -> String {
+fn log_cache_health(cache_health: &CacheHealth) {
     let usage = cache_health
         .usage
-        .map(format_token_usage)
-        .unwrap_or_else(|| "usage=unreported".to_string());
-    let response_id = cache_health.response_id.as_deref().unwrap_or("none");
-    format!(
-        "Cache: status={} model={} key={} prefix_hash={} prefix_bytes={} input_hash={} messages={} input_bytes={} response_id={} {}",
-        cache_health.cache_status.as_str(),
-        cache_health.model,
-        cache_health.prompt_cache_key,
-        format_args!("{:016x}", cache_health.stable_prefix_hash),
-        cache_health.stable_prefix_bytes,
-        format_args!("{:016x}", cache_health.request_input_hash),
-        cache_health.message_count,
-        cache_health.input_bytes,
-        response_id,
-        usage,
-    )
+        .map(token_usage_log_fields)
+        .unwrap_or(serde_json::Value::Null);
+    let entry = serde_json::json!({
+        "event": "cache.health.observed",
+        "message": "cache health observed for {model.name}",
+        "fields": {
+            "cache.status": cache_health.cache_status.as_str(),
+            "model.name": cache_health.model,
+            "prompt.cache_key": cache_health.prompt_cache_key,
+            "prompt.stable_prefix_hash": format!("{:016x}", cache_health.stable_prefix_hash),
+            "prompt.stable_prefix_bytes": cache_health.stable_prefix_bytes,
+            "request.input_hash": format!("{:016x}", cache_health.request_input_hash),
+            "request.message_count": cache_health.message_count,
+            "request.input_bytes": cache_health.input_bytes,
+            "response.id": cache_health.response_id,
+            "usage": usage,
+        },
+    });
+    eprintln!("{entry}");
 }
 
-fn format_token_usage(usage: TokenUsage) -> String {
-    let cache_hit = usage
-        .cache_hit_ratio()
-        .map(|ratio| format!("{:.1}%", ratio * 100.0))
-        .unwrap_or_else(|| "n/a".to_string());
-    format!(
-        "input_tokens={} cached_input_tokens={} cache_hit={} output_tokens={} reasoning_output_tokens={} total_tokens={}",
-        format_optional_u64(usage.input_tokens),
-        format_optional_u64(usage.cached_input_tokens),
-        cache_hit,
-        format_optional_u64(usage.output_tokens),
-        format_optional_u64(usage.reasoning_output_tokens),
-        format_optional_u64(usage.total_tokens),
-    )
-}
-
-fn format_optional_u64(value: Option<u64>) -> String {
-    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+fn token_usage_log_fields(usage: TokenUsage) -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_hit_ratio": usage.cache_hit_ratio(),
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+        "total_tokens": usage.total_tokens,
+    })
 }
 
 struct DeltaWriter<W> {
