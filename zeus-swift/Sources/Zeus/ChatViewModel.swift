@@ -72,7 +72,6 @@ final class ChatViewModel: ObservableObject {
         return isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
     }
 
-    private let pendingStateDwellNanoseconds: UInt64 = 180_000_000
     private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
     private let server: any AgentServerProtocol
     private let auth: any AgentAuthProtocol
@@ -218,7 +217,6 @@ final class ChatViewModel: ObservableObject {
         streamTask = Task {
             do {
                 try await withTaskCancellationHandler {
-                    try await Task.sleep(nanoseconds: pendingStateDwellNanoseconds)
                     try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
                     try await applySelectedPermissionsForNextTurn(
                         client: client,
