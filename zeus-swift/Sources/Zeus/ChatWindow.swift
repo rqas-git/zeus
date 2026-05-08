@@ -36,7 +36,7 @@ private let shortcutItems = [
     ShortcutItem(shortcut: "Ctrl+C", action: "Clear input"),
     ShortcutItem(shortcut: "Ctrl+Enter", action: "Insert newline"),
     ShortcutItem(shortcut: "Up Arrow", action: "Previous message, open footer menu, or previous option"),
-    ShortcutItem(shortcut: "Down Arrow", action: "Next message, exit footer controls, or close menu"),
+    ShortcutItem(shortcut: "Down Arrow", action: "Next message, next option, or close menu at bottom"),
     ShortcutItem(shortcut: "Left / Right Arrow", action: "Move between footer controls"),
     ShortcutItem(shortcut: "Return / Enter", action: "Activate footer control or menu option"),
     ShortcutItem(shortcut: "Esc", action: "Cancel response, close search, or close footer UI")
@@ -278,7 +278,11 @@ struct ChatWindow: View {
         case KeyCode.returnKey, KeyCode.keypadEnter:
             return selectActiveMenuOption()
         case KeyCode.downArrow:
-            activeFooterMenu = nil
+            if isActiveMenuHighlightAtLastOption() {
+                activeFooterMenu = nil
+            } else {
+                moveActiveMenuHighlight(by: 1)
+            }
             return true
         case KeyCode.upArrow:
             moveActiveMenuHighlight(by: -1)
@@ -517,10 +521,42 @@ struct ChatWindow: View {
         )
     }
 
+    private func isActiveMenuHighlightAtLastOption() -> Bool {
+        switch activeFooterMenu {
+        case .branch:
+            isLastMenuOption(
+                in: branchMenuOptions,
+                current: branchMenuHighlightedOption ?? viewModel.workspace.branch
+            )
+        case .model:
+            isLastMenuOption(
+                in: modelMenuOptions,
+                current: modelMenuHighlightedOption ?? viewModel.selectedModel
+            )
+        case .effort:
+            isLastMenuOption(
+                in: effortMenuOptions,
+                current: effortMenuHighlightedOption ?? viewModel.effort
+            )
+        case .permissions:
+            isLastMenuOption(
+                in: permissionsMenuOptions,
+                current: permissionsMenuHighlightedOption ?? viewModel.selectedPermission
+            )
+        case .shortcuts, nil:
+            true
+        }
+    }
+
+    private func isLastMenuOption(in options: [String], current: String) -> Bool {
+        guard let last = options.last else { return true }
+        return current == last
+    }
+
     private func nextMenuOption(in options: [String], current: String, offset: Int) -> String? {
         guard !options.isEmpty else { return nil }
         let currentIndex = options.firstIndex(of: current) ?? 0
-        let nextIndex = (currentIndex + offset + options.count) % options.count
+        let nextIndex = min(max(currentIndex + offset, 0), options.count - 1)
         return options[nextIndex]
     }
 

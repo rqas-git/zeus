@@ -14,7 +14,7 @@
 | `Ctrl+C` | Clear the input field. |
 | `Ctrl+Enter` | Insert a newline in the input field. |
 | `Up Arrow` | Recall the previous submitted message while the input field is focused, open the focused footer menu, or move the highlighted option up while a footer dropdown is open. |
-| `Down Arrow` | Recall the next submitted message while the input field is focused, move to the footer controls when already at the current draft, exit footer controls, or close the open footer menu without selecting. |
+| `Down Arrow` | Recall the next submitted message while the input field is focused, move to the footer controls when already at the current draft, exit footer controls, move the highlighted option down while a footer dropdown is open, or close that dropdown when already on its last option. |
 | `Left Arrow` / `Right Arrow` | Move between footer controls while footer navigation is active. |
 | `Return` / `Enter` | Activate the focused footer control, or select the highlighted option while a footer dropdown is open. |
 | `Esc` | Cancel the current response, close transcript search, footer navigation, or the open footer dropdown menu. |
