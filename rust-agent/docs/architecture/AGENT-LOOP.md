@@ -101,7 +101,8 @@ transport, and session state separate.
   model I/O.
 - The service-level session locks keep ordered turns local to one session
   instead of serializing all sessions through one mutable service borrow.
-- Prompt-cache keys are stable per service/session/model namespace.
+- Prompt-cache keys are stable per service/model namespace so static prefixes
+  can be reused across sessions.
 
 ## Events
 

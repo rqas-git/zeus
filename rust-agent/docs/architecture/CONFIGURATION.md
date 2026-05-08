@@ -82,7 +82,9 @@ telemetry, and tool configuration.
   startup readiness JSON. Plaintext HTTP binds must stay on loopback unless
   `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a trusted deployment.
 - Telemetry output is opt-in so normal assistant text stays clean.
-- Prompt-cache namespace lets backend deployments separate cache keys.
+- Prompt-cache namespace lets backend deployments separate cache keys. The
+  effective key is shared per namespace and model so sessions with the same
+  static prompt prefix can reuse cached input.
 - `RUST_AGENT_TOOL_MODE` defaults to `read-only`; set it to `workspace-write`
   to expose the `apply_patch` file editing tool.
 - Set `RUST_AGENT_TOOL_MODE=workspace-exec` to expose `workspace-write` tools,

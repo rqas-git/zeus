@@ -124,7 +124,6 @@ pub(crate) struct ChatGptClient {
     auth: AuthManager,
     config: ClientConfig,
     http: Client,
-    collect_cache_telemetry: bool,
 }
 
 impl ChatGptClient {
@@ -132,22 +131,13 @@ impl ChatGptClient {
     ///
     /// # Errors
     /// Returns an error if the HTTP client cannot be constructed.
-    pub(crate) fn new(
-        auth: AuthManager,
-        config: ClientConfig,
-        collect_cache_telemetry: bool,
-    ) -> Result<Self> {
+    pub(crate) fn new(auth: AuthManager, config: ClientConfig) -> Result<Self> {
         let http = Client::builder()
             .timeout(config.request_timeout())
             .build()
             .context("failed to build HTTP client")?;
 
-        Ok(Self {
-            auth,
-            config,
-            http,
-            collect_cache_telemetry,
-        })
+        Ok(Self { auth, config, http })
     }
 
     async fn send_responses_request<'a>(
@@ -248,7 +238,7 @@ impl ChatGptClient {
         messages: &'a [ConversationMessage<'a>],
         tools: &'a [ToolSpec],
         parallel_tool_calls: bool,
-        session_id: SessionId,
+        _session_id: SessionId,
         model: &'a str,
         reasoning_effort: Option<&'a str>,
         instructions: &'a str,
@@ -256,8 +246,8 @@ impl ChatGptClient {
     ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
-        let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
         let stable_prefix = stable_prefix_stats(instructions, tools);
+        let prompt_cache_key = self.config.prompt_cache_key(model);
         let input_bytes = conversation_input_bytes(messages);
         let body = ResponsesRequest {
             model,
@@ -291,8 +281,7 @@ impl ChatGptClient {
             );
         }
 
-        let completion =
-            read_assistant_text_stream(response, on_delta, self.collect_cache_telemetry).await?;
+        let completion = read_assistant_text_stream(response, on_delta).await?;
         let cache_health = CacheHealth {
             model: model.to_string(),
             prompt_cache_key,
@@ -315,9 +304,8 @@ impl ChatGptClient {
 async fn read_assistant_text_stream(
     response: reqwest::Response,
     mut on_delta: impl FnMut(&str) -> Result<()>,
-    collect_metadata: bool,
 ) -> Result<StreamCompletion> {
-    let mut state = AssistantText::new(collect_metadata);
+    let mut state = AssistantText::default();
     let mut parser = SseDataParser::default();
     let mut stream = response.bytes_stream();
 
@@ -525,7 +513,7 @@ fn read_assistant_completion(
     mut reader: impl Read,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<StreamCompletion> {
-    let mut state = AssistantText::new(true);
+    let mut state = AssistantText::default();
     let mut parser = SseDataParser::default();
     let mut chunk = [0; 7];
 
@@ -626,17 +614,9 @@ struct AssistantText {
     response_id: Option<String>,
     usage: Option<TokenUsage>,
     completed: bool,
-    collect_metadata: bool,
 }
 
 impl AssistantText {
-    fn new(collect_metadata: bool) -> Self {
-        Self {
-            collect_metadata,
-            ..Self::default()
-        }
-    }
-
     fn handle_data(
         &mut self,
         data: &str,
@@ -675,13 +655,10 @@ impl AssistantText {
                     .unwrap_or_else(|| "response failed".to_string());
                 anyhow::bail!("{message}");
             }
-            "response.completed" if self.collect_metadata => {
+            "response.completed" => {
                 let metadata = response_metadata(event.response);
                 self.response_id = metadata.response_id.or_else(|| self.response_id.take());
                 self.usage = metadata.usage.or(self.usage);
-                self.completed = true;
-            }
-            "response.completed" => {
                 self.completed = true;
             }
             _ => {}
@@ -1164,7 +1141,6 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
                 Duration::from_secs(5),
                 "retry-test",
             ),
-            false,
         )
         .unwrap();
         let messages = [ConversationMessage::user("hello")];
@@ -1222,7 +1198,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         let model_server = TestServer::new(vec![TestResponse::sse(
             200,
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
-             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+             data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":64},\"output_tokens\":7,\"output_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":107}}}\n\n",
         )]);
         let auth =
             AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:1".to_string()).unwrap();
@@ -1236,12 +1212,11 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
                 Duration::from_secs(5),
                 "reasoning-test",
             ),
-            false,
         )
         .unwrap();
         let messages = [ConversationMessage::user("hello")];
 
-        client
+        let response = client
             .stream_conversation_with_reasoning(
                 &messages,
                 &[],
@@ -1258,6 +1233,17 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         assert_eq!(requests.len(), 1);
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["prompt_cache_key"], "reasoning-test-gpt-test");
+        assert_eq!(
+            response.cache_health.unwrap().usage,
+            Some(TokenUsage::new(
+                Some(100),
+                Some(64),
+                Some(7),
+                Some(3),
+                Some(107)
+            ))
+        );
 
         remove_parent(&auth_path);
     }
@@ -1356,7 +1342,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         bytes: &[u8],
         chunk_bytes: usize,
     ) -> Result<StreamCompletion> {
-        let mut state = AssistantText::new(true);
+        let mut state = AssistantText::default();
         let mut parser = SseDataParser::default();
 
         for chunk in bytes.chunks(chunk_bytes) {

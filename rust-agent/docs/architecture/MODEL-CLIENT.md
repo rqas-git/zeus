@@ -21,8 +21,9 @@ specific backend provider.
    calls for the session loop to execute.
 9. Compaction summary requests use the same transport with a summarization
    system prompt, no tools, and no streamed user-visible deltas.
-10. Completed response metadata is parsed from the terminal SSE event only when
-   cache telemetry is enabled for the client.
+10. Completed response metadata is always parsed from the terminal SSE event so
+   server clients can render provider token usage; terminal rendering of the
+   same cache telemetry remains opt-in.
 11. Assistant text, tool calls, and cache-health telemetry are returned to the
    session loop.
 
@@ -58,9 +59,10 @@ specific backend provider.
   full-response byte caps. Like pi-mono's provider parsers, it assumes the
   configured backend is trusted and relies on context/history limits after
   parsing rather than truncating provider streams mid-response.
-- Prompt-cache keys are stable per configured namespace, session, and model.
-  Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
-  not look like normal cache reuse.
+- Prompt-cache keys are stable per configured namespace and model so separate
+  sessions with identical model-visible instructions and tools can reuse the
+  same prompt-cache prefix. Cache-prefix telemetry includes the stable tool-spec
+  shape so tool changes do not look like normal cache reuse.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained-message shape, response id, and provider token counters, including
   cached input and reasoning output tokens when the backend reports them.

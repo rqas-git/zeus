@@ -156,9 +156,10 @@ impl ClientConfig {
         self.request_timeout
     }
 
-    /// Builds a stable prompt-cache key for a session.
-    pub(crate) fn prompt_cache_key(&self, session_id: u64, model: &str) -> String {
-        format!("{}-{session_id}-{model}", self.prompt_cache_namespace)
+    /// Builds a stable prompt-cache key for requests with the same model-visible
+    /// instructions and tools.
+    pub(crate) fn prompt_cache_key(&self, model: &str) -> String {
+        format!("{}-{model}", self.prompt_cache_namespace)
     }
 }
 
@@ -1170,6 +1171,14 @@ mod tests {
         );
         assert!(validate_tool_search_concurrency(0).is_err());
         assert!(validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).is_err());
+    }
+
+    #[test]
+    fn prompt_cache_key_is_shared_per_model() {
+        assert_eq!(
+            ClientConfig::default().prompt_cache_key("gpt-test"),
+            "rust-agent-gpt-test"
+        );
     }
 
     #[test]

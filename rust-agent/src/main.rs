@@ -72,7 +72,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
     match message {
         Some(message) => {
             let auth = AuthManager::new_default()?;
-            let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+            let client = ChatGptClient::new(auth, client_config)?;
             let database = SessionDatabase::open(storage.database_path())?;
             let service = AgentService::with_tools(client, context, models, tools)
                 .with_database(database)
@@ -82,7 +82,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         None => {
             let _search_index_warmup = tools.spawn_search_index_warmup();
             let auth = AuthManager::new_default()?;
-            let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+            let client = ChatGptClient::new(auth, client_config)?;
             let database = SessionDatabase::open(storage.database_path())?;
             let service = AgentService::with_tools(client, context, models, tools)
                 .with_database(database)
@@ -101,7 +101,7 @@ async fn run_server() -> Result<()> {
         output: _,
         server,
         storage,
-        telemetry,
+        telemetry: _,
         tools: tool_config,
     } = AppConfig::from_env()?;
     let tools = ToolRegistry::for_root_with_policy_and_search_concurrency(
@@ -112,7 +112,7 @@ async fn run_server() -> Result<()> {
     let workspace_root = tools.root().to_path_buf();
     let _search_index_warmup = tools.spawn_search_index_warmup();
     let auth = AuthManager::new_default()?;
-    let client = ChatGptClient::new(auth, client_config, telemetry.cache_health())?;
+    let client = ChatGptClient::new(auth, client_config)?;
     let database = SessionDatabase::open(storage.database_path())?;
     let service = AgentService::with_tools(client, context, models, tools)
         .with_database(database)
