@@ -77,6 +77,16 @@ extension ZeusCoreChecks {
         let terminal = try fixture.decodeResponse("terminal_command", as: TerminalCommandResponse.self)
         try contractRequire(terminal.success, "terminal response should succeed")
 
+        let compaction = try fixture.decodeResponse(
+            "compact_session",
+            as: CompactSessionResponse.self
+        )
+        try contractRequire(compaction.summary == "checkpoint", "unexpected compaction summary")
+        try contractRequire(
+            compaction.details.modifiedFiles == ["src/main.rs"],
+            "unexpected compaction modified files"
+        )
+
         let error = try fixture.decodeResponse("error", as: ContractErrorResponse.self)
         try contractRequire(error.error == "session not found", "unexpected error response")
 
@@ -88,7 +98,8 @@ extension ZeusCoreChecks {
                 "restore_session",
                 "list_sessions",
                 "turn",
-                "terminal_command"
+                "terminal_command",
+                "compact_session"
             ],
             "contract request names changed"
         )
@@ -134,6 +145,17 @@ extension ZeusCoreChecks {
             terminalRequest == TerminalCommandRequest(command: "printf ok"),
             "unexpected terminal request"
         )
+        let compactRequest = try fixture.decodeRequest(
+            "compact_session",
+            as: CompactSessionRequest.self
+        )
+        try contractRequire(
+            compactRequest == CompactSessionRequest(
+                instructions: "focus on open files",
+                reasoningEffort: "medium"
+            ),
+            "unexpected compact session request"
+        )
 
         let expectedEvents: [String: AgentServerEvent] = [
             "server.connected": .serverConnected(sessionID: 42),
@@ -161,7 +183,19 @@ extension ZeusCoreChecks {
             ),
             "session.error": .error(sessionID: 42, message: "not logged in"),
             "turn.completed": .turnCompleted(sessionID: 42),
-            "turn.cancelled": .turnCancelled(sessionID: 42)
+            "turn.cancelled": .turnCancelled(sessionID: 42),
+            "compaction.started": .compactionStarted(sessionID: 42, reason: "manual"),
+            "compaction.completed": .compactionCompleted(
+                sessionID: 42,
+                reason: "manual",
+                summary: "checkpoint",
+                firstKeptMessageID: 4,
+                tokensBefore: 12345,
+                details: CompactionDetails(
+                    readFiles: ["Cargo.toml"],
+                    modifiedFiles: ["src/main.rs"]
+                )
+            )
         ]
 
         try contractRequire(
