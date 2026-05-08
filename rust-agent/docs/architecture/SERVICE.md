@@ -9,9 +9,11 @@ transport state for every request.
 
 1. Startup creates `AuthManager` and `ChatGptClient` once, then passes the
    client to `AgentService`.
-2. Each request supplies a `SessionId`, pagination bounds, user message, or
-   session model update.
-3. `AgentService` validates model updates against `ModelConfig`.
+2. Each request supplies a `SessionId`, pagination bounds, user message,
+   optional reasoning effort, session model update, or session tool-policy
+   update.
+3. `AgentService` validates model and reasoning-effort updates against
+   `ModelConfig`, and applies parsed tool-policy updates to the active session.
 4. `AgentService` finds or creates the matching session handle, loading any
    durable SQLite state for that `SessionId`.
 5. The service locks only that session while a turn is running.
@@ -33,11 +35,12 @@ transport state for every request.
   database is configured.
 - `AgentService` lists and loads durable session metadata without restoring full
   transcripts.
-- `AgentService` enforces the configured model allowlist.
+- `AgentService` enforces the configured model and reasoning-effort allowlists.
 - `AgentService` can request cancellation of the currently running turn without
   waiting on that session's execution lock.
 - `AgentService` exposes manual compaction with optional caller-provided summary
   focus instructions.
+- `AgentService` exposes per-session tool-policy changes for future turns.
 - `AgentService` serializes work per session without serializing unrelated
   sessions.
 - `AgentLoop` still owns per-session ordering, tool execution, and message
@@ -71,9 +74,10 @@ share it across request handlers. Concurrent submissions for different
 submissions for the same `SessionId` wait on that session's async lock, preserving
 ordered conversation turns and history updates.
 
-Session model updates are intentionally not queued behind an active turn. If the
-target session is busy, `set_session_model` returns an error so a model change
-cannot silently apply after a user message that was already submitted.
+Session model and tool-policy updates are intentionally not queued behind an
+active turn. If the target session is busy, `set_session_model` or
+`set_session_tool_policy` returns an error so a setting change cannot silently
+apply after a user message that was already submitted.
 Turn cancellation also targets only the active turn. Queued same-session
 submissions wait for the running turn to finish or cancel, then continue in
 order.
@@ -93,5 +97,7 @@ counts plus a capped preview of the latest user or assistant message.
 The active session map and cancellation state are process-local; server mode
 bounds the active map with configuration. Explicit server deletion removes a
 session from memory and SQLite. Durable session listing is implemented for
-frontend navigation. TTL eviction and cross-process coordination should be added
-only when endpoint behavior requires them.
+frontend navigation. Session model selection is durable, while per-session
+tool-policy overrides are process-local to the active session handle. TTL
+eviction and cross-process coordination should be added only when endpoint
+behavior requires them.

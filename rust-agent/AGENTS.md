@@ -72,6 +72,12 @@ Useful smoke checks:
 ```bash
 curl -s http://127.0.0.1:4096/healthz
 curl --http3 -k https://127.0.0.1:4433/healthz
+curl -s \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  http://127.0.0.1:4096/models
+curl -s \
+  -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
+  http://127.0.0.1:4096/permissions
 SESSION_ID=$(curl -s -X POST \
   -H "authorization: Bearer $RUST_AGENT_SERVER_TOKEN" \
   http://127.0.0.1:4096/sessions | sed -E 's/.*"session_id":([0-9]+).*/\1/')
@@ -148,6 +154,10 @@ sessions. When stdout or stderr exceeds the retained preview, the tool returns
 the tail and saves the full stream under
 `target/rust-agent-tool-output/`. Use `workspace-exec` only for trusted local
 sessions.
+
+`RUST_AGENT_TOOL_SEARCH_CONCURRENCY` controls how many FFF-backed path/content
+searches may run concurrently across sessions. It defaults to `1` and accepts
+values up to `16`.
 
 ## Authentication
 

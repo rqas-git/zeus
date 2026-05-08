@@ -13,8 +13,9 @@ with `RUST_AGENT_TOOL_MODE=workspace-write`.
 
 Zeus terminal passthrough uses the same `exec_command` implementation through
 `POST /sessions/{session_id}/terminal:run`. The route is user-initiated and does
-not change or require that session's model tool policy. It stores the command
-plus bounded output in the session transcript so future model turns can see it.
+not change that session's model tool policy, but the current session policy must
+be `workspace-exec` so `exec_command` is enabled. It stores the command plus
+bounded output in the session transcript so future model turns can see it.
 
 ## Workspace Root
 
@@ -58,6 +59,11 @@ reads default to 2,000 lines, cap individual returned lines at 2,000 bytes, and
 cap the whole returned page at 64 KiB. They stop after the requested page, and
 they skip or truncate long lines before converting bytes into returned text.
 
+`read_file_range` accepts a required workspace-relative `path`, an optional
+0-indexed byte `offset`, and an optional `max_bytes`. It reads a byte range from
+that offset, caps the returned text at 64 KiB, and appends a truncation marker
+when more bytes are available after the requested range.
+
 `list_dir` accepts a required workspace-relative `path` plus optional `offset`,
 `limit`, and `depth`. Offsets are 1-indexed. Depth defaults to 1 and is capped at
 4. The default list remains capped at 200 entries for compatibility, while
@@ -95,4 +101,5 @@ the final rename phase can still leave a partial multi-file patch.
 `workspace-exec` is intended only for trusted local model sessions; shell
 commands are not filesystem-sandboxed beyond their starting directory and are
 not filtered by command content. Zeus terminal passthrough is separately
-user-initiated, but uses the same shell execution implementation.
+user-initiated, but uses the same shell execution implementation and therefore
+requires the session to be in `workspace-exec` mode.

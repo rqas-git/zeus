@@ -41,29 +41,37 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `GET /healthz` returns a lightweight health response.
 - `GET /capabilities` returns protocol version, contract hash, transports,
   route groups, and feature flags for frontend compatibility checks.
+- `GET /models` returns the default model, allowed model list, default
+  reasoning effort, and allowed reasoning efforts.
+- `GET /permissions` returns the default tool policy and allowed tool policies.
 - `GET /workspace` returns the canonical workspace root plus Git branch
   metadata when the workspace is a Git repository.
 - `POST /workspace/branch` switches the workspace to a local branch, auto-stashes
   dirty changes, and refreshes backend search state.
 - `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
   recent activity.
-- `POST /sessions` creates a random session and returns its current model.
+- `POST /sessions` creates a random session and returns its current model and
+  tool policy.
 - `GET /sessions/{session_id}` returns metadata for one durable session.
-- `GET /models` returns the default model and allowed model list.
 - `GET /sessions/{session_id}/model` returns the session model.
 - `PUT /sessions/{session_id}/model` changes the session model when idle.
+- `GET /sessions/{session_id}/permissions` returns the session tool policy.
+- `PUT /sessions/{session_id}/permissions` changes the session tool policy when
+  idle.
 - `POST /sessions:restore` restores an existing SQLite-backed session id into
   the active registry and returns its transcript records.
 - `DELETE /sessions/{session_id}` deletes the session from memory and SQLite,
   frees its registry slot, and closes its session event channel.
-- `POST /sessions/{session_id}/turns:stream` submits a user message and returns
-  the turn as SSE.
+- `POST /sessions/{session_id}/turns:stream` submits a user message with an
+  optional reasoning effort override and returns the turn as SSE.
 - `POST /sessions/{session_id}/turns:cancel` requests cancellation of the
   currently running turn for the session and returns whether a turn was active.
 - `POST /sessions/{session_id}/terminal:run` runs a user-initiated terminal
-  command through the `exec_command` tool and records the command plus output in
-  the session transcript without changing the session's model tool policy.
+  command through the `exec_command` tool when the session policy is
+  `workspace-exec`, and records the command plus output in the session
+  transcript without changing that policy.
 - `POST /sessions/{session_id}/compact` manually compacts the session and
+  accepts optional summary instructions and a reasoning effort override, then
   returns the generated summary, first retained message id, token estimate, and
   file operation details.
 - `GET /sessions/{session_id}/events` subscribes to session events as SSE.
@@ -113,6 +121,9 @@ heartbeat frames while connected.
 
 Important event names include:
 
+- `server.connected`
+- `server.heartbeat`
+- `server.events_lagged`
 - `session.status_changed`
 - `message.text_delta`
 - `message.completed`
@@ -125,8 +136,6 @@ Important event names include:
 - `turn.completed`
 - `turn.cancelled`
 - `session.error`
-- `server.heartbeat`
-- `server.events_lagged`
 
 `cache.health` includes prompt-cache status, stable/request input hashes, and
 provider token counters: input, cached input, output, reasoning output, and total
@@ -138,10 +147,11 @@ clients can render the requested tool invocation before the tool result arrives.
 The short `args` field is intentional and follows pi-mono's tool execution start
 event shape.
 Terminal command requests emit the same user-message, session-status, and
-tool-call lifecycle events as model-initiated tool calls, but the route returns a
-bounded JSON result instead of an SSE turn stream.
-Compaction requests emit status and compaction lifecycle events and return a
-bounded JSON summary result.
+tool-call lifecycle events as model-initiated tool calls. They require the
+session's current tool policy to expose `exec_command`, but the route returns a
+bounded JSON result instead of an SSE turn stream and does not mutate the
+policy. Compaction requests emit status and compaction lifecycle events and
+return a bounded JSON summary result.
 
 ## Contract
 
@@ -199,7 +209,9 @@ should stop. Per-user authorization and multi-process coordination are not
 implemented. Use `workspace-write` and `workspace-exec` only for trusted local
 deployments because any bearer-token holder can ask the model to edit workspace
 files or run local commands. User-initiated terminal commands run through a
-separate route and do not grant `workspace-exec` to future model turns.
+separate route and require the current session policy to be `workspace-exec`;
+the route itself does not grant or revoke `workspace-exec` for future model
+turns.
 WebSocket endpoints are not implemented because SSE matches the current
 server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should

@@ -54,6 +54,7 @@ telemetry, and tool configuration.
 - `RUST_AGENT_PARENT_PID`
 - `RUST_AGENT_CACHE_HEALTH`
 - `RUST_AGENT_TOOL_MODE`
+- `RUST_AGENT_TOOL_SEARCH_CONCURRENCY`
 - `RUST_AGENT_WORKSPACE`
 
 ## Responsibilities
@@ -71,7 +72,7 @@ telemetry, and tool configuration.
 ## Performance Notes
 
 - Configuration is loaded once, not per turn.
-- Model changes validate against an in-memory allowlist.
+- Model and reasoning-effort changes validate against in-memory allowlists.
 - Prompt, history, and output limits are plain copyable values.
 - Compaction defaults match pi-style behavior: enabled, 272,000 context tokens,
   16,384 reserve tokens, and 20,000 recent tokens retained verbatim.
@@ -108,6 +109,8 @@ Configuration is environment-only. ChatGPT auth tokens are stored separately in
 `RUST_AGENT_SERVER_TOKEN` is the local server bearer token. HTTP/3 uses a
 generated self-signed development certificate unless
 `RUST_AGENT_SERVER_TLS_CERT` and `RUST_AGENT_SERVER_TLS_KEY` are set together.
-Tool permissions and server route authentication are process-wide. File config,
-dynamic reload, and per-request overrides should be added only when endpoint
+The default tool policy and server route authentication are process-wide. Server
+mode can override the tool policy per active session through the permissions
+routes; those overrides are not a dynamic config reload. File config, dynamic
+reload, and broader per-request overrides should be added only when endpoint
 behavior requires them.
