@@ -2764,8 +2764,6 @@ fn display_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Duration;
-    use std::time::Instant;
 
     use serde_json::json;
 

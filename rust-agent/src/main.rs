@@ -446,7 +446,6 @@ fn parse_interactive_input(input: &str) -> Option<InteractiveInput> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-    use std::time::Instant;
 
     use super::*;
     use crate::bench_support::DurationSummary;

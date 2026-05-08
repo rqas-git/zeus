@@ -684,7 +684,6 @@ mod tests {
     use crate::agent_loop::is_turn_cancelled;
     use crate::agent_loop::ModelResponse;
     use crate::client::ConversationMessage;
-    use crate::tools::ToolPolicy;
     use crate::tools::ToolSpec;
 
     use super::*;

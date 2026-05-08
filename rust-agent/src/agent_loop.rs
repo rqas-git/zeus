@@ -1958,7 +1958,7 @@ fn rollback_persisted_message<T>(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex as StdMutex;
     use std::time::Instant;
 
@@ -1966,8 +1966,6 @@ mod tests {
 
     use super::*;
     use crate::bench_support::DurationSummary;
-    use crate::tools::ToolPolicy;
-    use crate::tools::ToolRegistry;
 
     #[tokio::test]
     async fn stores_one_turn_and_emits_ordered_events() {

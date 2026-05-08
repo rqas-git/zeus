@@ -2394,17 +2394,13 @@ struct CompactSessionRequest {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
     use axum::body::to_bytes;
     use axum::http::Method;
-    use axum::http::Request;
     use bytes::Buf;
     use tokio::sync::Notify;
     use tower::ServiceExt;

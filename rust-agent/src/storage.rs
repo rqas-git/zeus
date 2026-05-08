@@ -1195,8 +1195,6 @@ pub(crate) fn default_database_path() -> Result<PathBuf> {
 mod tests {
     use std::fs;
     use std::time::Instant;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
 
     use crate::bench_support::DurationSummary;
 
