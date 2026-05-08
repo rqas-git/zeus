@@ -31,8 +31,6 @@ use crate::tools::ToolRegistry;
 use crate::tools::ToolSpec;
 use crate::tools::EXEC_COMMAND_TOOL_NAME;
 
-const MAX_TOOL_ROUNDS: usize = 8;
-
 /// Shared cancellation signal for one running turn.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnCancellation {
@@ -1407,7 +1405,7 @@ impl AgentLoop {
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         let mut recovered_overflow = false;
-        for _ in 0..MAX_TOOL_ROUNDS {
+        loop {
             cancellation.ensure_not_cancelled()?;
             let tool_calls = match self
                 .run_once(model, cancellation, reasoning_effort, emit)
@@ -1447,8 +1445,6 @@ impl AgentLoop {
             self.store
                 .prune_history_with_compaction(self.context_window, self.compaction);
         }
-
-        anyhow::bail!("tool call limit exceeded")
     }
 
     async fn run_once(
@@ -2528,6 +2524,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continues_past_previous_tool_round_limit() {
+        let mut agent = AgentLoop::new(SessionId::new(7));
+        let streamer = ManyToolRoundsStreamer {
+            turn: AtomicUsize::new(0),
+            rounds: 9,
+        };
+        let mut events = Vec::new();
+
+        agent
+            .submit_user_message("keep reading", &streamer, |event| {
+                events.push(format_event(event));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(agent.store.status(), SessionStatus::Idle);
+        assert_eq!(agent.messages().last().unwrap().text(), "done");
+        assert_eq!(streamer.turn.load(Ordering::SeqCst), 10);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("tool-start:read_file:"))
+                .count(),
+            9
+        );
+    }
+
+    #[tokio::test]
     async fn executes_workspace_patch_tool_calls() {
         let temp = std::env::temp_dir().join(format!(
             "rust-agent-loop-patch-{}-{}",
@@ -3232,9 +3257,47 @@ mod tests {
         turn: AtomicUsize,
     }
 
+    struct ManyToolRoundsStreamer {
+        turn: AtomicUsize,
+        rounds: usize,
+    }
+
     struct LargeReadToolStreamer {
         turn: AtomicUsize,
         calls: usize,
+    }
+
+    impl ModelStreamer for ManyToolRoundsStreamer {
+        async fn stream_conversation<'a>(
+            &'a self,
+            messages: &'a [ConversationMessage<'a>],
+            tools: &'a [ToolSpec],
+            parallel_tool_calls: bool,
+            _session_id: SessionId,
+            _model: &'a str,
+            on_delta: &'a mut (dyn FnMut(&str) -> Result<()> + Send),
+        ) -> Result<ModelResponse> {
+            let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+            assert!(!tools.is_empty());
+            assert!(parallel_tool_calls);
+            assert_eq!(messages.len(), 1 + turn * 2);
+
+            if turn < self.rounds {
+                return Ok(ModelResponse::with_tool_calls(
+                    "",
+                    [ModelToolCall {
+                        item_id: Some(format!("fc_read_{turn}")),
+                        call_id: format!("call_read_{turn}"),
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.to_string(),
+                    }],
+                ));
+            }
+
+            assert_eq!(turn, self.rounds);
+            on_delta("done")?;
+            Ok(ModelResponse::new("done"))
+        }
     }
 
     impl ModelStreamer for LargeReadToolStreamer {
