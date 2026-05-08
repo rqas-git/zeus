@@ -1262,6 +1262,10 @@ impl AgentLoop {
         let command = command.into();
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "command cannot be empty");
+        anyhow::ensure!(
+            self.tools.policy() == ToolPolicy::WorkspaceExec,
+            "terminal commands require workspace-exec tool policy"
+        );
         let user_id = self
             .store
             .append_message(MessageRole::User, format!("$ {command}"));
@@ -1756,8 +1760,8 @@ impl AgentLoop {
             args: &tool_call.arguments,
         })?;
 
-        let terminal_tools = self.tools.with_policy(ToolPolicy::WorkspaceExec);
-        let execution = terminal_tools
+        let execution = self
+            .tools
             .execute_ref_with_cancellation(&tool_call, cancellation)
             .await;
         let result = TerminalCommandResult {
@@ -2583,7 +2587,7 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&temp);
         fs::create_dir_all(&temp).unwrap();
-        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::ReadOnly);
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceExec);
         let mut agent = AgentLoop::with_context_window_and_tools(
             SessionId::new(7),
             ContextWindowConfig::default(),
@@ -2606,7 +2610,7 @@ mod tests {
 
         assert!(result.success);
         assert!(result.output.contains("terminal-ok"));
-        assert_eq!(agent.tool_policy(), ToolPolicy::ReadOnly);
+        assert_eq!(agent.tool_policy(), ToolPolicy::WorkspaceExec);
         assert_eq!(
             events,
             [
@@ -2624,7 +2628,7 @@ mod tests {
              _parallel_tool_calls: bool,
              _model: &str,
              _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
-                assert!(!tools.iter().any(|tool| tool.name() == "exec_command"));
+                assert!(tools.iter().any(|tool| tool.name() == "exec_command"));
                 assert_eq!(history.len(), 4);
                 assert_eq!(
                     history[0],
@@ -2663,6 +2667,47 @@ mod tests {
             .submit_user_message("what happened?", &streamer, |_| Ok(()))
             .await
             .unwrap();
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_command_requires_workspace_exec_policy() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-loop-terminal-denied-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let tools = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::ReadOnly);
+        let mut agent = AgentLoop::with_context_window_and_tools(
+            SessionId::new(7),
+            ContextWindowConfig::default(),
+            SessionConfig::new("test-model"),
+            tools,
+        );
+        let mut events = Vec::new();
+
+        let error = agent
+            .run_terminal_command_with_cancellation(
+                "printf denied",
+                TurnCancellation::new(),
+                |event| {
+                    events.push(format_event(event));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "terminal commands require workspace-exec tool policy"
+        );
+        assert!(events.is_empty());
+        assert!(agent.messages().is_empty());
 
         fs::remove_dir_all(&temp).unwrap();
     }
