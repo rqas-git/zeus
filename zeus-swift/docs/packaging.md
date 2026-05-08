@@ -1,6 +1,6 @@
 # Packaging
 
-Build a local installable DMG that embeds the `rust-agent` release binary inside
+Build a local installable DMG that embeds a release `rust-agent` binary inside
 `Zeus.app`:
 
 ```bash
@@ -8,8 +8,8 @@ cd /Users/ajc/zeus
 zeus-swift/scripts/package-release.sh
 ```
 
-The default output is `zeus-swift/dist/Zeus.dmg`. By default the app is signed
-ad-hoc for local testing.
+The default output is `zeus-swift/dist/Zeus.dmg`. The default signing mode is
+ad-hoc and intended for local testing.
 
 Useful environment variables:
 
@@ -35,3 +35,22 @@ the actual bound HTTP and HTTP/3 addresses.
 Set `SIGN_IDENTITY` to a Developer ID Application identity and
 `NOTARY_PROFILE` to a `notarytool` keychain profile when creating a distributable
 DMG for other users.
+
+## Runtime Lookup
+
+Packaged apps prefer the bundled `rust-agent` executable next to the Zeus
+binary. Development runs fall back to a fresh `rust-agent/target/debug` binary
+or `cargo run` through `RustAgentLocator`. Set `RUST_AGENT_ROOT` when testing
+against a nonstandard backend checkout.
+
+## Validation
+
+Before packaging, run the relevant frontend checks and build the backend release
+binary:
+
+```bash
+cd /Users/ajc/zeus/rust-agent
+cargo build --release
+cd /Users/ajc/zeus
+swift run zeus-checks
+```

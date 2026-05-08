@@ -25,3 +25,6 @@
 | --- | --- |
 | `/restore <session id>` | Restore a local rust-agent transcript session by id. |
 | `/show-cache` | Toggle per-response token and prompt-cache stats below assistant messages. |
+
+Implementation details live in `docs/architecture/TERMINAL-UI.md` and
+`docs/architecture/CHAT-STATE.md`.
