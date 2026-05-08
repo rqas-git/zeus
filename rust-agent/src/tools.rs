@@ -48,6 +48,8 @@ use tokio::sync::Semaphore;
 use crate::agent_loop::ModelToolCall;
 use crate::agent_loop::TurnCancellation;
 
+// Tool names are part of the model-visible protocol and persisted transcripts.
+// Renaming them requires a backend/schema migration.
 const READ_FILE_TOOL: &str = "read_file";
 const READ_FILE_RANGE_TOOL: &str = "read_file_range";
 const LIST_DIR_TOOL: &str = "list_dir";
@@ -56,21 +58,31 @@ const SEARCH_TEXT_TOOL: &str = "search_text";
 const APPLY_PATCH_TOOL: &str = "apply_patch";
 const EXEC_COMMAND_TOOL: &str = "exec_command";
 pub(crate) const EXEC_COMMAND_TOOL_NAME: &str = EXEC_COMMAND_TOOL;
+// Read caps keep tool output inside the model context and prevent accidental
+// large-file loads from dominating terminal latency.
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const FILE_TRUNCATION_MARKER: &str = "\n[truncated: file exceeds 65536 bytes]";
 const RANGE_TRUNCATION_MARKER: &str = "\n[truncated: range exceeds requested max_bytes]";
+// Line caps are aligned with the file cap so pathological single-line files are
+// still readable without allocating unbounded strings.
 const DEFAULT_READ_LINE_LIMIT: usize = 2000;
 const MAX_READ_LINE_LIMIT: usize = 2000;
 const MAX_READ_LINE_BYTES: usize = 2000;
 const READ_LINE_TRUNCATION_SUFFIX: &str = "... (line truncated to 2000 bytes)";
+// Directory caps bound recursive walks and response size while giving the model
+// enough entries for ordinary source-tree navigation.
 const MAX_DIR_ENTRIES: usize = 200;
 const DEFAULT_LIST_DIR_LIMIT: usize = MAX_DIR_ENTRIES;
 const MAX_LIST_DIR_LIMIT: usize = 500;
 const DEFAULT_LIST_DIR_DEPTH: usize = 1;
 const MAX_LIST_DIR_DEPTH: usize = 4;
 const MAX_LIST_DIR_PAGE_WINDOW: usize = 10_000;
+// Patch caps keep in-process planning cheap and avoid rewriting unexpectedly
+// large files through the model-facing patch protocol.
 const MAX_PATCH_BYTES: usize = 256 * 1024;
 const MAX_PATCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
+// Command caps are intentionally conservative because `workspace-exec` is a
+// trusted local mode without command-level policy enforcement.
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const MAX_COMMAND_TIMEOUT_MS: u64 = 300_000;
 const MAX_COMMAND_BYTES: usize = 16 * 1024;
@@ -78,15 +90,22 @@ const DEFAULT_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOTAL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const COMMAND_OUTPUT_DIR: &str = "target/rust-agent-tool-output";
+// Polling stays short enough for responsive cancellation without hot-spinning.
 const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// Search caps bound FFF result formatting and keep repeated searches cheap in
+// model-driven turns.
 const DEFAULT_SEARCH_RESULTS: usize = 20;
 const MAX_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_OFFSET: usize = 100_000;
 const MAX_SEARCH_TEXT_OUTPUT_BYTES: usize = 64 * 1024;
+// FFF indexing is memory- and CPU-heavy on large repositories, so the default is
+// serial and higher concurrency is opt-in.
 pub(crate) const DEFAULT_FFF_SEARCH_CONCURRENCY: usize = 1;
 pub(crate) const MAX_FFF_SEARCH_CONCURRENCY: usize = 16;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
+// Warmup polling follows FFF index latency; lowering it creates mostly empty
+// wakeups while raising it makes first search feedback feel stalled.
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 static COMMAND_OUTPUT_ARTIFACT_COUNTER: AtomicUsize = AtomicUsize::new(0);

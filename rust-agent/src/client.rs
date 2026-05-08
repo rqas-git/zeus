@@ -29,6 +29,8 @@ use crate::auth::AuthManager;
 use crate::config::ClientConfig;
 use crate::tools::ToolSpec;
 
+// Backend header carrying opaque Codex turn state. This name is part of the
+// ChatGPT Codex request contract.
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 /// One message in the current in-memory conversation.
@@ -481,6 +483,8 @@ fn conversation_input_bytes(messages: &[ConversationMessage<'_>]) -> usize {
 struct Fnv1a64(u64);
 
 impl Fnv1a64 {
+    // Standard FNV-1a 64-bit constants. The hash is for stable cache-shape
+    // telemetry only, not for security.
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -958,6 +962,8 @@ struct ResponseError<'a> {
 }
 
 fn truncate_for_error(value: &str) -> String {
+    // Large provider error bodies are noisy and can include request echoes; keep
+    // enough text for debugging without flooding terminal output.
     const LIMIT: usize = 500;
     let trimmed = value.trim();
     if trimmed.len() <= LIMIT {

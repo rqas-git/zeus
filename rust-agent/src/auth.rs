@@ -20,11 +20,21 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+// OAuth endpoints and client ID match the ChatGPT device-code flow used by the
+// backend. Changing them requires coordinated auth-provider support.
 const DEFAULT_AUTH_ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+// Refresh one minute early to avoid starting a model request with a token that
+// expires during streaming.
 const ACCESS_TOKEN_REFRESH_BUFFER_SECONDS: u64 = 60;
+// Refresh tokens older than eight days are treated as stale to avoid repeated
+// failed refresh attempts with old local auth state.
 const MAX_REFRESH_AGE_SECONDS: u64 = 8 * 24 * 60 * 60;
+// Device login should wait long enough for a human browser round trip but still
+// return control to the terminal on abandoned attempts.
 const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// Temporary auth files include random suffixes; sixteen attempts covers rare
+// collisions without spinning forever on permission problems.
 const AUTH_TEMP_ATTEMPTS: u8 = 16;
 
 /// Short-lived credentials required by the model backend.
@@ -868,6 +878,8 @@ async fn error_response_body(response: reqwest::Response) -> String {
 }
 
 fn truncate_for_error(value: &str) -> String {
+    // Keeps backend error snippets useful in terminal output without printing
+    // unexpectedly large or sensitive response bodies.
     const LIMIT: usize = 500;
     let trimmed = value.trim();
     if trimmed.len() <= LIMIT {

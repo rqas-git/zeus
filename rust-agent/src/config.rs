@@ -14,6 +14,8 @@ use crate::tools::ToolPolicy;
 use crate::tools::DEFAULT_FFF_SEARCH_CONCURRENCY;
 use crate::tools::MAX_FFF_SEARCH_CONCURRENCY;
 
+// Defaults below match the current ChatGPT Codex backend contract. Changing
+// them can break request routing, model selection, or prompt-cache reuse.
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const DEFAULT_CODEX_VERSION: &str = "0.128.0";
@@ -21,28 +23,48 @@ const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_ALLOWED_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 const DEFAULT_REASONING_EFFORT: &str = "medium";
 const DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+// Stored under `RUST_AGENT_HOME` so model metadata can be reused without a
+// backend request on every launch.
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
+// Long enough for backend streaming setup under local network stalls, while
+// still bounding hung requests for terminal use.
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+// Prompt-window caps keep interactive requests small. Raising them can improve
+// recall but increases latency and prompt-cache churn.
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
 const DEFAULT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+// History caps bound process memory while preserving enough recent context for
+// compaction and session restore.
 const DEFAULT_HISTORY_MAX_MESSAGES: usize = 200;
 const DEFAULT_HISTORY_MAX_BYTES: usize = 256 * 1024;
 const DEFAULT_COMPACTION_ENABLED: bool = true;
+// Matches the large-context model budget used by pi-style compaction. The
+// reserve leaves room for model output and tool-call metadata.
 const DEFAULT_COMPACTION_CONTEXT_TOKENS: u64 = 272_000;
 const DEFAULT_COMPACTION_RESERVE_TOKENS: u64 = 16_384;
+// Retains the most recent work verbatim after compaction so active code edits
+// and command output stay visible to the model.
 const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS: u64 = 20_000;
+// Roughly one 60 Hz frame; batching at this cadence keeps terminal streaming
+// smooth without flushing every token.
 const DEFAULT_DELTA_FLUSH_INTERVAL_MS: u64 = 16;
 const DEFAULT_DELTA_FLUSH_BYTES: usize = 4096;
 const DEFAULT_CACHE_HEALTH_TELEMETRY: bool = false;
+// Fixed loopback defaults let the Swift app and shell smoke tests discover the
+// server predictably. Port 0 remains supported for supervised launches.
 const DEFAULT_SERVER_HTTP_ADDR: &str = "127.0.0.1:4096";
 const DEFAULT_SERVER_H3_ADDR: &str = "127.0.0.1:4433";
 const DEFAULT_SERVER_ALLOW_REMOTE_HTTP: bool = false;
+// Queue/session caps prevent one UI or client from growing unbounded server
+// memory. Increase only with matching load tests.
 const DEFAULT_SERVER_EVENT_QUEUE_CAPACITY: usize = 1024;
 const DEFAULT_SERVER_MAX_SESSIONS: usize = 128;
 const DEFAULT_SERVER_MAX_EVENT_CHANNELS: usize = 128;
 const DEFAULT_SERVER_H3_MAX_CONCURRENT_STREAMS: u32 = 256;
 const DEFAULT_SERVER_H3_IDLE_TIMEOUT_SECS: u64 = 60;
+// Tool mode defaults to read-only because write and exec modes are explicitly
+// trusted local-session capabilities.
 const DEFAULT_TOOL_MODE: &str = "read-only";
 
 /// Configuration for one running rust-agent process.

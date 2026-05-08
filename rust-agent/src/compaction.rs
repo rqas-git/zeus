@@ -11,6 +11,8 @@ use crate::config::CompactionConfig;
 /// System prompt used for summary generation.
 pub(crate) const SUMMARIZATION_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
 
+// These wrappers mark compacted history in the transcript. Changing them affects
+// prompt compatibility with existing stored compaction messages.
 const COMPACTION_SUMMARY_PREFIX: &str =
     "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
 const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";

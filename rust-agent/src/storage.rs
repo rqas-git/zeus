@@ -25,7 +25,14 @@ use crate::agent_loop::SessionId;
 use crate::agent_loop::SessionStatus;
 use crate::compaction::CompactionDetails;
 
+// SQLite busy waits cover short concurrent writes from the UI and background
+// server tasks without hiding long-lived database contention.
 const BUSY_TIMEOUT_MS: i32 = 5_000;
+// Negative `PRAGMA cache_size` values are KiB. 64 MiB keeps large transcript
+// scans fast without making each rust-agent process memory-heavy.
+const SQLITE_CACHE_SIZE_KIB: i32 = 64_000;
+// Session lists show a compact preview only; longer text belongs in the detail
+// endpoint and would make list responses noisy.
 const MAX_SESSION_PREVIEW_CHARS: i64 = 240;
 
 /// Durable state for one loaded session.
@@ -754,13 +761,14 @@ impl Connection {
     }
 
     fn configure(&mut self) -> Result<()> {
-        self.exec(
+        let pragmas = format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA cache_size = -64000;
-             PRAGMA foreign_keys = ON;",
-        )?;
+             PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};
+             PRAGMA cache_size = -{SQLITE_CACHE_SIZE_KIB};
+             PRAGMA foreign_keys = ON;"
+        );
+        self.exec(&pragmas)?;
         self.exec(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY,

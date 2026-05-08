@@ -63,19 +63,34 @@ use crate::service::SessionMetadata;
 use crate::service::SessionSnapshot;
 use crate::tools::ToolPolicy;
 
+// Server identity and content types are part of the Zeus API contract.
 const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
+// Heartbeats keep long-running SSE streams alive through local proxies without
+// adding meaningful idle CPU work.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+// Direct-turn stream buffering mirrors terminal delta batching and prevents
+// unbounded memory use if a client stops reading.
 const DIRECT_TURN_EVENT_QUEUE_CAPACITY: usize = 1024;
 const DIRECT_TURN_DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 const DIRECT_TURN_DELTA_FLUSH_BYTES: usize = 4096;
+// Parent checks are only a supervisor fallback; one second is fast enough to
+// stop orphaned local servers without busy polling.
 const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+// 256 bits of token entropy is sufficient for local bearer auth and keeps the
+// base64url readiness payload compact.
 const GENERATED_TOKEN_BYTES: usize = 32;
+// JavaScript clients represent integers exactly only through 2^53 - 1.
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
+// Session list pagination defaults keep UI requests small while allowing
+// explicit larger pages for sync operations.
 const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
 const MAX_SESSION_LIST_LIMIT: usize = 200;
+// Bump this only when changing the externally visible HTTP contract.
 const SERVER_PROTOCOL_VERSION: u32 = 1;
 const CONTRACT_SCHEMA_HASH_PLACEHOLDER: &str = "contract-schema-hash";
+// These arrays are emitted by `/capabilities`; changing them affects Swift
+// feature negotiation and contract fixtures.
 const SERVER_TRANSPORTS: &[&str] = &["http/1.1", "http/2", "http/3"];
 const SERVER_FEATURES: &[&str] = &[
     "workspace",
