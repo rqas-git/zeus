@@ -30,6 +30,7 @@ final class ChatViewModel: ObservableObject {
         "workspace-write",
         "workspace-exec"
     ]
+    @Published private(set) var showCacheStats = false
     @Published private(set) var tokenUsage = "0 / 272k tokens"
     @Published private(set) var isReady = false
     @Published private(set) var isSending = false
@@ -89,6 +90,7 @@ final class ChatViewModel: ObservableObject {
     private var terminalTask: Task<Void, Never>?
     private var assistantDeltaFlushTask: Task<Void, Never>?
     private var pendingAssistantDelta = ""
+    private var pendingCacheStats: [ResponseCacheStats] = []
     private var isSessionEventStreamConnected = false
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
@@ -182,6 +184,15 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        if message == "/show-cache" {
+            recordSubmittedMessage(message)
+            draft = ""
+            showCacheStats.toggle()
+            append(kind: .user, text: message)
+            append(kind: .status, text: showCacheStats ? "cache stats shown" : "cache stats hidden")
+            return
+        }
+
         guard !isSending, !isLoggingIn else { return }
         guard isReady else {
             append(kind: .status, text: "rust-agent is still starting")
@@ -198,6 +209,7 @@ final class ChatViewModel: ObservableObject {
         canCancelTurn = true
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
         append(kind: .user, text: message)
@@ -510,6 +522,7 @@ final class ChatViewModel: ObservableObject {
         case let .messageCompleted(_, role, text):
             guard role == "assistant" else { return }
             replaceAssistantText(text ?? "")
+            attachPendingCacheStats()
             currentAssistantLineID = nil
         case let .toolCallStarted(_, toolCallID, toolName, toolArguments):
             upsertToolLine(
@@ -535,6 +548,9 @@ final class ChatViewModel: ObservableObject {
             )
         case let .cacheHealth(_, cache):
             updateTokenUsage(cache?.usage)
+            if let cache {
+                pendingCacheStats.append(ResponseCacheStats(cache: cache))
+            }
         case .compactionStarted, .compactionCompleted:
             break
         case let .error(_, eventMessage):
@@ -562,6 +578,7 @@ final class ChatViewModel: ObservableObject {
         streamTask = nil
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
     }
 
     private func finishCancelledTurn() {
@@ -573,6 +590,7 @@ final class ChatViewModel: ObservableObject {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
         if wasCancellable {
             append(kind: .status, text: "turn cancelled")
         }
@@ -586,6 +604,7 @@ final class ChatViewModel: ObservableObject {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
     }
 
     private func failTurn(_ error: Error) {
@@ -596,6 +615,7 @@ final class ChatViewModel: ObservableObject {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
         append(kind: .error, text: error.localizedDescription)
     }
 
@@ -658,6 +678,16 @@ final class ChatViewModel: ObservableObject {
         lines[index].text = text
         assistantPlaceholderLineID = nil
         refreshSearchMatches()
+    }
+
+    private func attachPendingCacheStats() {
+        guard !pendingCacheStats.isEmpty,
+              let currentAssistantLineID,
+              let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) else {
+            return
+        }
+        lines[index].cacheStats.append(contentsOf: pendingCacheStats)
+        pendingCacheStats.removeAll(keepingCapacity: true)
     }
 
     private func showAssistantPlaceholder(_ text: String) {
@@ -748,6 +778,7 @@ final class ChatViewModel: ObservableObject {
         applySessionPermissions(restored.toolPolicy)
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
         lines = transcriptLines(from: restored.messages)

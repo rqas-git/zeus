@@ -84,6 +84,7 @@ struct ChatWindow: View {
 
                 TranscriptView(
                     lines: viewModel.lines,
+                    isCacheStatsVisible: viewModel.showCacheStats,
                     searchMatchLineIDs: viewModel.searchMatchLineIDs,
                     selectedSearchLineID: viewModel.selectedSearchLineID
                 )
@@ -774,6 +775,7 @@ private struct SearchBar: View {
 
 private struct TranscriptView: View {
     let lines: [TranscriptLine]
+    let isCacheStatsVisible: Bool
     let searchMatchLineIDs: Set<UUID>
     let selectedSearchLineID: UUID?
 
@@ -784,6 +786,7 @@ private struct TranscriptView: View {
                     ForEach(lines) { line in
                         TerminalLineView(
                             line: line,
+                            isCacheStatsVisible: isCacheStatsVisible,
                             isSearchMatch: searchMatchLineIDs.contains(line.id),
                             isSelectedSearchMatch: selectedSearchLineID == line.id
                         )
@@ -812,6 +815,7 @@ private struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
+    let isCacheStatsVisible: Bool
     let isSearchMatch: Bool
     let isSelectedSearchMatch: Bool
 
@@ -849,7 +853,7 @@ private struct TerminalLineView: View {
             if line.kind == .tool, let toolCall = line.toolCall {
                 ToolCallLine(toolCall: toolCall)
             } else if line.kind == .assistant {
-                TerminalMarkdownView(text: line.text)
+                assistantLine
             } else {
                 Text(line.text.isEmpty ? " " : line.text)
                     .foregroundStyle(textColor)
@@ -857,6 +861,20 @@ private struct TerminalLineView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .textSelection(.enabled)
+    }
+
+    private var assistantLine: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TerminalMarkdownView(text: line.text)
+
+            if isCacheStatsVisible {
+                ForEach(line.cacheStats.indices, id: \.self) { index in
+                    Text(line.cacheStats[index].displayText)
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundStyle(TerminalPalette.dimText)
+                }
+            }
+        }
     }
 
     @ViewBuilder

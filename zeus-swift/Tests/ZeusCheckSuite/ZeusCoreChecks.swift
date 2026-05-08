@@ -203,14 +203,34 @@ public enum ZeusCoreChecks {
         )
 
         let cacheHealth = try decodeEvent(
-            #"{"type":"cache_health","session_id":1,"cache":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}"#
+            #"{"type":"cache_health","session_id":1,"cache":{"model":"gpt-5.5","response_id":"resp_1","cache_status":"reused_prefix","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":2,"total_tokens":13}}}"#
         )
         guard case let .cacheHealth(_, cache) = cacheHealth else {
             throw CheckFailure.message("expected cache health event")
         }
-        try require(cache?.usage?.inputTokens == 2, "unexpected input tokens")
+        try require(cache?.model == "gpt-5.5", "unexpected cache model")
+        try require(cache?.responseID == "resp_1", "unexpected response id")
+        try require(cache?.cacheStatus == "reused_prefix", "unexpected cache status")
+        try require(cache?.usage?.inputTokens == 10, "unexpected input tokens")
+        try require(cache?.usage?.cachedInputTokens == 4, "unexpected cached tokens")
         try require(cache?.usage?.outputTokens == 3, "unexpected output tokens")
-        try require(cache?.usage?.totalTokens == 5, "unexpected total tokens")
+        try require(cache?.usage?.reasoningOutputTokens == 2, "unexpected reasoning tokens")
+        try require(cache?.usage?.totalTokens == 13, "unexpected total tokens")
+    }
+
+    public static func testResponseCacheStatsDisplay() throws {
+        let event = try decodeEvent(
+            #"{"type":"cache_health","session_id":1,"cache":{"model":"gpt-5.5","response_id":"resp_1","cache_status":"reused_prefix","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":2,"total_tokens":13}}}"#
+        )
+        guard case let .cacheHealth(_, cache?) = event else {
+            throw CheckFailure.message("expected cache health event")
+        }
+
+        let stats = ResponseCacheStats(cache: cache)
+        try require(
+            stats.displayText == "tokens input=10 cached=4 hit=40% output=3 reasoning=2 total=13 cache=reused_prefix model=gpt-5.5 response=resp_1",
+            "unexpected cache stats display"
+        )
     }
 
     public static func testPathDisplay() throws {

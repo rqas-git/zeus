@@ -14,17 +14,20 @@ struct TranscriptLine: Identifiable, Equatable {
     var kind: TranscriptKind
     var text: String
     var toolCall: ToolCallTranscript?
+    var cacheStats: [ResponseCacheStats]
 
     init(
         id: UUID = UUID(),
         kind: TranscriptKind,
         text: String,
-        toolCall: ToolCallTranscript? = nil
+        toolCall: ToolCallTranscript? = nil,
+        cacheStats: [ResponseCacheStats] = []
     ) {
         self.id = id
         self.kind = kind
         self.text = text
         self.toolCall = toolCall
+        self.cacheStats = cacheStats
     }
 }
 

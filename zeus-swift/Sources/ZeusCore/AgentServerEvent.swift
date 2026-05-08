@@ -129,18 +129,86 @@ public enum AgentServerEvent: Decodable, Equatable {
 }
 
 public struct CacheHealthPayload: Decodable, Equatable {
+    public let model: String?
+    public let responseID: String?
+    public let cacheStatus: String?
     public let usage: TokenUsagePayload?
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case responseID = "response_id"
+        case cacheStatus = "cache_status"
+        case usage
+    }
 }
 
 public struct TokenUsagePayload: Decodable, Equatable {
     public let inputTokens: UInt64?
+    public let cachedInputTokens: UInt64?
     public let outputTokens: UInt64?
+    public let reasoningOutputTokens: UInt64?
     public let totalTokens: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
+        case cachedInputTokens = "cached_input_tokens"
         case outputTokens = "output_tokens"
+        case reasoningOutputTokens = "reasoning_output_tokens"
         case totalTokens = "total_tokens"
+    }
+}
+
+public struct ResponseCacheStats: Equatable {
+    public let model: String?
+    public let responseID: String?
+    public let cacheStatus: String?
+    public let inputTokens: UInt64?
+    public let cachedInputTokens: UInt64?
+    public let outputTokens: UInt64?
+    public let reasoningOutputTokens: UInt64?
+    public let totalTokens: UInt64?
+
+    public init(cache: CacheHealthPayload) {
+        model = cache.model
+        responseID = cache.responseID
+        cacheStatus = cache.cacheStatus
+        inputTokens = cache.usage?.inputTokens
+        cachedInputTokens = cache.usage?.cachedInputTokens
+        outputTokens = cache.usage?.outputTokens
+        reasoningOutputTokens = cache.usage?.reasoningOutputTokens
+        totalTokens = cache.usage?.totalTokens
+    }
+
+    public var displayText: String {
+        var parts: [String] = ["tokens"]
+        append("input", inputTokens, to: &parts)
+        append("cached", cachedInputTokens, to: &parts)
+        if let cacheHit = cacheHitRatioText {
+            parts.append("hit=\(cacheHit)")
+        }
+        append("output", outputTokens, to: &parts)
+        append("reasoning", reasoningOutputTokens, to: &parts)
+        append("total", totalTokens, to: &parts)
+        append("cache", cacheStatus, to: &parts)
+        append("model", model, to: &parts)
+        append("response", responseID, to: &parts)
+        return parts.joined(separator: " ")
+    }
+
+    private var cacheHitRatioText: String? {
+        guard let inputTokens, inputTokens > 0, let cachedInputTokens else { return nil }
+        let ratio = Double(cachedInputTokens) / Double(inputTokens) * 100
+        return String(format: "%.0f%%", ratio)
+    }
+
+    private func append(_ label: String, _ value: UInt64?, to parts: inout [String]) {
+        guard let value else { return }
+        parts.append("\(label)=\(value)")
+    }
+
+    private func append(_ label: String, _ value: String?, to parts: inout [String]) {
+        guard let value, !value.isEmpty else { return }
+        parts.append("\(label)=\(value)")
     }
 }
 

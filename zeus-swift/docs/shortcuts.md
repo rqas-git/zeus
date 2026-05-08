@@ -24,3 +24,4 @@
 | Command | Action |
 | --- | --- |
 | `/restore <session id>` | Restore a local rust-agent transcript session by id. |
+| `/show-cache` | Toggle per-response token and prompt-cache stats below assistant messages. |

@@ -211,6 +211,12 @@ extension ZeusCoreChecks {
         guard case let .cacheHealth(_, cache) = try fixture.decodeEvent("cache.health") else {
             throw ContractCheckFailure.message("expected cache health event")
         }
+        try contractRequire(cache?.cacheStatus == "reused_prefix", "unexpected cache status")
+        try contractRequire(cache?.usage?.cachedInputTokens == 80, "unexpected cached token total")
+        try contractRequire(
+            cache?.usage?.reasoningOutputTokens == 4,
+            "unexpected reasoning token total"
+        )
         try contractRequire(cache?.usage?.totalTokens == 112, "unexpected cache token total")
     }
 }

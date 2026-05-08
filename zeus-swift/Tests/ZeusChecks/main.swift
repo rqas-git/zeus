@@ -17,6 +17,7 @@ struct ZeusChecks {
         checks.run("ToolMetadata maps display names", ZeusCoreChecks.testToolDisplayNames)
         checks.run("ToolMetadata summarizes arguments", ZeusCoreChecks.testToolTargets)
         checks.run("AgentServerEvent decodes typed events", ZeusCoreChecks.testAgentServerEvents)
+        checks.run("Response cache stats format compactly", ZeusCoreChecks.testResponseCacheStatsDisplay)
         checks.run(
             "rust-agent API contract fixtures decode",
             ZeusCoreChecks.testRustAgentAPIContractFixtures
