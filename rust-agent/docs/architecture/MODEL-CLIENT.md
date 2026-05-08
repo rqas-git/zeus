@@ -34,7 +34,9 @@ specific backend provider.
 - `AuthManager` owns rust-agent auth storage, device-code login, refresh, logout,
   and short-lived credentials for model calls.
 - `ChatGptClient` adds bearer and `ChatGPT-Account-ID` headers from fresh
-  credentials for each backend request.
+  credentials for each backend request. It also sends the prompt-cache key as
+  `session_id` and `x-client-request-id` so the Codex backend can keep repeated
+  session prefixes on the same cache route.
 - The typed request structs shape Responses API payloads.
 - `AssistantText` accumulates streamed text, handles fallback completed items,
   captures completed function calls, and captures response id plus token usage
@@ -59,10 +61,10 @@ specific backend provider.
   full-response byte caps. Like pi-mono's provider parsers, it assumes the
   configured backend is trusted and relies on context/history limits after
   parsing rather than truncating provider streams mid-response.
-- Prompt-cache keys are stable per configured namespace and model so separate
-  sessions with identical model-visible instructions and tools can reuse the
-  same prompt-cache prefix. Cache-prefix telemetry includes the stable tool-spec
-  shape so tool changes do not look like normal cache reuse.
+- Prompt-cache keys are stable per configured namespace, session, and model.
+  The same key is sent in the Responses body and session-affinity headers.
+  Cache-prefix telemetry includes the stable tool-spec shape so tool changes do
+  not look like normal cache reuse.
 - Cache-health telemetry records prompt-cache key, stable-prefix hash,
   retained-message shape, response id, and provider token counters, including
   cached input and reasoning output tokens when the backend reports them.

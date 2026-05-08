@@ -151,6 +151,8 @@ impl ChatGptClient {
             .header("ChatGPT-Account-ID", credentials.account_id())
             .header("originator", self.config.originator())
             .header("version", self.config.version())
+            .header("session_id", body.prompt_cache_key)
+            .header("x-client-request-id", body.prompt_cache_key)
             .header(header::ACCEPT, "text/event-stream")
             .json(body)
             .send()
@@ -238,7 +240,7 @@ impl ChatGptClient {
         messages: &'a [ConversationMessage<'a>],
         tools: &'a [ToolSpec],
         parallel_tool_calls: bool,
-        _session_id: SessionId,
+        session_id: SessionId,
         model: &'a str,
         reasoning_effort: Option<&'a str>,
         instructions: &'a str,
@@ -246,8 +248,8 @@ impl ChatGptClient {
     ) -> Result<ModelResponse> {
         anyhow::ensure!(!messages.is_empty(), "conversation cannot be empty");
 
+        let prompt_cache_key = self.config.prompt_cache_key(session_id.get(), model);
         let stable_prefix = stable_prefix_stats(instructions, tools);
-        let prompt_cache_key = self.config.prompt_cache_key(model);
         let input_bytes = conversation_input_bytes(messages);
         let body = ResponsesRequest {
             model,
@@ -1231,9 +1233,15 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
 
         let requests = model_server.requests();
         assert_eq!(requests.len(), 1);
+        assert!(requests[0]
+            .headers
+            .contains("session_id: reasoning-test-7-gpt-test"));
+        assert!(requests[0]
+            .headers
+            .contains("x-client-request-id: reasoning-test-7-gpt-test"));
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["reasoning"]["effort"], "xhigh");
-        assert_eq!(body["prompt_cache_key"], "reasoning-test-gpt-test");
+        assert_eq!(body["prompt_cache_key"], "reasoning-test-7-gpt-test");
         assert_eq!(
             response.cache_health.unwrap().usage,
             Some(TokenUsage::new(
