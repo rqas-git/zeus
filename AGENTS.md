@@ -31,12 +31,23 @@ Read the existing docs before changing code:
   - `rust-agent/docs/architecture/CONTEXT-WINDOW.md`
   - `rust-agent/docs/architecture/TERMINAL-HARNESS.md`
   - `rust-agent/docs/architecture/SECURITY.md`
-- Swift frontend docs:
+- Frontend working rules: `zeus-swift/AGENTS.md`
+- Frontend architecture and docs:
+  - `zeus-swift/docs/architecture/APP-LIFECYCLE.md`
+  - `zeus-swift/docs/architecture/SERVER-SUPERVISION.md`
+  - `zeus-swift/docs/architecture/API-CLIENT.md`
+  - `zeus-swift/docs/architecture/CHAT-STATE.md`
+  - `zeus-swift/docs/architecture/TERMINAL-UI.md`
+  - `zeus-swift/docs/architecture/ZEUSCORE.md`
+  - `zeus-swift/docs/architecture/CONTRACT.md`
+  - `zeus-swift/docs/architecture/SECURITY.md`
+  - `zeus-swift/docs/testing.md`
   - `zeus-swift/docs/shortcuts.md`
   - `zeus-swift/docs/packaging.md`
 
 Nested instructions apply. When working in `rust-agent/`, follow
-`rust-agent/AGENTS.md` in addition to this file.
+`rust-agent/AGENTS.md` in addition to this file. When working in
+`zeus-swift/`, follow `zeus-swift/AGENTS.md` in addition to this file.
 
 ## Backend Structure
 
@@ -83,31 +94,38 @@ Swift 6.2 packages with Swift language mode 5 targets:
 
 Key frontend files:
 
-- `Sources/Zeus/ZeusApp.swift`: app entry point and window creation.
-- `Sources/Zeus/ChatWindow.swift`: SwiftUI terminal UI, footer controls,
+- `zeus-swift/Sources/Zeus/ZeusApp.swift`: app entry point and window creation.
+- `zeus-swift/Sources/Zeus/ChatWindow.swift`: SwiftUI terminal UI, footer controls,
   shortcuts, transcript, search, and input handling.
-- `Sources/Zeus/ChatViewModel.swift`: main UI state machine for server startup,
-  sessions, streaming, login, model/effort/permission selection, terminal
-  passthrough, restore, branch switching, search, and cache stats.
-- `Sources/Zeus/AgentAPIClient.swift`: HTTP client and SSE parser for the
+- `zeus-swift/Sources/Zeus/ChatViewModel.swift`: main UI state machine for server
+  startup, sessions, streaming, login, model/effort/permission selection,
+  terminal passthrough, restore, branch switching, search, and cache stats.
+- `zeus-swift/Sources/Zeus/AgentAPIClient.swift`: HTTP client and SSE parser for the
   rust-agent server.
-- `Sources/Zeus/RustAgentServer.swift`: launches `rust-agent serve`, injects
-  server environment, reads readiness JSON, validates identity/capabilities,
-  and owns backend process lifetime.
-- `Sources/Zeus/RustAgentLocator.swift`: finds a bundled, debug, or Cargo-run
-  backend binary.
-- `Sources/Zeus/RustAgentAuth.swift`: runs backend login commands and reports
-  auth status.
-- `Sources/Zeus/AgentDependencies.swift`: protocols used to isolate the UI from
-  concrete server/client/auth implementations.
-- `Sources/ZeusCore/AgentAPIContract.swift`: Swift request/response types for
-  the backend contract.
-- `Sources/ZeusCore/AgentServerEvent.swift`: typed decoding for server SSE
-  events.
-- `Sources/ZeusCore/ToolMetadata.swift`: display metadata and argument
-  summaries for tool calls.
-- `Sources/ZeusCore/TerminalMarkdownParser.swift`: lightweight transcript
-  Markdown parser.
+- `zeus-swift/Sources/Zeus/RustAgentServer.swift`: launches `rust-agent serve`,
+  injects server environment, reads readiness JSON, validates
+  identity/capabilities, and owns backend process lifetime.
+- `zeus-swift/Sources/Zeus/RustAgentLocator.swift`: finds a bundled, debug, or
+  Cargo-run backend binary.
+- `zeus-swift/Sources/Zeus/RustAgentAuth.swift`: runs backend login commands and
+  reports auth status.
+- `zeus-swift/Sources/Zeus/AgentDependencies.swift`: protocols used to isolate
+  the UI from concrete server/client/auth implementations.
+- `zeus-swift/Sources/Zeus/PromptTextField.swift`: AppKit-backed prompt input.
+- `zeus-swift/Sources/Zeus/TerminalMarkdownView.swift`: SwiftUI rendering for
+  parsed terminal Markdown.
+- `zeus-swift/Sources/Zeus/TerminalPalette.swift`: shared terminal colors.
+- `zeus-swift/Sources/ZeusCore/AgentAPIContract.swift`: Swift request/response
+  types for the backend contract.
+- `zeus-swift/Sources/ZeusCore/AgentServerEvent.swift`: typed decoding for
+  server SSE events.
+- `zeus-swift/Sources/ZeusCore/ToolMetadata.swift`: display metadata and
+  argument summaries for tool calls.
+- `zeus-swift/Sources/ZeusCore/TerminalMarkdownParser.swift`: lightweight
+  transcript Markdown parser.
+- `zeus-swift/Sources/ZeusCore/PromptHistory.swift`: shell-like submitted
+  message navigation.
+- `zeus-swift/Sources/ZeusCore/PathDisplay.swift`: local path display helpers.
 
 Keep UI-specific behavior in `Zeus` and reusable parsing/contract logic in
 `ZeusCore`.
@@ -118,8 +136,8 @@ The contract boundary is the `rust-agent` server API.
 
 - Rust owns the canonical contract fixture via `cargo run -- contract`.
 - The checked-in fixture is `rust-agent/docs/contracts/zeus-api-contract.json`.
-- Swift decoders and checks in `ZeusCore` and `Tests/ZeusCheckSuite` must stay
-  compatible with that fixture.
+- Swift decoders and checks in `zeus-swift/Sources/ZeusCore` and
+  `zeus-swift/Tests/ZeusCheckSuite` must stay compatible with that fixture.
 
 When changing a route, request, response, readiness line, capability, feature
 flag, tool policy, transcript record, or SSE event:
@@ -130,7 +148,7 @@ flag, tool policy, transcript record, or SSE event:
 3. Update Swift contract types in `zeus-swift/Sources/ZeusCore/`.
 4. Update `AgentAPIClient`, `AgentDependencies`, and `ChatViewModel` if the UI
    needs to call or render the changed behavior.
-5. Update `Tests/ZeusCheckSuite/APIContractChecks.swift`.
+5. Update `zeus-swift/Tests/ZeusCheckSuite/APIContractChecks.swift`.
 6. Run both backend and frontend checks.
 
 Do not make the frontend infer undocumented server behavior. Add explicit
