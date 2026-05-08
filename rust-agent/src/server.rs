@@ -170,6 +170,8 @@ async fn wait_for_parent_process(parent_pid: Option<libc::pid_t>) -> Result<()> 
 }
 
 fn process_is_running(pid: libc::pid_t) -> bool {
+    // SAFETY: `kill(pid, 0)` performs permission/existence checks only and does
+    // not send a signal. `pid` comes from local configuration.
     let status = unsafe { libc::kill(pid, 0) };
     if status == 0 {
         return true;

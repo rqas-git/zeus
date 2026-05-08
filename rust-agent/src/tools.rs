@@ -1893,6 +1893,8 @@ async fn run_process(
 
 fn configure_process_group(command: &mut Command) {
     #[cfg(unix)]
+    // SAFETY: The `pre_exec` closure only calls async-signal-safe `setpgid` and
+    // returns the OS error without touching shared Rust state after fork.
     unsafe {
         command.pre_exec(|| {
             if libc::setpgid(0, 0) == 0 {
@@ -1907,6 +1909,8 @@ fn configure_process_group(command: &mut Command) {
 async fn kill_process(child_id: Option<u32>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(child_id) = child_id {
+        // SAFETY: Negative PID targets the process group created by
+        // `configure_process_group`; errors are intentionally best-effort here.
         unsafe {
             let _ = libc::kill(-(child_id as libc::pid_t), libc::SIGKILL);
         }

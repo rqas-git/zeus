@@ -487,7 +487,10 @@ struct DeviceTokenRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct DeviceAuthorization {
     authorization_code: String,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "device authorization returns this field, but only the verifier is needed"
+    )]
     code_challenge: String,
     code_verifier: String,
 }

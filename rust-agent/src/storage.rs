@@ -711,7 +711,8 @@ struct Connection {
     raw: *mut ffi::sqlite3,
 }
 
-// SQLite is opened in FULLMUTEX mode and every access is guarded by `SessionDatabase`'s mutex.
+// SAFETY: SQLite is opened in FULLMUTEX mode and every access is guarded by
+// `SessionDatabase`'s mutex.
 unsafe impl Send for Connection {}
 
 impl Connection {
@@ -723,6 +724,8 @@ impl Connection {
         let mut raw = ptr::null_mut();
         let flags =
             ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_FULLMUTEX;
+        // SAFETY: `path` is a NUL-terminated CString that lives for the call, and
+        // `raw` is a valid out pointer initialized by SQLite.
         let result = unsafe { ffi::sqlite3_open_v2(path.as_ptr(), &mut raw, flags, ptr::null()) };
         if result != ffi::SQLITE_OK {
             let message = if raw.is_null() {
@@ -731,6 +734,8 @@ impl Connection {
                 sqlite_error_message(raw)
             };
             if !raw.is_null() {
+                // SAFETY: SQLite returned this handle from `sqlite3_open_v2`; no
+                // Rust wrapper owns it on this error path.
                 unsafe {
                     ffi::sqlite3_close(raw);
                 }
@@ -739,6 +744,8 @@ impl Connection {
         }
 
         let connection = Self { raw };
+        // SAFETY: `connection.raw` is a live SQLite connection after the successful
+        // open above; both calls only mutate connection-local settings.
         unsafe {
             ffi::sqlite3_extended_result_codes(connection.raw, 1);
             ffi::sqlite3_busy_timeout(connection.raw, BUSY_TIMEOUT_MS);
@@ -838,6 +845,8 @@ impl Connection {
     fn exec(&mut self, sql: &str) -> Result<()> {
         let sql = CString::new(sql).context("SQL contains a NUL byte")?;
         let mut error = ptr::null_mut();
+        // SAFETY: `self.raw` is a live connection, `sql` is a NUL-terminated
+        // string that lives for the call, and `error` is a valid out pointer.
         let result =
             unsafe { ffi::sqlite3_exec(self.raw, sql.as_ptr(), None, ptr::null_mut(), &mut error) };
         if result == ffi::SQLITE_OK {
@@ -847,7 +856,10 @@ impl Connection {
         let message = if error.is_null() {
             self.error_message()
         } else {
+            // SAFETY: On failure, SQLite returns `error` as a valid NUL-terminated
+            // message allocated by SQLite until it is freed below.
             let message = unsafe { CStr::from_ptr(error).to_string_lossy().into_owned() };
+            // SAFETY: `error` was allocated by SQLite for `sqlite3_exec`.
             unsafe {
                 ffi::sqlite3_free(error.cast());
             }
@@ -859,6 +871,8 @@ impl Connection {
     fn prepare(&mut self, sql: &str) -> Result<Statement<'_>> {
         let sql = CString::new(sql).context("SQL contains a NUL byte")?;
         let mut statement = ptr::null_mut();
+        // SAFETY: `self.raw` is a live connection, `sql` is a NUL-terminated
+        // statement string, and `statement` is a valid out pointer.
         let result = unsafe {
             ffi::sqlite3_prepare_v2(self.raw, sql.as_ptr(), -1, &mut statement, ptr::null_mut())
         };
@@ -899,6 +913,7 @@ impl Connection {
     }
 
     fn changes(&self) -> i32 {
+        // SAFETY: `self.raw` is a live SQLite connection owned by `Connection`.
         unsafe { ffi::sqlite3_changes(self.raw) }
     }
 
@@ -909,6 +924,8 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        // SAFETY: `self.raw` is owned by this `Connection` and is closed exactly
+        // once from `Drop`.
         unsafe {
             ffi::sqlite3_close(self.raw);
         }
@@ -928,6 +945,8 @@ struct Statement<'connection> {
 
 impl Statement<'_> {
     fn bind_i64(&mut self, index: i32, value: i64) -> Result<()> {
+        // SAFETY: `self.raw` is a live prepared statement and `index` is checked by
+        // SQLite, which reports invalid bindings via the return code.
         self.check_bind(unsafe { ffi::sqlite3_bind_int64(self.raw, index, value) })
     }
 
@@ -936,6 +955,8 @@ impl Statement<'_> {
             .len()
             .try_into()
             .context("bound text is too large for SQLite")?;
+        // SAFETY: `value` is valid UTF-8 bytes for `length`, and
+        // `SQLITE_TRANSIENT` tells SQLite to copy the bytes before returning.
         self.check_bind(unsafe {
             ffi::sqlite3_bind_text(
                 self.raw,
@@ -962,6 +983,8 @@ impl Statement<'_> {
     }
 
     fn bind_null(&mut self, index: i32) -> Result<()> {
+        // SAFETY: `self.raw` is a live prepared statement and `index` is checked by
+        // SQLite, which reports invalid bindings via the return code.
         self.check_bind(unsafe { ffi::sqlite3_bind_null(self.raw, index) })
     }
 
@@ -974,6 +997,7 @@ impl Statement<'_> {
     }
 
     fn step(&mut self) -> Result<StepResult> {
+        // SAFETY: `self.raw` is a live prepared statement owned by this wrapper.
         match unsafe { ffi::sqlite3_step(self.raw) } {
             ffi::SQLITE_ROW => Ok(StepResult::Row),
             ffi::SQLITE_DONE => Ok(StepResult::Done),
@@ -989,6 +1013,8 @@ impl Statement<'_> {
     }
 
     fn column_i64(&self, index: i32) -> i64 {
+        // SAFETY: Callers only read columns after `sqlite3_step` returned
+        // `SQLITE_ROW`; SQLite validates `index` and returns its default on misuse.
         unsafe { ffi::sqlite3_column_int64(self.raw, index) }
     }
 
@@ -1009,14 +1035,19 @@ impl Statement<'_> {
         if self.column_type(index) == ffi::SQLITE_NULL {
             return Ok(None);
         }
+        // SAFETY: Callers only read columns after `sqlite3_step` returned
+        // `SQLITE_ROW`; SQLite keeps the pointer valid until the next step/reset/finalize.
         let text = unsafe { ffi::sqlite3_column_text(self.raw, index) };
         if text.is_null() {
             return Ok(Some(String::new()));
         }
+        // SAFETY: `text` is non-null and points at the same SQLite column value.
         let bytes = unsafe { ffi::sqlite3_column_bytes(self.raw, index) };
         let bytes: usize = bytes
             .try_into()
             .context("SQLite returned a negative text length")?;
+        // SAFETY: SQLite reports `bytes` as the number of bytes available at
+        // `text`; the slice is copied into an owned `String` before the statement advances.
         let slice = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), bytes) };
         Ok(Some(
             std::str::from_utf8(slice)
@@ -1026,12 +1057,16 @@ impl Statement<'_> {
     }
 
     fn column_type(&self, index: i32) -> i32 {
+        // SAFETY: `self.raw` is a live prepared statement; SQLite validates
+        // `index` and returns a type code for the current row.
         unsafe { ffi::sqlite3_column_type(self.raw, index) }
     }
 }
 
 impl Drop for Statement<'_> {
     fn drop(&mut self) {
+        // SAFETY: `self.raw` is owned by this `Statement` and finalized exactly
+        // once from `Drop`.
         unsafe {
             ffi::sqlite3_finalize(self.raw);
         }
@@ -1094,12 +1129,15 @@ fn now_millis() -> Result<i64> {
 }
 
 fn sqlite_error_message(raw: *mut ffi::sqlite3) -> String {
+    // SAFETY: Callers pass a live SQLite connection; SQLite returns a
+    // NUL-terminated message pointer valid until the next connection API call.
     unsafe { CStr::from_ptr(ffi::sqlite3_errmsg(raw)) }
         .to_string_lossy()
         .into_owned()
 }
 
 fn sqlite_error_string(code: i32) -> String {
+    // SAFETY: SQLite returns a static NUL-terminated string for any result code.
     unsafe { CStr::from_ptr(ffi::sqlite3_errstr(code)) }
         .to_string_lossy()
         .into_owned()
