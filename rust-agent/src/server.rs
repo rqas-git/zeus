@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -66,6 +67,8 @@ const SERVER_NAME: &str = "rust-agent";
 const SSE_CONTENT_TYPE: &str = "text/event-stream";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const DIRECT_TURN_EVENT_QUEUE_CAPACITY: usize = 1024;
+const DIRECT_TURN_DELTA_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+const DIRECT_TURN_DELTA_FLUSH_BYTES: usize = 4096;
 const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 const GENERATED_TOKEN_BYTES: usize = 32;
 const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
@@ -1080,6 +1083,7 @@ where
     tokio::spawn(async move {
         let mut error_forwarded = false;
         let event_tx = tx.clone();
+        let mut event_buffer = TurnEventBuffer::new(&event_tx);
         let result = service
             .submit_user_message_with_reasoning_effort_and_cancellation(
                 session_id,
@@ -1089,7 +1093,7 @@ where
                 |event| {
                     let event = ServerEvent::from_agent_event(event);
                     let is_error = matches!(event, ServerEvent::Error { .. });
-                    send_turn_event(&event_tx, event)?;
+                    event_buffer.send(event)?;
                     if is_error {
                         error_forwarded = true;
                     }
@@ -1103,20 +1107,20 @@ where
                 let event = ServerEvent::TurnCompleted {
                     session_id: session_id.get(),
                 };
-                let _ = send_turn_event(&tx, event);
+                let _ = event_buffer.send(event);
             }
             Err(error) if is_turn_cancelled(&error) => {
                 let event = ServerEvent::TurnCancelled {
                     session_id: session_id.get(),
                 };
-                let _ = send_turn_event(&tx, event);
+                let _ = event_buffer.send(event);
             }
             Err(error) if !error_forwarded => {
                 let event = ServerEvent::Error {
                     session_id: session_id.get(),
                     message: error.to_string(),
                 };
-                let _ = send_turn_event(&tx, event);
+                let _ = event_buffer.send(event);
             }
             Err(_) => {}
         }
@@ -1229,6 +1233,94 @@ where
     match state.events.subscribe(session_id) {
         Ok(receiver) => sse_from_broadcast(session_id, receiver),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+struct PendingTextDelta {
+    session_id: u64,
+    delta: String,
+    started_at: Instant,
+}
+
+struct TurnEventBuffer<'a> {
+    tx: &'a mpsc::Sender<ServerEvent>,
+    pending_delta: Option<PendingTextDelta>,
+    last_flush_at: Option<Instant>,
+}
+
+impl<'a> TurnEventBuffer<'a> {
+    fn new(tx: &'a mpsc::Sender<ServerEvent>) -> Self {
+        Self {
+            tx,
+            pending_delta: None,
+            last_flush_at: None,
+        }
+    }
+
+    fn send(&mut self, event: ServerEvent) -> Result<()> {
+        match event {
+            ServerEvent::TextDelta { session_id, delta } => self.send_text_delta(session_id, delta),
+            event => {
+                self.flush_text_delta()?;
+                send_turn_event(self.tx, event)
+            }
+        }
+    }
+
+    fn send_text_delta(&mut self, session_id: u64, delta: String) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+
+        if self.pending_delta.is_none()
+            && self.last_flush_at.map_or(true, |last_flush| {
+                last_flush.elapsed() >= DIRECT_TURN_DELTA_FLUSH_INTERVAL
+            })
+        {
+            self.last_flush_at = Some(Instant::now());
+            return send_turn_event(self.tx, ServerEvent::TextDelta { session_id, delta });
+        }
+
+        match self.pending_delta.as_mut() {
+            Some(pending) if pending.session_id == session_id => pending.delta.push_str(&delta),
+            Some(_) => {
+                self.flush_text_delta()?;
+                self.pending_delta = Some(PendingTextDelta {
+                    session_id,
+                    delta,
+                    started_at: Instant::now(),
+                });
+            }
+            None => {
+                self.pending_delta = Some(PendingTextDelta {
+                    session_id,
+                    delta,
+                    started_at: Instant::now(),
+                });
+            }
+        }
+
+        if self.pending_delta.as_ref().is_some_and(|pending| {
+            pending.delta.len() >= DIRECT_TURN_DELTA_FLUSH_BYTES
+                || pending.started_at.elapsed() >= DIRECT_TURN_DELTA_FLUSH_INTERVAL
+        }) {
+            self.flush_text_delta()?;
+        }
+        Ok(())
+    }
+
+    fn flush_text_delta(&mut self) -> Result<()> {
+        let Some(pending) = self.pending_delta.take() else {
+            return Ok(());
+        };
+        self.last_flush_at = Some(Instant::now());
+        send_turn_event(
+            self.tx,
+            ServerEvent::TextDelta {
+                session_id: pending.session_id,
+                delta: pending.delta,
+            },
+        )
     }
 }
 
@@ -3063,7 +3155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_turn_stream_preserves_events_above_configured_queue_capacity() {
+    async fn direct_turn_stream_batches_text_deltas() {
         const DELTAS: usize = 32;
 
         let service = Arc::new(AgentService::new(
@@ -3091,7 +3183,10 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = std::str::from_utf8(&body).unwrap();
 
-        assert_eq!(body.matches("event: message.text_delta\n").count(), DELTAS);
+        let text_delta_count = body.matches("event: message.text_delta\n").count();
+        assert!(text_delta_count > 0, "{body}");
+        assert!(text_delta_count < DELTAS, "{body}");
+        assert!(body.contains(&format!(r#""text":"{}""#, "x".repeat(DELTAS))));
         assert!(body.contains(
             "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
         ));
