@@ -535,6 +535,8 @@ final class ChatViewModel: ObservableObject {
             )
         case let .cacheHealth(_, cache):
             updateTokenUsage(cache?.usage)
+        case .compactionStarted, .compactionCompleted:
+            break
         case let .error(_, eventMessage):
             let message = eventMessage ?? "rust-agent reported an error."
             append(kind: .error, text: message)

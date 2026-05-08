@@ -21,6 +21,15 @@ public enum AgentServerEvent: Decodable, Equatable {
         success: Bool?
     )
     case cacheHealth(sessionID: UInt64?, cache: CacheHealthPayload?)
+    case compactionStarted(sessionID: UInt64?, reason: String?)
+    case compactionCompleted(
+        sessionID: UInt64?,
+        reason: String?,
+        summary: String?,
+        firstKeptMessageID: UInt64?,
+        tokensBefore: UInt64?,
+        details: CompactionDetails?
+    )
     case error(sessionID: UInt64?, message: String?)
     case turnCompleted(sessionID: UInt64?)
     case turnCancelled(sessionID: UInt64?)
@@ -36,6 +45,8 @@ public enum AgentServerEvent: Decodable, Equatable {
              let .toolCallStarted(sessionID, _, _, _),
              let .toolCallCompleted(sessionID, _, _, _, _),
              let .cacheHealth(sessionID, _),
+             let .compactionStarted(sessionID, _),
+             let .compactionCompleted(sessionID, _, _, _, _, _),
              let .error(sessionID, _),
              let .turnCompleted(sessionID),
              let .turnCancelled(sessionID),
@@ -94,6 +105,17 @@ public enum AgentServerEvent: Decodable, Equatable {
             )
         case "cache_health":
             self = .cacheHealth(sessionID: payload.sessionID, cache: payload.cache)
+        case "compaction_started":
+            self = .compactionStarted(sessionID: payload.sessionID, reason: payload.reason)
+        case "compaction_completed":
+            self = .compactionCompleted(
+                sessionID: payload.sessionID,
+                reason: payload.reason,
+                summary: payload.summary,
+                firstKeptMessageID: payload.firstKeptMessageID,
+                tokensBefore: payload.tokensBefore,
+                details: payload.details
+            )
         case "error":
             self = .error(sessionID: payload.sessionID, message: payload.message)
         case "turn_completed":
@@ -136,6 +158,11 @@ private struct AgentServerEventPayload: Decodable {
     let success: Bool?
     let skipped: UInt64?
     let cache: CacheHealthPayload?
+    let reason: String?
+    let summary: String?
+    let firstKeptMessageID: UInt64?
+    let tokensBefore: UInt64?
+    let details: CompactionDetails?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -152,6 +179,11 @@ private struct AgentServerEventPayload: Decodable {
         case success
         case skipped
         case cache
+        case reason
+        case summary
+        case firstKeptMessageID = "first_kept_message_id"
+        case tokensBefore = "tokens_before"
+        case details
     }
 
     init(from decoder: Decoder) throws {
@@ -170,5 +202,10 @@ private struct AgentServerEventPayload: Decodable {
         success = try container.decodeIfPresent(Bool.self, forKey: .success)
         skipped = try container.decodeIfPresent(UInt64.self, forKey: .skipped)
         cache = try container.decodeIfPresent(CacheHealthPayload.self, forKey: .cache)
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        firstKeptMessageID = try container.decodeIfPresent(UInt64.self, forKey: .firstKeptMessageID)
+        tokensBefore = try container.decodeIfPresent(UInt64.self, forKey: .tokensBefore)
+        details = try container.decodeIfPresent(CompactionDetails.self, forKey: .details)
     }
 }

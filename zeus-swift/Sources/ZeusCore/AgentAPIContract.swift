@@ -171,6 +171,35 @@ public struct CancelTurnResponse: Decodable {
     public let cancelled: Bool
 }
 
+public struct CompactionDetails: Decodable, Equatable {
+    public let readFiles: [String]
+    public let modifiedFiles: [String]
+
+    public init(readFiles: [String], modifiedFiles: [String]) {
+        self.readFiles = readFiles
+        self.modifiedFiles = modifiedFiles
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case readFiles = "read_files"
+        case modifiedFiles = "modified_files"
+    }
+}
+
+public struct CompactSessionResponse: Decodable, Equatable {
+    public let summary: String
+    public let firstKeptMessageID: UInt64
+    public let tokensBefore: UInt64
+    public let details: CompactionDetails
+
+    enum CodingKeys: String, CodingKey {
+        case summary
+        case firstKeptMessageID = "first_kept_message_id"
+        case tokensBefore = "tokens_before"
+        case details
+    }
+}
+
 public struct SetModelRequest: Codable, Equatable {
     public let model: String
 
@@ -231,5 +260,20 @@ public struct TerminalCommandRequest: Codable, Equatable {
 
     public init(command: String) {
         self.command = command
+    }
+}
+
+public struct CompactSessionRequest: Codable, Equatable {
+    public let instructions: String
+    public let reasoningEffort: String
+
+    public init(instructions: String, reasoningEffort: String) {
+        self.instructions = instructions
+        self.reasoningEffort = reasoningEffort
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case instructions
+        case reasoningEffort = "reasoning_effort"
     }
 }
