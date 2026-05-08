@@ -140,7 +140,7 @@ struct ChatWindow: View {
             }
             .padding(.horizontal, 19)
             .padding(.top, 10)
-            .padding(.bottom, 14)
+            .padding(.bottom, 11)
         }
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowConfigurator())
