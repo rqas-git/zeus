@@ -115,6 +115,11 @@ struct TranscriptScrollTarget: Equatable {
     let revision: Int
 }
 
+struct ActiveAssistantStream: Equatable {
+    let lineID: UUID
+    let text: String
+}
+
 struct ToolCallTranscript: Equatable {
     var name: String
     var action: String

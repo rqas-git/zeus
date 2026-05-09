@@ -5,6 +5,7 @@ import ZeusCore
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
     @Published private(set) var transcriptScrollTarget: TranscriptScrollTarget?
+    @Published private(set) var activeAssistantStream: ActiveAssistantStream?
     @Published var draft = "" {
         didSet {
             guard !isApplyingDraftFromHistory else { return }
@@ -74,6 +75,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
+    private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
     private let server: any AgentServerProtocol
     private let auth: any AgentAuthProtocol
     private var client: (any AgentClientProtocol)?
@@ -83,6 +85,7 @@ final class ChatViewModel: ObservableObject {
     private var assistantPlaceholderLineID: UUID?
     private var toolLineIDsByCallID: [String: UUID] = [:]
     private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
+    private var lastAssistantScrollRequest = Date.distantPast
     private var streamTask: Task<Void, Never>?
     private var sessionEventTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
@@ -214,6 +217,8 @@ final class ChatViewModel: ObservableObject {
         canCancelTurn = true
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        activeAssistantStream = nil
+        lastAssistantScrollRequest = .distantPast
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
@@ -676,15 +681,17 @@ final class ChatViewModel: ObservableObject {
     private func applyAssistantDelta(_ delta: String) {
         let id = ensureAssistantLine()
         guard let index = lineIndex(for: id) else { return }
-        if assistantPlaceholderLineID == id {
-            lines[index].text = ""
-            assistantPlaceholderLineID = nil
+        let previousText = activeAssistantStream?.lineID == id
+            ? activeAssistantStream?.text ?? ""
+            : lines[index].text
+        let baseText = assistantPlaceholderLineID == id ? "" : previousText
+        assistantPlaceholderLineID = nil
+        activeAssistantStream = ActiveAssistantStream(lineID: id, text: baseText + delta)
+        if !lines[index].isStreaming {
+            lines[index].isStreaming = true
         }
-        lines[index].text += delta
-        lines[index].isStreaming = true
-        lines[index].renderedMarkdown = nil
         refreshSearchMatches()
-        requestScrollTo(id)
+        requestStreamingScrollTo(id)
     }
 
     private func replaceAssistantText(_ text: String) {
@@ -695,6 +702,9 @@ final class ChatViewModel: ObservableObject {
         lines[index].isStreaming = false
         lines[index].renderedMarkdown = nil
         assistantPlaceholderLineID = nil
+        if activeAssistantStream?.lineID == id {
+            activeAssistantStream = nil
+        }
         scheduleMarkdownRendering(for: lines[index])
         refreshSearchMatches()
         requestScrollTo(id)
@@ -713,10 +723,14 @@ final class ChatViewModel: ObservableObject {
     private func showAssistantPlaceholder(_ text: String) {
         let id = ensureAssistantLine()
         guard let index = lineIndex(for: id) else { return }
-        guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
-        lines[index].text = text
-        lines[index].isStreaming = true
-        lines[index].renderedMarkdown = nil
+        let visibleText = activeAssistantStream?.lineID == id
+            ? activeAssistantStream?.text ?? ""
+            : lines[index].text
+        guard assistantPlaceholderLineID == id || visibleText.isEmpty else { return }
+        activeAssistantStream = ActiveAssistantStream(lineID: id, text: text)
+        if !lines[index].isStreaming {
+            lines[index].isStreaming = true
+        }
         assistantPlaceholderLineID = id
         refreshSearchMatches()
         requestScrollTo(id)
@@ -726,6 +740,9 @@ final class ChatViewModel: ObservableObject {
         guard let assistantPlaceholderLineID,
               let index = lineIndex(for: assistantPlaceholderLineID) else {
             return
+        }
+        if activeAssistantStream?.lineID == assistantPlaceholderLineID {
+            activeAssistantStream = nil
         }
         removeLine(at: index)
         self.assistantPlaceholderLineID = nil
@@ -749,6 +766,11 @@ final class ChatViewModel: ObservableObject {
         guard let currentAssistantLineID,
               let index = lineIndex(for: currentAssistantLineID) else {
             return
+        }
+        if !isStreaming,
+           activeAssistantStream?.lineID == currentAssistantLineID {
+            lines[index].text = activeAssistantStream?.text ?? lines[index].text
+            activeAssistantStream = nil
         }
         lines[index].isStreaming = isStreaming
         if isStreaming {
@@ -822,6 +844,16 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
+    private func requestStreamingScrollTo(_ id: UUID) {
+        let now = Date()
+        guard now.timeIntervalSince(lastAssistantScrollRequest)
+            >= Self.assistantScrollThrottleSeconds else {
+            return
+        }
+        lastAssistantScrollRequest = now
+        requestScrollTo(id)
+    }
+
     private func upsertToolLine(
         callID: String?,
         display: ToolCallTranscript
@@ -879,6 +911,7 @@ final class ChatViewModel: ObservableObject {
         applySessionPermissions(restored.toolPolicy)
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        activeAssistantStream = nil
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
@@ -1108,7 +1141,7 @@ final class ChatViewModel: ObservableObject {
 
         let preferredLineID = selectedSearchLineID
         let matches = lines.compactMap { line -> UUID? in
-            line.text.range(
+            searchableText(for: line).range(
                 of: query,
                 options: [.caseInsensitive, .diacriticInsensitive]
             ) == nil ? nil : line.id
@@ -1152,6 +1185,13 @@ final class ChatViewModel: ObservableObject {
         ) % searchMatchedLineIDsInOrder.count
         selectedSearchLineID = searchMatchedLineIDsInOrder[nextIndex]
         searchResultSummary = "\(nextIndex + 1) / \(searchMatchedLineIDsInOrder.count) lines"
+    }
+
+    private func searchableText(for line: TranscriptLine) -> String {
+        if activeAssistantStream?.lineID == line.id {
+            return activeAssistantStream?.text ?? line.text
+        }
+        return line.text
     }
 
     private func createFreshSession() async throws {

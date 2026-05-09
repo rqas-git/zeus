@@ -84,6 +84,7 @@ struct ChatWindow: View {
 
                 TranscriptView(
                     lines: viewModel.lines,
+                    activeAssistantStream: viewModel.activeAssistantStream,
                     isCacheStatsVisible: viewModel.showCacheStats,
                     searchMatchLineIDs: viewModel.searchMatchLineIDs,
                     selectedSearchLineID: viewModel.selectedSearchLineID,
@@ -812,6 +813,7 @@ private struct SearchBar: View {
 
 private struct TranscriptView: View {
     let lines: [TranscriptLine]
+    let activeAssistantStream: ActiveAssistantStream?
     let isCacheStatsVisible: Bool
     let searchMatchLineIDs: Set<UUID>
     let selectedSearchLineID: UUID?
@@ -824,6 +826,9 @@ private struct TranscriptView: View {
                     ForEach(lines) { line in
                         TerminalLineView(
                             line: line,
+                            streamingText: activeAssistantStream?.lineID == line.id
+                                ? activeAssistantStream?.text
+                                : nil,
                             isCacheStatsVisible: isCacheStatsVisible,
                             isSearchMatch: searchMatchLineIDs.contains(line.id),
                             isSelectedSearchMatch: selectedSearchLineID == line.id
@@ -853,6 +858,7 @@ private struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
+    let streamingText: String?
     let isCacheStatsVisible: Bool
     let isSearchMatch: Bool
     let isSelectedSearchMatch: Bool
@@ -904,7 +910,8 @@ private struct TerminalLineView: View {
     private var assistantLine: some View {
         VStack(alignment: .leading, spacing: 4) {
             if line.isStreaming {
-                Text(line.text.isEmpty ? " " : line.text)
+                let text = streamingText ?? line.text
+                Text(text.isEmpty ? " " : text)
                     .foregroundStyle(TerminalPalette.primaryText)
             } else if let markdown = line.renderedMarkdown {
                 TerminalMarkdownView(markdown: markdown)
