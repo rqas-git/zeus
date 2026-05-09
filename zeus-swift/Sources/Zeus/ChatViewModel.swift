@@ -89,11 +89,14 @@ final class ChatViewModel: ObservableObject {
     private var branchSwitchTask: Task<Void, Never>?
     private var terminalTask: Task<Void, Never>?
     private var assistantDeltaFlushTask: Task<Void, Never>?
+    private var markdownRenderTask: Task<Void, Never>?
     private var pendingAssistantDelta = ""
     private var pendingCacheStats: [ResponseCacheStats] = []
+    private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
     private var isSessionEventStreamConnected = false
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
+    private var lineIndexesByID: [UUID: Int] = [:]
     private var searchMatchedLineIDsInOrder: [UUID] = []
     private var transcriptScrollRevision = 0
     private var submittedMessageHistory = PromptHistory()
@@ -117,6 +120,7 @@ final class ChatViewModel: ObservableObject {
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
         assistantDeltaFlushTask?.cancel()
+        markdownRenderTask?.cancel()
         auth.cancelLogin()
         server.stop()
     }
@@ -270,6 +274,9 @@ final class ChatViewModel: ObservableObject {
         branchSwitchTask = nil
         terminalTask?.cancel()
         terminalTask = nil
+        markdownRenderTask?.cancel()
+        markdownRenderTask = nil
+        pendingMarkdownRenders.removeAll(keepingCapacity: true)
         auth.cancelLogin()
         server.stop()
     }
@@ -668,7 +675,7 @@ final class ChatViewModel: ObservableObject {
 
     private func applyAssistantDelta(_ delta: String) {
         let id = ensureAssistantLine()
-        guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = lineIndex(for: id) else { return }
         if assistantPlaceholderLineID == id {
             lines[index].text = ""
             assistantPlaceholderLineID = nil
@@ -683,11 +690,12 @@ final class ChatViewModel: ObservableObject {
     private func replaceAssistantText(_ text: String) {
         clearPendingAssistantDelta()
         let id = ensureAssistantLine()
-        guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = lineIndex(for: id) else { return }
         lines[index].text = text
         lines[index].isStreaming = false
-        lines[index].renderedMarkdown = RenderedTerminalMarkdown(text: text)
+        lines[index].renderedMarkdown = nil
         assistantPlaceholderLineID = nil
+        scheduleMarkdownRendering(for: lines[index])
         refreshSearchMatches()
         requestScrollTo(id)
     }
@@ -695,7 +703,7 @@ final class ChatViewModel: ObservableObject {
     private func attachPendingCacheStats() {
         guard !pendingCacheStats.isEmpty,
               let currentAssistantLineID,
-              let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) else {
+              let index = lineIndex(for: currentAssistantLineID) else {
             return
         }
         lines[index].cacheStats.append(contentsOf: pendingCacheStats)
@@ -704,7 +712,7 @@ final class ChatViewModel: ObservableObject {
 
     private func showAssistantPlaceholder(_ text: String) {
         let id = ensureAssistantLine()
-        guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = lineIndex(for: id) else { return }
         guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
         lines[index].text = text
         lines[index].isStreaming = true
@@ -716,10 +724,10 @@ final class ChatViewModel: ObservableObject {
 
     private func removeAssistantPlaceholder() {
         guard let assistantPlaceholderLineID,
-              let index = lines.firstIndex(where: { $0.id == assistantPlaceholderLineID }) else {
+              let index = lineIndex(for: assistantPlaceholderLineID) else {
             return
         }
-        lines.remove(at: index)
+        removeLine(at: index)
         self.assistantPlaceholderLineID = nil
         refreshSearchMatches()
         requestScrollToLastLine()
@@ -731,7 +739,7 @@ final class ChatViewModel: ObservableObject {
         }
 
         let line = TranscriptLine(kind: .assistant, text: "", isStreaming: isSending)
-        lines.append(line)
+        appendLine(line)
         currentAssistantLineID = line.id
         requestScrollTo(line.id)
         return line.id
@@ -739,22 +747,66 @@ final class ChatViewModel: ObservableObject {
 
     private func markCurrentAssistantLineStreaming(_ isStreaming: Bool) {
         guard let currentAssistantLineID,
-              let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) else {
+              let index = lineIndex(for: currentAssistantLineID) else {
             return
         }
         lines[index].isStreaming = isStreaming
         if isStreaming {
             lines[index].renderedMarkdown = nil
         } else if lines[index].kind == .assistant {
-            lines[index].renderedMarkdown = RenderedTerminalMarkdown(text: lines[index].text)
+            lines[index].renderedMarkdown = nil
+            scheduleMarkdownRendering(for: lines[index])
         }
     }
 
     private func append(kind: TranscriptKind, text: String) {
         let line = TranscriptLine(kind: kind, text: text)
-        lines.append(line)
+        appendLine(line)
         refreshSearchMatches()
         requestScrollTo(line.id)
+    }
+
+    private func lineIndex(for id: UUID) -> Int? {
+        if let index = lineIndexesByID[id],
+           lines.indices.contains(index),
+           lines[index].id == id {
+            return index
+        }
+
+        guard let index = lines.firstIndex(where: { $0.id == id }) else {
+            lineIndexesByID.removeValue(forKey: id)
+            return nil
+        }
+        lineIndexesByID[id] = index
+        return index
+    }
+
+    private func appendLine(_ line: TranscriptLine) {
+        lines.append(line)
+        lineIndexesByID[line.id] = lines.count - 1
+    }
+
+    private func insertLine(_ line: TranscriptLine, at index: Int) {
+        lines.insert(line, at: index)
+        rebuildLineIndexes()
+    }
+
+    private func removeLine(at index: Int) {
+        lineIndexesByID.removeValue(forKey: lines[index].id)
+        lines.remove(at: index)
+        rebuildLineIndexes()
+    }
+
+    private func replaceTranscriptLines(_ newLines: [TranscriptLine]) {
+        lines = newLines
+        rebuildLineIndexes()
+    }
+
+    private func rebuildLineIndexes() {
+        lineIndexesByID.removeAll(keepingCapacity: true)
+        for (index, line) in lines.enumerated() {
+            lineIndexesByID[line.id] = index
+        }
     }
 
     private func requestScrollToLastLine() {
@@ -783,7 +835,7 @@ final class ChatViewModel: ObservableObject {
 
         toolDisplaysByCallID[callID] = display
         if let lineID = toolLineIDsByCallID[callID],
-           let index = lines.firstIndex(where: { $0.id == lineID }) {
+           let index = lineIndex(for: lineID) {
             lines[index].text = text
             lines[index].toolCall = display
             refreshSearchMatches()
@@ -801,21 +853,21 @@ final class ChatViewModel: ObservableObject {
         let lineID = line.id
 
         if let currentAssistantLineID,
-           let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) {
-            lines.insert(line, at: index)
+           let index = lineIndex(for: currentAssistantLineID) {
+            insertLine(line, at: index)
             refreshSearchMatches()
             requestScrollTo(currentAssistantLineID)
             return lineID
         }
 
         if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
-            lines.insert(line, at: index)
+            insertLine(line, at: index)
             refreshSearchMatches()
             requestScrollTo(lineID)
             return lineID
         }
 
-        lines.append(line)
+        appendLine(line)
         refreshSearchMatches()
         requestScrollTo(lineID)
         return lineID
@@ -830,7 +882,9 @@ final class ChatViewModel: ObservableObject {
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
-        lines = transcriptLines(from: restored.messages)
+        let restoredLines = transcriptLines(from: restored.messages)
+        replaceTranscriptLines(restoredLines)
+        scheduleMarkdownRendering(for: restoredLines)
         replaceSubmittedMessages(with: restored.messages)
         refreshSearchMatches()
         requestScrollToLastLine()
@@ -848,8 +902,7 @@ final class ChatViewModel: ObservableObject {
                 let text = record.text ?? ""
                 restoredLines.append(TranscriptLine(
                     kind: kind,
-                    text: text,
-                    renderedMarkdown: kind == .assistant ? RenderedTerminalMarkdown(text: text) : nil
+                    text: text
                 ))
             case "function_call":
                 let display = toolDisplay(
@@ -883,6 +936,61 @@ final class ChatViewModel: ObservableObject {
         }
 
         return restoredLines
+    }
+
+    private func scheduleMarkdownRendering(for line: TranscriptLine) {
+        scheduleMarkdownRendering(for: [line])
+    }
+
+    private func scheduleMarkdownRendering(for lines: [TranscriptLine]) {
+        let snapshots = lines.compactMap { line -> MarkdownRenderSnapshot? in
+            guard line.kind == .assistant, !line.text.isEmpty else { return nil }
+            return MarkdownRenderSnapshot(lineID: line.id, text: line.text)
+        }
+        scheduleMarkdownRendering(snapshots)
+    }
+
+    private func scheduleMarkdownRendering(_ snapshots: [MarkdownRenderSnapshot]) {
+        guard !snapshots.isEmpty else { return }
+        for snapshot in snapshots {
+            pendingMarkdownRenders[snapshot.lineID] = snapshot
+        }
+        startMarkdownRenderTaskIfNeeded()
+    }
+
+    private func startMarkdownRenderTaskIfNeeded() {
+        guard markdownRenderTask == nil, !pendingMarkdownRenders.isEmpty else { return }
+        let snapshots = Array(pendingMarkdownRenders.values)
+        pendingMarkdownRenders.removeAll(keepingCapacity: true)
+
+        markdownRenderTask = Task { [weak self] in
+            let assignments = await Task.detached(priority: .utility) {
+                snapshots.map { snapshot in
+                    MarkdownRenderAssignment(
+                        lineID: snapshot.lineID,
+                        text: snapshot.text,
+                        markdown: RenderedTerminalMarkdown(text: snapshot.text)
+                    )
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.finishMarkdownRendering(assignments)
+        }
+    }
+
+    private func finishMarkdownRendering(_ assignments: [MarkdownRenderAssignment]) {
+        for assignment in assignments {
+            guard let index = lineIndex(for: assignment.lineID),
+                  lines[index].kind == .assistant,
+                  lines[index].text == assignment.text,
+                  !lines[index].isStreaming else {
+                continue
+            }
+            lines[index].renderedMarkdown = assignment.markdown
+        }
+
+        markdownRenderTask = nil
+        startMarkdownRenderTaskIfNeeded()
     }
 
     private func transcriptKind(forRole role: String?) -> TranscriptKind? {
@@ -1252,6 +1360,17 @@ final class ChatViewModel: ObservableObject {
     private func resetDraftHistoryNavigation() {
         submittedMessageHistory.reset()
     }
+}
+
+private struct MarkdownRenderSnapshot: Sendable {
+    let lineID: UUID
+    let text: String
+}
+
+private struct MarkdownRenderAssignment: Sendable {
+    let lineID: UUID
+    let text: String
+    let markdown: RenderedTerminalMarkdown
 }
 
 private enum SessionEventStreamError: LocalizedError {
