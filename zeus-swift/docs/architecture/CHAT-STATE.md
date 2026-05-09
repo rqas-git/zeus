@@ -10,10 +10,12 @@ published SwiftUI state and coordinates asynchronous backend work.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
 3. Assistant text deltas are buffered briefly before updating the transcript to
-   avoid excessive UI churn.
+   avoid excessive UI churn. The active assistant line renders as plain text
+   while streaming, then stores parsed Markdown blocks after completion.
 4. Tool-call start and completion events upsert tool transcript rows by call id.
-5. Cache-health events are collected for the active assistant response and shown
-   only when `/show-cache` is enabled.
+5. Token usage updates come from cache-health and turn-token-usage events.
+   Cache-health events are also collected for the active assistant response and
+   shown only when `/show-cache` is enabled.
 6. Completion, cancellation, and error paths clear turn-local state and update
    readiness flags.
 7. `/restore <session id>` replaces transcript and prompt history from backend

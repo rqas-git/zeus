@@ -4,6 +4,7 @@ import ZeusCore
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var lines: [TranscriptLine] = []
+    @Published private(set) var transcriptScrollTarget: TranscriptScrollTarget?
     @Published var draft = "" {
         didSet {
             guard !isApplyingDraftFromHistory else { return }
@@ -94,6 +95,7 @@ final class ChatViewModel: ObservableObject {
     private var sessionModel = "gpt-5.5"
     private var sessionPermission = "read-only"
     private var searchMatchedLineIDsInOrder: [UUID] = []
+    private var transcriptScrollRevision = 0
     private var submittedMessageHistory = PromptHistory()
     private var isApplyingDraftFromHistory = false
 
@@ -549,6 +551,8 @@ final class ChatViewModel: ObservableObject {
             if let cache {
                 pendingCacheStats.append(ResponseCacheStats(cache: cache))
             }
+        case let .turnTokenUsage(_, usage):
+            updateTokenUsage(usage)
         case .compactionStarted, .compactionCompleted:
             break
         case let .error(_, eventMessage):
@@ -571,6 +575,7 @@ final class ChatViewModel: ObservableObject {
 
     private func finishTurn() {
         flushPendingAssistantDelta()
+        markCurrentAssistantLineStreaming(false)
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -582,6 +587,7 @@ final class ChatViewModel: ObservableObject {
     private func finishCancelledTurn() {
         let wasCancellable = canCancelTurn
         flushPendingAssistantDelta()
+        markCurrentAssistantLineStreaming(false)
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -596,6 +602,7 @@ final class ChatViewModel: ObservableObject {
 
     private func finishErroredTurn() {
         flushPendingAssistantDelta()
+        markCurrentAssistantLineStreaming(false)
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -607,6 +614,7 @@ final class ChatViewModel: ObservableObject {
 
     private func failTurn(_ error: Error) {
         flushPendingAssistantDelta()
+        markCurrentAssistantLineStreaming(false)
         isSending = false
         canCancelTurn = false
         streamTask = nil
@@ -666,7 +674,10 @@ final class ChatViewModel: ObservableObject {
             assistantPlaceholderLineID = nil
         }
         lines[index].text += delta
+        lines[index].isStreaming = true
+        lines[index].markdownBlocks = nil
         refreshSearchMatches()
+        requestScrollTo(id)
     }
 
     private func replaceAssistantText(_ text: String) {
@@ -674,8 +685,11 @@ final class ChatViewModel: ObservableObject {
         let id = ensureAssistantLine()
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         lines[index].text = text
+        lines[index].isStreaming = false
+        lines[index].markdownBlocks = TerminalMarkdownParser.parse(text)
         assistantPlaceholderLineID = nil
         refreshSearchMatches()
+        requestScrollTo(id)
     }
 
     private func attachPendingCacheStats() {
@@ -693,8 +707,11 @@ final class ChatViewModel: ObservableObject {
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
         lines[index].text = text
+        lines[index].isStreaming = true
+        lines[index].markdownBlocks = nil
         assistantPlaceholderLineID = id
         refreshSearchMatches()
+        requestScrollTo(id)
     }
 
     private func removeAssistantPlaceholder() {
@@ -705,6 +722,7 @@ final class ChatViewModel: ObservableObject {
         lines.remove(at: index)
         self.assistantPlaceholderLineID = nil
         refreshSearchMatches()
+        requestScrollToLastLine()
     }
 
     private func ensureAssistantLine() -> UUID {
@@ -712,15 +730,44 @@ final class ChatViewModel: ObservableObject {
             return currentAssistantLineID
         }
 
-        let line = TranscriptLine(kind: .assistant, text: "")
+        let line = TranscriptLine(kind: .assistant, text: "", isStreaming: isSending)
         lines.append(line)
         currentAssistantLineID = line.id
+        requestScrollTo(line.id)
         return line.id
     }
 
+    private func markCurrentAssistantLineStreaming(_ isStreaming: Bool) {
+        guard let currentAssistantLineID,
+              let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) else {
+            return
+        }
+        lines[index].isStreaming = isStreaming
+        if isStreaming {
+            lines[index].markdownBlocks = nil
+        } else if lines[index].kind == .assistant {
+            lines[index].markdownBlocks = TerminalMarkdownParser.parse(lines[index].text)
+        }
+    }
+
     private func append(kind: TranscriptKind, text: String) {
-        lines.append(TranscriptLine(kind: kind, text: text))
+        let line = TranscriptLine(kind: kind, text: text)
+        lines.append(line)
         refreshSearchMatches()
+        requestScrollTo(line.id)
+    }
+
+    private func requestScrollToLastLine() {
+        guard let id = lines.last?.id else { return }
+        requestScrollTo(id)
+    }
+
+    private func requestScrollTo(_ id: UUID) {
+        transcriptScrollRevision += 1
+        transcriptScrollTarget = TranscriptScrollTarget(
+            lineID: id,
+            revision: transcriptScrollRevision
+        )
     }
 
     private func upsertToolLine(
@@ -740,6 +787,7 @@ final class ChatViewModel: ObservableObject {
             lines[index].text = text
             lines[index].toolCall = display
             refreshSearchMatches()
+            requestScrollTo(currentAssistantLineID ?? lineID)
             return
         }
 
@@ -756,17 +804,20 @@ final class ChatViewModel: ObservableObject {
            let index = lines.firstIndex(where: { $0.id == currentAssistantLineID }) {
             lines.insert(line, at: index)
             refreshSearchMatches()
+            requestScrollTo(currentAssistantLineID)
             return lineID
         }
 
         if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
             lines.insert(line, at: index)
             refreshSearchMatches()
+            requestScrollTo(lineID)
             return lineID
         }
 
         lines.append(line)
         refreshSearchMatches()
+        requestScrollTo(lineID)
         return lineID
     }
 
@@ -782,6 +833,7 @@ final class ChatViewModel: ObservableObject {
         lines = transcriptLines(from: restored.messages)
         replaceSubmittedMessages(with: restored.messages)
         refreshSearchMatches()
+        requestScrollToLastLine()
     }
 
     private func transcriptLines(from records: [TranscriptRecord]) -> [TranscriptLine] {
@@ -793,7 +845,12 @@ final class ChatViewModel: ObservableObject {
             switch record.kind {
             case "message":
                 guard let kind = transcriptKind(forRole: record.role) else { continue }
-                restoredLines.append(TranscriptLine(kind: kind, text: record.text ?? ""))
+                let text = record.text ?? ""
+                restoredLines.append(TranscriptLine(
+                    kind: kind,
+                    text: text,
+                    markdownBlocks: kind == .assistant ? TerminalMarkdownParser.parse(text) : nil
+                ))
             case "function_call":
                 let display = toolDisplay(
                     name: record.toolName,
@@ -930,12 +987,14 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func refreshSearchMatches() {
+        guard isSearchVisible else {
+            clearSearchMatchesIfNeeded()
+            return
+        }
+
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
-            searchMatchedLineIDsInOrder.removeAll(keepingCapacity: true)
-            searchMatchLineIDs.removeAll(keepingCapacity: true)
-            selectedSearchLineID = nil
-            searchResultSummary = ""
+            clearSearchMatchesIfNeeded()
             return
         }
 
@@ -960,6 +1019,19 @@ final class ChatViewModel: ObservableObject {
             ?? 0
         selectedSearchLineID = matches[selectedIndex]
         searchResultSummary = "\(selectedIndex + 1) / \(matches.count) lines"
+    }
+
+    private func clearSearchMatchesIfNeeded() {
+        guard !searchMatchedLineIDsInOrder.isEmpty
+            || !searchMatchLineIDs.isEmpty
+            || selectedSearchLineID != nil
+            || !searchResultSummary.isEmpty else {
+            return
+        }
+        searchMatchedLineIDsInOrder.removeAll(keepingCapacity: true)
+        searchMatchLineIDs.removeAll(keepingCapacity: true)
+        selectedSearchLineID = nil
+        searchResultSummary = ""
     }
 
     private func moveSearchSelection(by offset: Int) {

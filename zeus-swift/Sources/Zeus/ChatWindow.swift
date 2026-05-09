@@ -86,7 +86,8 @@ struct ChatWindow: View {
                     lines: viewModel.lines,
                     isCacheStatsVisible: viewModel.showCacheStats,
                     searchMatchLineIDs: viewModel.searchMatchLineIDs,
-                    selectedSearchLineID: viewModel.selectedSearchLineID
+                    selectedSearchLineID: viewModel.selectedSearchLineID,
+                    scrollTarget: viewModel.transcriptScrollTarget
                 )
                     .padding(.top, 10)
 
@@ -814,6 +815,7 @@ private struct TranscriptView: View {
     let isCacheStatsVisible: Bool
     let searchMatchLineIDs: Set<UUID>
     let selectedSearchLineID: UUID?
+    let scrollTarget: TranscriptScrollTarget?
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -833,10 +835,10 @@ private struct TranscriptView: View {
                 .padding(.bottom, 6)
             }
             .scrollIndicators(.hidden)
-            .onChange(of: lines) { newLines in
+            .onChange(of: scrollTarget) { target in
                 guard selectedSearchLineID == nil else { return }
-                guard let last = newLines.last else { return }
-                proxy.scrollTo(last.id, anchor: .bottom)
+                guard let target else { return }
+                proxy.scrollTo(target.lineID, anchor: .bottom)
             }
             .onChange(of: selectedSearchLineID) { lineID in
                 guard let lineID else { return }
@@ -901,7 +903,14 @@ private struct TerminalLineView: View {
 
     private var assistantLine: some View {
         VStack(alignment: .leading, spacing: 4) {
-            TerminalMarkdownView(text: line.text)
+            if line.isStreaming {
+                Text(line.text.isEmpty ? " " : line.text)
+                    .foregroundStyle(TerminalPalette.primaryText)
+            } else if let blocks = line.markdownBlocks {
+                TerminalMarkdownView(blocks: blocks)
+            } else {
+                TerminalMarkdownView(text: line.text)
+            }
 
             if isCacheStatsVisible {
                 ForEach(line.cacheStats.indices, id: \.self) { index in

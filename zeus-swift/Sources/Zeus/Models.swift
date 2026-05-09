@@ -15,20 +15,40 @@ struct TranscriptLine: Identifiable, Equatable {
     var text: String
     var toolCall: ToolCallTranscript?
     var cacheStats: [ResponseCacheStats]
+    var isStreaming: Bool
+    var markdownBlocks: [TerminalMarkdownBlock]?
 
     init(
         id: UUID = UUID(),
         kind: TranscriptKind,
         text: String,
         toolCall: ToolCallTranscript? = nil,
-        cacheStats: [ResponseCacheStats] = []
+        cacheStats: [ResponseCacheStats] = [],
+        isStreaming: Bool = false,
+        markdownBlocks: [TerminalMarkdownBlock]? = nil
     ) {
         self.id = id
         self.kind = kind
         self.text = text
         self.toolCall = toolCall
         self.cacheStats = cacheStats
+        self.isStreaming = isStreaming
+        self.markdownBlocks = markdownBlocks
     }
+
+    static func == (lhs: TranscriptLine, rhs: TranscriptLine) -> Bool {
+        lhs.id == rhs.id
+            && lhs.kind == rhs.kind
+            && lhs.text == rhs.text
+            && lhs.toolCall == rhs.toolCall
+            && lhs.cacheStats == rhs.cacheStats
+            && lhs.isStreaming == rhs.isStreaming
+    }
+}
+
+struct TranscriptScrollTarget: Equatable {
+    let lineID: UUID
+    let revision: Int
 }
 
 struct ToolCallTranscript: Equatable {

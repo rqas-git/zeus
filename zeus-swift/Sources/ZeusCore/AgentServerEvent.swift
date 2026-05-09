@@ -21,6 +21,7 @@ public enum AgentServerEvent: Decodable, Equatable {
         success: Bool?
     )
     case cacheHealth(sessionID: UInt64?, cache: CacheHealthPayload?)
+    case turnTokenUsage(sessionID: UInt64?, usage: TokenUsagePayload?)
     case compactionStarted(sessionID: UInt64?, reason: String?)
     case compactionCompleted(
         sessionID: UInt64?,
@@ -45,6 +46,7 @@ public enum AgentServerEvent: Decodable, Equatable {
              let .toolCallStarted(sessionID, _, _, _),
              let .toolCallCompleted(sessionID, _, _, _, _),
              let .cacheHealth(sessionID, _),
+             let .turnTokenUsage(sessionID, _),
              let .compactionStarted(sessionID, _),
              let .compactionCompleted(sessionID, _, _, _, _, _),
              let .error(sessionID, _),
@@ -105,6 +107,8 @@ public enum AgentServerEvent: Decodable, Equatable {
             )
         case "cache_health":
             self = .cacheHealth(sessionID: payload.sessionID, cache: payload.cache)
+        case "turn_token_usage":
+            self = .turnTokenUsage(sessionID: payload.sessionID, usage: payload.usage)
         case "compaction_started":
             self = .compactionStarted(sessionID: payload.sessionID, reason: payload.reason)
         case "compaction_completed":
@@ -226,6 +230,7 @@ private struct AgentServerEventPayload: Decodable {
     let success: Bool?
     let skipped: UInt64?
     let cache: CacheHealthPayload?
+    let usage: TokenUsagePayload?
     let reason: String?
     let summary: String?
     let firstKeptMessageID: UInt64?
@@ -247,6 +252,7 @@ private struct AgentServerEventPayload: Decodable {
         case success
         case skipped
         case cache
+        case usage
         case reason
         case summary
         case firstKeptMessageID = "first_kept_message_id"
@@ -270,6 +276,7 @@ private struct AgentServerEventPayload: Decodable {
         success = try container.decodeIfPresent(Bool.self, forKey: .success)
         skipped = try container.decodeIfPresent(UInt64.self, forKey: .skipped)
         cache = try container.decodeIfPresent(CacheHealthPayload.self, forKey: .cache)
+        usage = try container.decodeIfPresent(TokenUsagePayload.self, forKey: .usage)
         reason = try container.decodeIfPresent(String.self, forKey: .reason)
         summary = try container.decodeIfPresent(String.self, forKey: .summary)
         firstKeptMessageID = try container.decodeIfPresent(UInt64.self, forKey: .firstKeptMessageID)

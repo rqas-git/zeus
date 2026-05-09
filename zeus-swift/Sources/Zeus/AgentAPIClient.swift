@@ -21,7 +21,7 @@ struct AgentAPIClient: AgentClientProtocol {
         request.httpMethod = "GET"
         request.timeoutInterval = 2
         let data = try await data(for: request)
-        return try JSONDecoder().decode(ServerIdentityResponse.self, from: data)
+        return try decode(ServerIdentityResponse.self, from: data)
     }
 
     func capabilities() async throws -> ServerCapabilitiesResponse {
@@ -29,62 +29,62 @@ struct AgentAPIClient: AgentClientProtocol {
         request.httpMethod = "GET"
         request.timeoutInterval = 2
         let data = try await data(for: request)
-        return try JSONDecoder().decode(ServerCapabilitiesResponse.self, from: data)
+        return try decode(ServerCapabilitiesResponse.self, from: data)
     }
 
     func models() async throws -> ModelsResponse {
         var request = authenticatedRequest(path: "models")
         request.httpMethod = "GET"
         let data = try await data(for: request)
-        return try JSONDecoder().decode(ModelsResponse.self, from: data)
+        return try decode(ModelsResponse.self, from: data)
     }
 
     func permissions() async throws -> PermissionsResponse {
         var request = authenticatedRequest(path: "permissions")
         request.httpMethod = "GET"
         let data = try await data(for: request)
-        return try JSONDecoder().decode(PermissionsResponse.self, from: data)
+        return try decode(PermissionsResponse.self, from: data)
     }
 
     func workspace() async throws -> WorkspaceResponse {
         var request = authenticatedRequest(path: "workspace")
         request.httpMethod = "GET"
         let data = try await data(for: request)
-        return try JSONDecoder().decode(WorkspaceResponse.self, from: data)
+        return try decode(WorkspaceResponse.self, from: data)
     }
 
     func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse {
         var request = authenticatedRequest(path: "workspace/branch")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(SwitchWorkspaceBranchRequest(branch: branch))
+        request.httpBody = try encode(SwitchWorkspaceBranchRequest(branch: branch))
         let data = try await data(for: request)
-        return try JSONDecoder().decode(SwitchWorkspaceBranchResponse.self, from: data)
+        return try decode(SwitchWorkspaceBranchResponse.self, from: data)
     }
 
     func createSession() async throws -> CreateSessionResponse {
         var request = authenticatedRequest(path: "sessions")
         request.httpMethod = "POST"
         let data = try await data(for: request)
-        return try JSONDecoder().decode(CreateSessionResponse.self, from: data)
+        return try decode(CreateSessionResponse.self, from: data)
     }
 
     func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse {
         var request = authenticatedRequest(path: "sessions:restore")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(RestoreSessionRequest(sessionID: sessionID))
+        request.httpBody = try encode(RestoreSessionRequest(sessionID: sessionID))
         let data = try await data(for: request)
-        return try JSONDecoder().decode(RestoreSessionResponse.self, from: data)
+        return try decode(RestoreSessionResponse.self, from: data)
     }
 
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/model")
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(SetModelRequest(model: model))
+        request.httpBody = try encode(SetModelRequest(model: model))
         let data = try await data(for: request)
-        return try JSONDecoder().decode(SessionModelResponse.self, from: data)
+        return try decode(SessionModelResponse.self, from: data)
     }
 
     func setSessionPermissions(
@@ -94,9 +94,9 @@ struct AgentAPIClient: AgentClientProtocol {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/permissions")
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(SetPermissionsRequest(toolPolicy: toolPolicy))
+        request.httpBody = try encode(SetPermissionsRequest(toolPolicy: toolPolicy))
         let data = try await data(for: request)
-        return try JSONDecoder().decode(SessionPermissionsResponse.self, from: data)
+        return try decode(SessionPermissionsResponse.self, from: data)
     }
 
     func streamTurn(
@@ -109,7 +109,7 @@ struct AgentAPIClient: AgentClientProtocol {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("text/event-stream", forHTTPHeaderField: "accept")
-        request.httpBody = try JSONEncoder().encode(TurnRequest(
+        request.httpBody = try encode(TurnRequest(
             message: message,
             reasoningEffort: reasoningEffort
         ))
@@ -133,7 +133,7 @@ struct AgentAPIClient: AgentClientProtocol {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/turns:cancel")
         request.httpMethod = "POST"
         let data = try await data(for: request)
-        return try JSONDecoder().decode(CancelTurnResponse.self, from: data)
+        return try decode(CancelTurnResponse.self, from: data)
     }
 
     func runTerminalCommand(
@@ -143,9 +143,9 @@ struct AgentAPIClient: AgentClientProtocol {
         var request = authenticatedRequest(path: "sessions/\(sessionID)/terminal:run")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONEncoder().encode(TerminalCommandRequest(command: command))
+        request.httpBody = try encode(TerminalCommandRequest(command: command))
         let data = try await data(for: request)
-        return try JSONDecoder().decode(TerminalCommandResponse.self, from: data)
+        return try decode(TerminalCommandResponse.self, from: data)
     }
 
     private func streamEvents(
@@ -155,19 +155,20 @@ struct AgentAPIClient: AgentClientProtocol {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         try validate(response: response)
 
-        var parser = SSEStreamParser()
+        var parser = SSELineParser()
+        let decoder = JSONDecoder()
         var receivedEvent = false
 
-        for try await byte in bytes {
-            if let frame = parser.append(byte),
-               let event = try decodeEvent(fromFrame: frame) {
+        for try await line in bytes.lines {
+            if let dataLines = parser.append(line),
+               let event = try decodeEvent(fromDataLines: dataLines, decoder: decoder) {
                 receivedEvent = true
                 await onEvent(event)
             }
         }
 
-        if let frame = parser.finish(),
-           let event = try decodeEvent(fromFrame: frame) {
+        if let dataLines = parser.finish(),
+           let event = try decodeEvent(fromDataLines: dataLines, decoder: decoder) {
             receivedEvent = true
             await onEvent(event)
         }
@@ -190,6 +191,14 @@ struct AgentAPIClient: AgentClientProtocol {
         return data
     }
 
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        try JSONDecoder().decode(type, from: data)
+    }
+
+    private func encode<T: Encodable>(_ value: T) throws -> Data {
+        try JSONEncoder().encode(value)
+    }
+
     private func validate(response: URLResponse, data: Data = Data()) throws {
         guard let http = response as? HTTPURLResponse else {
             throw AgentClientError.invalidResponse
@@ -200,68 +209,64 @@ struct AgentAPIClient: AgentClientProtocol {
         }
     }
 
-    private func decodeEvent(fromFrame data: Data) throws -> AgentServerEvent? {
-        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
+    private func decodeEvent(
+        fromDataLines dataLines: [String],
+        decoder: JSONDecoder
+    ) throws -> AgentServerEvent? {
+        guard !dataLines.isEmpty else { return nil }
+        let eventData = Data(dataLines.joined(separator: "\n").utf8)
+        return try decoder.decode(AgentServerEvent.self, from: eventData)
+    }
+}
+
+private struct SSELineParser {
+    private static let previewLimit = 1_000
+
+    private var dataLines: [String] = []
+    private(set) var preview = ""
+
+    mutating func append(_ rawLine: String) -> [String]? {
+        let line = normalized(rawLine)
+        appendPreview(line)
+
+        guard !line.isEmpty else {
+            return flush()
+        }
+
+        guard line.hasPrefix("data:") else {
             return nil
         }
 
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let dataLines = normalized
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .compactMap { line -> String? in
-                guard line.hasPrefix("data:") else { return nil }
-                let value = line.dropFirst(5)
-                return value.first == " " ? String(value.dropFirst()) : String(value)
-            }
-
-        guard !dataLines.isEmpty else { return nil }
-        let eventData = Data(dataLines.joined(separator: "\n").utf8)
-        return try JSONDecoder().decode(AgentServerEvent.self, from: eventData)
-    }
-}
-
-private struct SSEStreamParser {
-    private var buffer = Data()
-    private var previewData = Data()
-
-    var preview: String {
-        String(data: previewData, encoding: .utf8) ?? ""
-    }
-
-    mutating func append(_ byte: UInt8) -> Data? {
-        if previewData.count < 1_000 {
-            previewData.append(byte)
+        var value = String(line.dropFirst(5))
+        if value.first == " " {
+            value.removeFirst()
         }
-
-        buffer.append(byte)
-        if buffer.hasSuffixBytes([13, 10, 13, 10]) {
-            return frame(dropping: 4)
-        }
-        if buffer.hasSuffixBytes([10, 10]) {
-            return frame(dropping: 2)
-        }
+        dataLines.append(value)
         return nil
     }
 
-    mutating func finish() -> Data? {
-        guard !buffer.isEmpty else { return nil }
-        defer { buffer.removeAll(keepingCapacity: true) }
-        return buffer
+    mutating func finish() -> [String]? {
+        flush()
     }
 
-    private mutating func frame(dropping terminatorLength: Int) -> Data {
-        let frame = buffer.dropLast(terminatorLength)
-        buffer.removeAll(keepingCapacity: true)
-        return Data(frame)
+    private mutating func flush() -> [String]? {
+        guard !dataLines.isEmpty else { return nil }
+        let lines = dataLines
+        dataLines.removeAll(keepingCapacity: true)
+        return lines
     }
-}
 
-private extension Data {
-    func hasSuffixBytes(_ bytes: [UInt8]) -> Bool {
-        guard count >= bytes.count else { return false }
-        return suffix(bytes.count).elementsEqual(bytes)
+    private func normalized(_ line: String) -> String {
+        line.hasSuffix("\r") ? String(line.dropLast()) : line
+    }
+
+    private mutating func appendPreview(_ line: String) {
+        guard preview.count < Self.previewLimit else { return }
+        preview += line
+        preview += "\n"
+        if preview.count > Self.previewLimit {
+            preview = String(preview.prefix(Self.previewLimit))
+        }
     }
 }
 

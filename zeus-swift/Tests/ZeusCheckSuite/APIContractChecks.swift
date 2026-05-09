@@ -199,7 +199,10 @@ extension ZeusCoreChecks {
         ]
 
         try contractRequire(
-            Set(fixture.eventNames) == Set(expectedEvents.keys).union(["cache.health"]),
+            Set(fixture.eventNames) == Set(expectedEvents.keys).union([
+                "cache.health",
+                "turn.token_usage"
+            ]),
             "contract event names changed"
         )
 
@@ -218,6 +221,14 @@ extension ZeusCoreChecks {
             "unexpected reasoning token total"
         )
         try contractRequire(cache?.usage?.totalTokens == 112, "unexpected cache token total")
+
+        guard case let .turnTokenUsage(_, usage) = try fixture.decodeEvent("turn.token_usage") else {
+            throw ContractCheckFailure.message("expected turn token usage event")
+        }
+        try contractRequire(usage?.inputTokens == 300, "unexpected turn input token total")
+        try contractRequire(usage?.cachedInputTokens == 200, "unexpected turn cached token total")
+        try contractRequire(usage?.reasoningOutputTokens == 6, "unexpected turn reasoning token total")
+        try contractRequire(usage?.totalTokens == 330, "unexpected turn token total")
     }
 }
 

@@ -2,10 +2,14 @@ import SwiftUI
 import ZeusCore
 
 struct TerminalMarkdownView: View {
-    let text: String
+    private let blocks: [TerminalMarkdownBlock]
 
-    private var blocks: [TerminalMarkdownBlock] {
-        TerminalMarkdownParser.parse(text)
+    init(text: String) {
+        self.blocks = TerminalMarkdownParser.parse(text)
+    }
+
+    init(blocks: [TerminalMarkdownBlock]) {
+        self.blocks = blocks
     }
 
     var body: some View {
