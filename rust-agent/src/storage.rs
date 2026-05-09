@@ -144,6 +144,17 @@ impl SessionDatabase {
         })
     }
 
+    /// Loads only the selected model for a stored session, if it exists.
+    ///
+    /// # Errors
+    /// Returns an error when the stored session header cannot be read or decoded.
+    pub(crate) fn session_model(&self, session_id: SessionId) -> Result<Option<String>> {
+        self.with_connection(|connection| {
+            Ok(load_session_header(connection, session_id)?
+                .map(|(config, _, _)| config.model().to_string()))
+        })
+    }
+
     /// Lists stored session metadata ordered by recent activity.
     ///
     /// # Errors
@@ -1398,6 +1409,14 @@ mod tests {
         let loaded = database.load_session(session_id).unwrap().unwrap();
 
         assert_eq!(loaded.config.model(), "second-model");
+        assert_eq!(
+            database.session_model(session_id).unwrap().as_deref(),
+            Some("second-model")
+        );
+        assert!(database
+            .session_model(SessionId::new(99))
+            .unwrap()
+            .is_none());
         assert_eq!(loaded.status, SessionStatus::Failed);
         assert_eq!(
             loaded.last_cache_observation,

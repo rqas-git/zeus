@@ -1204,23 +1204,57 @@ impl AgentLoop {
             tools,
             ..
         } = builder;
-        let mut store = match database.load_session(session_id)? {
-            Some(stored) => InMemorySessionStore::from_stored(session_id, stored),
+        let store = match database.load_session(session_id)? {
+            Some(stored) => {
+                return Self::from_stored_session(
+                    session_id,
+                    stored,
+                    context_window,
+                    compaction,
+                    tools,
+                    Some(database),
+                );
+            }
             None => {
                 database.ensure_session(session_id, config.model())?;
                 InMemorySessionStore::new(session_id, config)
             }
         };
-        store.prune_history_with_compaction(context_window, compaction);
-        if store.status() == SessionStatus::Idle {
-            database.set_session_status(session_id, SessionStatus::Idle)?;
-        }
         Ok(Self {
             store,
             context_window,
             compaction,
             tools,
             database: Some(database),
+        })
+    }
+
+    /// Creates an agent loop from a session that was already loaded from storage.
+    ///
+    /// # Errors
+    /// Returns an error when a stale running status cannot be reset in durable storage.
+    pub(crate) fn from_stored_session(
+        session_id: SessionId,
+        stored: StoredSession,
+        context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
+        tools: ToolRegistry,
+        database: Option<SessionDatabase>,
+    ) -> Result<Self> {
+        let was_running = stored.status == SessionStatus::Running;
+        let mut store = InMemorySessionStore::from_stored(session_id, stored);
+        store.prune_history_with_compaction(context_window, compaction);
+        if was_running {
+            if let Some(database) = &database {
+                database.set_session_status(session_id, SessionStatus::Idle)?;
+            }
+        }
+        Ok(Self {
+            store,
+            context_window,
+            compaction,
+            tools,
+            database,
         })
     }
 

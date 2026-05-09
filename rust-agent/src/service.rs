@@ -223,14 +223,15 @@ where
                 Arc::clone(session)
             } else {
                 self.ensure_can_insert_session(&sessions)?;
-                let session = Self::new_session(
+                let agent = AgentLoop::from_stored_session(
                     session_id,
+                    stored,
                     self.context_window,
                     self.compaction,
-                    stored.config,
                     self.tools.clone(),
                     Some(database.clone()),
                 )?;
+                let session = Arc::new(SessionHandle::new(agent));
                 sessions.insert(session_id, Arc::clone(&session));
                 session
             }
@@ -309,8 +310,8 @@ where
             return Ok(agent.model().to_string());
         }
         if let Some(database) = &self.database {
-            if let Some(stored) = database.load_session(session_id)? {
-                return Ok(stored.config.model().to_string());
+            if let Some(model) = database.session_model(session_id)? {
+                return Ok(model);
             }
         }
         Ok(self.model_config.default_model().to_string())
@@ -973,6 +974,65 @@ mod tests {
 
         assert!(second_service.delete_session(SessionId::new(1)).unwrap());
         assert!(database.load_session(SessionId::new(1)).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_session_activates_loaded_history() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let first_service = AgentService::new(
+            FnStreamer::new(
+                |_history: &[ConversationMessage<'_>],
+                 _tools: &[ToolSpec],
+                 _parallel_tool_calls: bool,
+                 _selected_model: &str,
+                 _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                    Ok("stored".to_string())
+                },
+            ),
+            ContextWindowConfig::default(),
+            test_model_config(),
+        )
+        .with_database(database.clone());
+        first_service
+            .submit_user_message(SessionId::new(1), "hello", |_| Ok(()))
+            .await
+            .unwrap();
+        drop(first_service);
+
+        let restored_service = AgentService::new(
+            FnStreamer::new(
+                |history: &[ConversationMessage<'_>],
+                 _tools: &[ToolSpec],
+                 _parallel_tool_calls: bool,
+                 _selected_model: &str,
+                 _on_delta: &mut (dyn FnMut(&str) -> Result<()> + Send)| {
+                    assert_eq!(
+                        history,
+                        &[
+                            ConversationMessage::user("hello"),
+                            ConversationMessage::assistant("stored"),
+                            ConversationMessage::user("again"),
+                        ]
+                    );
+                    Ok("restored".to_string())
+                },
+            ),
+            ContextWindowConfig::default(),
+            test_model_config(),
+        )
+        .with_database(database);
+
+        let snapshot = restored_service
+            .restore_session(SessionId::new(1))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(snapshot.messages.len(), 2);
+        assert_eq!(restored_service.session_count().unwrap(), 1);
+        restored_service
+            .submit_user_message(SessionId::new(1), "again", |_| Ok(()))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
