@@ -185,6 +185,9 @@ response, and event types and is used by Swift contract checks.
   memory growth under repeated requests.
 - Session lists read compact metadata from SQLite and cap the latest-message
   preview before returning it to clients.
+- SQLite session restore, metadata, delete, and per-turn persistence work runs
+  on blocking workers, keeping Axum/Tokio request workers available for network
+  I/O.
 
 ## Current Scope
 

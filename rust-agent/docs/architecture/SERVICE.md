@@ -62,6 +62,9 @@ transport state for every request.
 - Session model changes do not rebuild the HTTP client.
 - Session metadata reads stay outside per-session execution locks and only use
   the session map to mark whether a durable session is currently active.
+- SQLite session loads, metadata reads, deletes, and model/status/message writes
+  run on Tokio blocking workers so request workers are not pinned on synchronous
+  database calls.
 - The service avoids frontend assumptions; event sinks stay caller-provided.
 - Event sinks are `Send`, so server handlers can spawn turn work onto Tokio's
   multi-threaded runtime.
@@ -89,8 +92,9 @@ messages are durable. The database uses WAL mode, `synchronous=NORMAL`, foreign
 keys, a busy timeout, and cascade deletion of session messages. `AgentLoop`
 continues to keep only bounded recent history in memory; SQLite remains the
 canonical store for the full ordered message list, including compaction
-checkpoints. Session metadata queries are ordered by `updated_at_ms` and include
-counts plus a capped preview of the latest user or assistant message.
+checkpoints. Session metadata queries use supporting indexes, are ordered by
+`updated_at_ms`, and include counts plus a capped preview of the latest user or
+assistant message.
 
 ## Current Scope
 

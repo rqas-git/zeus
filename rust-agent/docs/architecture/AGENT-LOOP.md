@@ -101,6 +101,8 @@ transport, and session state separate.
   untrusted use.
 - Streaming uses async HTTP and SSE parsing, so request workers do not block on
   model I/O.
+- Durable message, status, model, and cache-continuity writes are dispatched to
+  blocking workers because SQLite access is synchronous.
 - The service-level session locks keep ordered turns local to one session
   instead of serializing all sessions through one mutable service borrow.
 - Prompt-cache keys are stable per service/session namespace and are sent
