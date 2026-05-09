@@ -14,12 +14,14 @@ use crate::agent_loop::AgentMessage;
 use crate::agent_loop::ModelStreamer;
 use crate::agent_loop::SessionConfig;
 use crate::agent_loop::SessionId;
+use crate::agent_loop::SessionStatus;
 use crate::agent_loop::TerminalCommandResult;
 use crate::agent_loop::TurnCancellation;
 use crate::compaction::CompactionResult;
 use crate::config::CompactionConfig;
 use crate::config::ContextWindowConfig;
 use crate::config::ModelConfig;
+use crate::storage::run_blocking;
 use crate::storage::SessionDatabase;
 use crate::storage::StoredSessionLastMessage;
 use crate::storage::StoredSessionMetadata;
@@ -182,23 +184,13 @@ where
     ///
     /// # Errors
     /// Returns an error when the session map is full or cannot be locked.
-    pub(crate) fn create_session(&self, session_id: SessionId) -> Result<()> {
-        let mut sessions = self.lock_sessions()?;
-        if sessions.contains_key(&session_id) {
-            return Ok(());
-        }
-        self.ensure_can_insert_session(&sessions)?;
-        sessions.insert(
+    pub(crate) async fn create_session(&self, session_id: SessionId) -> Result<()> {
+        self.session_or_insert_with(
             session_id,
-            Self::new_session(
-                session_id,
-                self.context_window,
-                self.compaction,
-                SessionConfig::new(self.model_config.default_model()),
-                self.tools.clone(),
-                self.database.clone(),
-            )?,
-        );
+            SessionConfig::new(self.model_config.default_model()),
+            self.tools.clone(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -206,14 +198,31 @@ where
     ///
     /// # Errors
     /// Returns an error when no database is configured, the session map is full, or storage fails.
-    pub(crate) fn restore_session(&self, session_id: SessionId) -> Result<Option<SessionSnapshot>> {
+    pub(crate) async fn restore_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionSnapshot>> {
         let database = self
             .database
-            .as_ref()
+            .clone()
             .context("session database is not configured")?;
-        let Some(stored) = database.load_session(session_id)? else {
+        let Some(mut stored) = run_blocking("session load task failed", {
+            let database = database.clone();
+            move || database.load_session(session_id)
+        })
+        .await?
+        else {
             return Ok(None);
         };
+
+        if stored.status == SessionStatus::Running {
+            run_blocking("session status reset task failed", {
+                let database = database.clone();
+                move || database.set_session_status(session_id, SessionStatus::Idle)
+            })
+            .await?;
+            stored.status = SessionStatus::Idle;
+        }
 
         let model = stored.config.model().to_string();
         let messages = stored.messages.clone();
@@ -230,7 +239,7 @@ where
                     self.compaction,
                     self.tools.clone(),
                     Some(database.clone()),
-                )?;
+                );
                 let session = Arc::new(SessionHandle::new(agent));
                 sessions.insert(session_id, Arc::clone(&session));
                 session
@@ -254,16 +263,19 @@ where
     ///
     /// # Errors
     /// Returns an error when no database is configured or storage fails.
-    pub(crate) fn list_session_metadata(
+    pub(crate) async fn list_session_metadata(
         &self,
         offset: usize,
         limit: usize,
     ) -> Result<Vec<SessionMetadata>> {
         let database = self
             .database
-            .as_ref()
+            .clone()
             .context("session database is not configured")?;
-        let stored = database.list_session_metadata(offset, limit)?;
+        let stored = run_blocking("session metadata list task failed", move || {
+            database.list_session_metadata(offset, limit)
+        })
+        .await?;
         self.annotate_session_metadata(stored)
     }
 
@@ -271,25 +283,34 @@ where
     ///
     /// # Errors
     /// Returns an error when no database is configured or storage fails.
-    pub(crate) fn session_metadata(
+    pub(crate) async fn session_metadata(
         &self,
         session_id: SessionId,
     ) -> Result<Option<SessionMetadata>> {
         let database = self
             .database
-            .as_ref()
+            .clone()
             .context("session database is not configured")?;
-        let Some(stored) = database.session_metadata(session_id)? else {
+        let Some(stored) = run_blocking("session metadata load task failed", move || {
+            database.session_metadata(session_id)
+        })
+        .await?
+        else {
             return Ok(None);
         };
         Ok(Some(self.annotate_one_session_metadata(stored)?))
     }
 
     /// Deletes a session from memory and durable storage if present.
-    pub(crate) fn delete_session(&self, session_id: SessionId) -> Result<bool> {
+    pub(crate) async fn delete_session(&self, session_id: SessionId) -> Result<bool> {
         let removed_from_memory = self.lock_sessions()?.remove(&session_id).is_some();
-        let removed_from_storage = match &self.database {
-            Some(database) => database.delete_session(session_id)?,
+        let removed_from_storage = match self.database.clone() {
+            Some(database) => {
+                run_blocking("session delete task failed", move || {
+                    database.delete_session(session_id)
+                })
+                .await?
+            }
             None => false,
         };
         Ok(removed_from_memory || removed_from_storage)
@@ -309,8 +330,12 @@ where
             let agent = session.agent.lock().await;
             return Ok(agent.model().to_string());
         }
-        if let Some(database) = &self.database {
-            if let Some(model) = database.session_model(session_id)? {
+        if let Some(database) = self.database.clone() {
+            if let Some(model) = run_blocking("session model load task failed", move || {
+                database.session_model(session_id)
+            })
+            .await?
+            {
                 return Ok(model);
             }
         }
@@ -369,37 +394,24 @@ where
     ///
     /// # Errors
     /// Returns an error if the model is not allowed or the session is currently busy.
-    pub(crate) fn set_session_model(&self, session_id: SessionId, model: &str) -> Result<String> {
+    pub(crate) async fn set_session_model(
+        &self,
+        session_id: SessionId,
+        model: &str,
+    ) -> Result<String> {
         let model = self.model_config.allowed_model(model)?.to_string();
-        let session = {
-            let mut sessions = self.lock_sessions()?;
-            if let Some(session) = sessions.get(&session_id) {
-                Arc::clone(session)
-            } else {
-                self.ensure_can_insert_session(&sessions)?;
-                let session = Self::new_session(
-                    session_id,
-                    self.context_window,
-                    self.compaction,
-                    SessionConfig::new(model.clone()),
-                    self.tools.clone(),
-                    self.database.clone(),
-                )?;
-                {
-                    let Ok(mut agent) = session.agent.try_lock() else {
-                        anyhow::bail!("cannot change model while session is running");
-                    };
-                    agent.set_model(model.clone())?;
-                }
-                sessions.insert(session_id, session);
-                return Ok(model);
-            }
-        };
+        let session = self
+            .session_or_insert_with(
+                session_id,
+                SessionConfig::new(model.clone()),
+                self.tools.clone(),
+            )
+            .await?;
 
         let Ok(mut agent) = session.agent.try_lock() else {
             anyhow::bail!("cannot change model while session is running");
         };
-        agent.set_model(model)?;
+        agent.set_model(model).await?;
         Ok(agent.model().to_string())
     }
 
@@ -416,29 +428,18 @@ where
     ///
     /// # Errors
     /// Returns an error if the session is currently busy.
-    pub(crate) fn set_session_tool_policy(
+    pub(crate) async fn set_session_tool_policy(
         &self,
         session_id: SessionId,
         policy: ToolPolicy,
     ) -> Result<ToolPolicy> {
-        let session = {
-            let mut sessions = self.lock_sessions()?;
-            if let Some(session) = sessions.get(&session_id) {
-                Arc::clone(session)
-            } else {
-                self.ensure_can_insert_session(&sessions)?;
-                let session = Self::new_session(
-                    session_id,
-                    self.context_window,
-                    self.compaction,
-                    SessionConfig::new(self.model_config.default_model()),
-                    self.tools.with_policy(policy),
-                    self.database.clone(),
-                )?;
-                sessions.insert(session_id, Arc::clone(&session));
-                return Ok(policy);
-            }
-        };
+        let session = self
+            .session_or_insert_with(
+                session_id,
+                SessionConfig::new(self.model_config.default_model()),
+                self.tools.with_policy(policy),
+            )
+            .await?;
 
         let Ok(mut agent) = session.agent.try_lock() else {
             anyhow::bail!("cannot change tool policy while session is running");
@@ -494,7 +495,7 @@ where
         cancellation: TurnCancellation,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
-        let session = self.session_or_insert_default(session_id)?;
+        let session = self.session_or_insert_default(session_id).await?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn_with_cancellation(cancellation)?;
         let result = agent
@@ -521,7 +522,7 @@ where
         command: impl Into<String>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<TerminalCommandResult> {
-        let session = self.session_or_insert_default(session_id)?;
+        let session = self.session_or_insert_default(session_id).await?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn()?;
         let result = agent
@@ -542,7 +543,7 @@ where
         reasoning_effort: Option<&str>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<CompactionResult> {
-        let session = self.session_or_insert_default(session_id)?;
+        let session = self.session_or_insert_default(session_id).await?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn()?;
         let result = agent
@@ -562,40 +563,98 @@ where
         Ok(self.lock_sessions()?.get(&session_id).map(Arc::clone))
     }
 
-    fn session_or_insert_default(&self, session_id: SessionId) -> Result<SharedSession> {
+    async fn session_or_insert_default(&self, session_id: SessionId) -> Result<SharedSession> {
+        self.session_or_insert_with(
+            session_id,
+            SessionConfig::new(self.model_config.default_model()),
+            self.tools.clone(),
+        )
+        .await
+    }
+
+    async fn session_or_insert_with(
+        &self,
+        session_id: SessionId,
+        config: SessionConfig,
+        tools: ToolRegistry,
+    ) -> Result<SharedSession> {
+        {
+            let sessions = self.lock_sessions()?;
+            if let Some(session) = sessions.get(&session_id) {
+                return Ok(Arc::clone(session));
+            }
+            self.ensure_can_insert_session(&sessions)?;
+        }
+
+        let session = self.build_session(session_id, config, tools).await?;
         let mut sessions = self.lock_sessions()?;
         if let Some(session) = sessions.get(&session_id) {
             return Ok(Arc::clone(session));
         }
         self.ensure_can_insert_session(&sessions)?;
-        let session = Self::new_session(
-            session_id,
-            self.context_window,
-            self.compaction,
-            SessionConfig::new(self.model_config.default_model()),
-            self.tools.clone(),
-            self.database.clone(),
-        )?;
         sessions.insert(session_id, Arc::clone(&session));
         Ok(session)
     }
 
-    fn new_session(
+    async fn build_session(
+        &self,
         session_id: SessionId,
-        context_window: ContextWindowConfig,
-        compaction: CompactionConfig,
         config: SessionConfig,
         tools: ToolRegistry,
-        database: Option<SessionDatabase>,
     ) -> Result<SharedSession> {
-        let mut builder = AgentLoop::builder(session_id, config)
-            .context_window(context_window)
-            .compaction(compaction)
-            .tools(tools);
-        if let Some(database) = database {
-            builder = builder.database(database);
-        }
-        let agent = builder.build()?;
+        let agent = match self.database.clone() {
+            Some(database) => {
+                let stored = run_blocking("session load task failed", {
+                    let database = database.clone();
+                    move || database.load_session(session_id)
+                })
+                .await?;
+                match stored {
+                    Some(mut stored) => {
+                        if stored.status == SessionStatus::Running {
+                            run_blocking("session status reset task failed", {
+                                let database = database.clone();
+                                move || database.set_session_status(session_id, SessionStatus::Idle)
+                            })
+                            .await?;
+                            stored.status = SessionStatus::Idle;
+                        }
+                        AgentLoop::from_stored_session(
+                            session_id,
+                            stored,
+                            self.context_window,
+                            self.compaction,
+                            tools,
+                            Some(database),
+                        )
+                    }
+                    None => {
+                        let model = config.model().to_string();
+                        run_blocking("session creation task failed", {
+                            let database = database.clone();
+                            move || database.ensure_session(session_id, &model)
+                        })
+                        .await?;
+                        AgentLoop::from_empty_session(
+                            session_id,
+                            config,
+                            self.context_window,
+                            self.compaction,
+                            tools,
+                            Some(database),
+                        )
+                    }
+                }
+            }
+            None => AgentLoop::from_empty_session(
+                session_id,
+                config,
+                self.context_window,
+                self.compaction,
+                tools,
+                None,
+            ),
+        };
         Ok(Arc::new(SessionHandle::new(agent)))
     }
 
@@ -768,6 +827,7 @@ mod tests {
             .unwrap();
         let selected = service
             .set_session_model(SessionId::new(1), "test-fast")
+            .await
             .unwrap()
             .to_string();
         service
@@ -794,6 +854,7 @@ mod tests {
 
         let error = service
             .set_session_model(SessionId::new(1), "unknown-model")
+            .await
             .unwrap_err()
             .to_string();
 
@@ -840,6 +901,7 @@ mod tests {
         assert_eq!(
             service
                 .set_session_tool_policy(SessionId::new(1), ToolPolicy::WorkspaceWrite)
+                .await
                 .unwrap(),
             ToolPolicy::WorkspaceWrite
         );
@@ -850,6 +912,7 @@ mod tests {
         assert_eq!(
             service
                 .set_session_tool_policy(SessionId::new(1), ToolPolicy::WorkspaceExec)
+                .await
                 .unwrap(),
             ToolPolicy::WorkspaceExec
         );
@@ -861,8 +924,8 @@ mod tests {
         assert_eq!(turn.load(Ordering::SeqCst), 3);
     }
 
-    #[test]
-    fn enforces_configured_session_limit() {
+    #[tokio::test]
+    async fn enforces_configured_session_limit() {
         let model = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
@@ -875,9 +938,10 @@ mod tests {
         let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
             .with_session_limit(1);
 
-        service.create_session(SessionId::new(1)).unwrap();
+        service.create_session(SessionId::new(1)).await.unwrap();
         let error = service
             .create_session(SessionId::new(2))
+            .await
             .unwrap_err()
             .to_string();
 
@@ -885,8 +949,8 @@ mod tests {
         assert_eq!(service.session_count().unwrap(), 1);
     }
 
-    #[test]
-    fn delete_session_removes_state_and_frees_limit() {
+    #[tokio::test]
+    async fn delete_session_removes_state_and_frees_limit() {
         let model = FnStreamer::new(
             |_history: &[ConversationMessage<'_>],
              _tools: &[ToolSpec],
@@ -899,14 +963,14 @@ mod tests {
         let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
             .with_session_limit(1);
 
-        service.create_session(SessionId::new(1)).unwrap();
+        service.create_session(SessionId::new(1)).await.unwrap();
         assert_eq!(service.session_count().unwrap(), 1);
 
-        assert!(service.delete_session(SessionId::new(1)).unwrap());
+        assert!(service.delete_session(SessionId::new(1)).await.unwrap());
         assert_eq!(service.session_count().unwrap(), 0);
-        assert!(!service.delete_session(SessionId::new(1)).unwrap());
+        assert!(!service.delete_session(SessionId::new(1)).await.unwrap());
 
-        service.create_session(SessionId::new(2)).unwrap();
+        service.create_session(SessionId::new(2)).await.unwrap();
         assert_eq!(service.session_count().unwrap(), 1);
     }
 
@@ -972,7 +1036,10 @@ mod tests {
             4
         );
 
-        assert!(second_service.delete_session(SessionId::new(1)).unwrap());
+        assert!(second_service
+            .delete_session(SessionId::new(1))
+            .await
+            .unwrap());
         assert!(database.load_session(SessionId::new(1)).unwrap().is_none());
     }
 
@@ -1024,6 +1091,7 @@ mod tests {
 
         let snapshot = restored_service
             .restore_session(SessionId::new(1))
+            .await
             .unwrap()
             .unwrap();
 
@@ -1090,6 +1158,7 @@ mod tests {
             assert_eq!(started_calls.load(Ordering::SeqCst), 1);
             let error = service
                 .set_session_model(SessionId::new(1), "test-fast")
+                .await
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("session is running"));

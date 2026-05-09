@@ -543,12 +543,12 @@ impl<M> ServerState<M> {
         Ok(session_id)
     }
 
-    fn delete_session(&self, session_id: SessionId) -> Result<bool>
+    async fn delete_session(&self, session_id: SessionId) -> Result<bool>
     where
         M: ModelStreamer + Sync,
     {
         let removed_from_registry = self.sessions.remove(session_id)?;
-        let removed_from_service = self.service.delete_session(session_id)?;
+        let removed_from_service = self.service.delete_session(session_id).await?;
         if removed_from_registry || removed_from_service {
             self.events.remove_session(session_id)?;
             return Ok(true);
@@ -905,7 +905,7 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
     };
-    if let Err(error) = state.service.create_session(session_id) {
+    if let Err(error) = state.service.create_session(session_id).await {
         state.sessions.release(session_id);
         return error_response(StatusCode::TOO_MANY_REQUESTS, error);
     }
@@ -938,7 +938,11 @@ where
         }
     };
 
-    match state.service.list_session_metadata(offset, fetch_limit) {
+    match state
+        .service
+        .list_session_metadata(offset, fetch_limit)
+        .await
+    {
         Ok(mut sessions) => {
             let next_offset = if sessions.len() > limit {
                 sessions.truncate(limit);
@@ -972,7 +976,7 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
     };
-    match state.service.session_metadata(session_id) {
+    match state.service.session_metadata(session_id).await {
         Ok(Some(metadata)) => {
             Json(SessionMetadataResponse::from_metadata(metadata)).into_response()
         }
@@ -1001,7 +1005,7 @@ where
         Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
     };
 
-    match state.service.restore_session(session_id) {
+    match state.service.restore_session(session_id).await {
         Ok(Some(snapshot)) => Json(RestoreSessionResponse::from_snapshot(snapshot)).into_response(),
         Ok(None) => {
             if reserved {
@@ -1051,7 +1055,7 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
     };
-    match state.delete_session(session_id) {
+    match state.delete_session(session_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => error_response(StatusCode::NOT_FOUND, anyhow::anyhow!("session not found")),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error),
@@ -1087,7 +1091,11 @@ where
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::NOT_FOUND, error),
     };
-    match state.service.set_session_model(session_id, &request.model) {
+    match state
+        .service
+        .set_session_model(session_id, &request.model)
+        .await
+    {
         Ok(model) => Json(SessionModelResponse { model }).into_response(),
         Err(error) => error_response(StatusCode::BAD_REQUEST, error),
     }
@@ -1129,7 +1137,11 @@ where
         Ok(policy) => policy,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
     };
-    match state.service.set_session_tool_policy(session_id, policy) {
+    match state
+        .service
+        .set_session_tool_policy(session_id, policy)
+        .await
+    {
         Ok(policy) => Json(SessionPermissionsResponse {
             tool_policy: policy.as_str().to_string(),
         })

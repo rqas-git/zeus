@@ -24,6 +24,7 @@ use crate::compaction::CompactionPreparation;
 use crate::compaction::CompactionResult;
 use crate::config::CompactionConfig;
 use crate::config::ContextWindowConfig;
+use crate::storage::run_blocking;
 use crate::storage::SessionDatabase;
 use crate::storage::StoredSession;
 use crate::tools::ToolExecution;
@@ -1206,14 +1207,19 @@ impl AgentLoop {
         } = builder;
         let store = match database.load_session(session_id)? {
             Some(stored) => {
-                return Self::from_stored_session(
+                let was_running = stored.status == SessionStatus::Running;
+                let agent = Self::from_stored_session(
                     session_id,
                     stored,
                     context_window,
                     compaction,
                     tools,
-                    Some(database),
+                    Some(database.clone()),
                 );
+                if was_running {
+                    database.set_session_status(session_id, SessionStatus::Idle)?;
+                }
+                return Ok(agent);
             }
             None => {
                 database.ensure_session(session_id, config.model())?;
@@ -1230,9 +1236,6 @@ impl AgentLoop {
     }
 
     /// Creates an agent loop from a session that was already loaded from storage.
-    ///
-    /// # Errors
-    /// Returns an error when a stale running status cannot be reset in durable storage.
     pub(crate) fn from_stored_session(
         session_id: SessionId,
         stored: StoredSession,
@@ -1240,22 +1243,34 @@ impl AgentLoop {
         compaction: CompactionConfig,
         tools: ToolRegistry,
         database: Option<SessionDatabase>,
-    ) -> Result<Self> {
-        let was_running = stored.status == SessionStatus::Running;
+    ) -> Self {
         let mut store = InMemorySessionStore::from_stored(session_id, stored);
         store.prune_history_with_compaction(context_window, compaction);
-        if was_running {
-            if let Some(database) = &database {
-                database.set_session_status(session_id, SessionStatus::Idle)?;
-            }
-        }
-        Ok(Self {
+        Self {
             store,
             context_window,
             compaction,
             tools,
             database,
-        })
+        }
+    }
+
+    /// Creates an empty agent loop after any durable row has already been initialized.
+    pub(crate) fn from_empty_session(
+        session_id: SessionId,
+        config: SessionConfig,
+        context_window: ContextWindowConfig,
+        compaction: CompactionConfig,
+        tools: ToolRegistry,
+        database: Option<SessionDatabase>,
+    ) -> Self {
+        Self {
+            store: InMemorySessionStore::new(session_id, config),
+            context_window,
+            compaction,
+            tools,
+            database,
+        }
     }
 
     /// Returns the session identifier.
@@ -1283,14 +1298,19 @@ impl AgentLoop {
     ///
     /// # Errors
     /// Returns an error if a turn is currently running.
-    pub(crate) fn set_model(&mut self, model: impl Into<String>) -> Result<()> {
+    pub(crate) async fn set_model(&mut self, model: impl Into<String>) -> Result<()> {
         anyhow::ensure!(
             self.store.status() != SessionStatus::Running,
             "cannot change model while session is running"
         );
         let model = model.into();
-        if let Some(database) = &self.database {
-            database.set_session_model(self.session_id(), &model)?;
+        if let Some(database) = self.database.clone() {
+            let session_id = self.session_id();
+            let persisted_model = model.clone();
+            run_blocking("session model update task failed", move || {
+                database.set_session_model(session_id, &persisted_model)
+            })
+            .await?;
         }
         self.store.set_model(model);
         Ok(())
@@ -1350,7 +1370,7 @@ impl AgentLoop {
 
         let user_text = text.into();
         let user_id = self.store.append_message(MessageRole::User, user_text);
-        self.persist_message(user_id)?;
+        self.persist_message(user_id).await?;
         if let Err(error) = emit(AgentEvent::MessageCompleted {
             session_id: self.session_id(),
             message_id: user_id,
@@ -1364,21 +1384,23 @@ impl AgentLoop {
         }) {
             self.store.remove_last_message(user_id);
             return rollback_persisted_message(
-                self.database.as_ref(),
+                self.database.clone(),
                 self.session_id(),
                 user_id,
                 error,
-            );
+            )
+            .await;
         }
 
-        if let Err(error) = self.begin_running(&mut emit) {
+        if let Err(error) = self.begin_running(&mut emit).await {
             self.store.remove_last_message(user_id);
             return rollback_persisted_message(
-                self.database.as_ref(),
+                self.database.clone(),
                 self.session_id(),
                 user_id,
                 error,
-            );
+            )
+            .await;
         }
         self.store
             .prune_history_with_compaction(self.context_window, self.compaction);
@@ -1391,19 +1413,19 @@ impl AgentLoop {
         .await;
         match result {
             Ok(()) => {
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Ok(())
             }
             Err(error) if is_turn_cancelled(&error) => {
                 self.store
                     .prune_history_with_compaction(self.context_window, self.compaction);
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Err(error)
             }
             Err(error) => {
                 self.store
                     .prune_history_with_compaction(self.context_window, self.compaction);
-                self.set_status(SessionStatus::Failed, &mut emit)?;
+                self.set_status(SessionStatus::Failed, &mut emit).await?;
                 let message = error.to_string();
                 emit(AgentEvent::Error {
                     session_id: self.session_id(),
@@ -1441,7 +1463,7 @@ impl AgentLoop {
         let user_id = self
             .store
             .append_message(MessageRole::User, format!("$ {command}"));
-        self.persist_message(user_id)?;
+        self.persist_message(user_id).await?;
         if let Err(error) = emit(AgentEvent::MessageCompleted {
             session_id: self.session_id(),
             message_id: user_id,
@@ -1455,21 +1477,23 @@ impl AgentLoop {
         }) {
             self.store.remove_last_message(user_id);
             return rollback_persisted_message(
-                self.database.as_ref(),
+                self.database.clone(),
                 self.session_id(),
                 user_id,
                 error,
-            );
+            )
+            .await;
         }
 
-        if let Err(error) = self.begin_running(&mut emit) {
+        if let Err(error) = self.begin_running(&mut emit).await {
             self.store.remove_last_message(user_id);
             return rollback_persisted_message(
-                self.database.as_ref(),
+                self.database.clone(),
                 self.session_id(),
                 user_id,
                 error,
-            );
+            )
+            .await;
         }
 
         let result = self
@@ -1479,15 +1503,15 @@ impl AgentLoop {
             .prune_history_with_compaction(self.context_window, self.compaction);
         match result {
             Ok(result) => {
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Ok(result)
             }
             Err(error) if is_turn_cancelled(&error) => {
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Err(error)
             }
             Err(error) => {
-                self.set_status(SessionStatus::Failed, &mut emit)?;
+                self.set_status(SessionStatus::Failed, &mut emit).await?;
                 let message = error.to_string();
                 emit(AgentEvent::Error {
                     session_id: self.session_id(),
@@ -1498,8 +1522,8 @@ impl AgentLoop {
         }
     }
 
-    fn persist_message(&self, message_id: MessageId) -> Result<()> {
-        let Some(database) = &self.database else {
+    async fn persist_message(&self, message_id: MessageId) -> Result<()> {
+        let Some(database) = self.database.clone() else {
             return Ok(());
         };
         let message = self
@@ -1507,58 +1531,77 @@ impl AgentLoop {
             .messages()
             .iter()
             .find(|message| message.id() == message_id)
+            .cloned()
             .context("message missing from session store")?;
-        database.insert_message(self.session_id(), message)
+        let session_id = self.session_id();
+        run_blocking("message persistence task failed", move || {
+            database.insert_message(session_id, &message)
+        })
+        .await
     }
 
-    fn persist_messages_from(&self, start: usize) -> Result<()> {
-        let Some(database) = &self.database else {
+    async fn persist_messages_from(&self, start: usize) -> Result<()> {
+        let Some(database) = self.database.clone() else {
             return Ok(());
         };
-        database.insert_messages(self.session_id(), &self.store.messages()[start..])
+        let session_id = self.session_id();
+        let messages = self.store.messages()[start..].to_vec();
+        run_blocking("message persistence task failed", move || {
+            database.insert_messages(session_id, &messages)
+        })
+        .await
     }
 
-    fn persist_status(&self, status: SessionStatus) -> Result<()> {
-        if let Some(database) = &self.database {
-            database.set_session_status(self.session_id(), status)?;
-        }
-        Ok(())
+    async fn persist_status(&self, status: SessionStatus) -> Result<()> {
+        let Some(database) = self.database.clone() else {
+            return Ok(());
+        };
+        let session_id = self.session_id();
+        run_blocking("session status persistence task failed", move || {
+            database.set_session_status(session_id, status)
+        })
+        .await
     }
 
-    fn record_cache_observation(&mut self, cache_health: &CacheHealth) -> Result<()> {
+    async fn record_cache_observation(&mut self, cache_health: &CacheHealth) -> Result<()> {
         self.store.record_cache_observation(cache_health);
-        if let (Some(database), Some(observation)) =
-            (&self.database, &self.store.last_cache_observation)
-        {
-            database.record_cache_observation(self.session_id(), observation)?;
-        }
-        Ok(())
+        let (Some(database), Some(observation)) = (
+            self.database.clone(),
+            self.store.last_cache_observation.clone(),
+        ) else {
+            return Ok(());
+        };
+        let session_id = self.session_id();
+        run_blocking("cache observation persistence task failed", move || {
+            database.record_cache_observation(session_id, &observation)
+        })
+        .await
     }
 
-    fn begin_running(
+    async fn begin_running(
         &mut self,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         self.store.set_status(SessionStatus::Running);
-        self.persist_status(SessionStatus::Running)?;
+        self.persist_status(SessionStatus::Running).await?;
         if let Err(error) = emit(AgentEvent::StatusChanged {
             session_id: self.session_id(),
             status: SessionStatus::Running,
         }) {
             self.store.set_status(SessionStatus::Idle);
-            self.persist_status(SessionStatus::Idle)?;
+            self.persist_status(SessionStatus::Idle).await?;
             return Err(error);
         }
         Ok(())
     }
 
-    fn set_status(
+    async fn set_status(
         &mut self,
         status: SessionStatus,
         emit: &mut (impl FnMut(AgentEvent<'_>) -> Result<()> + Send),
     ) -> Result<()> {
         self.store.set_status(status);
-        self.persist_status(status)?;
+        self.persist_status(status).await?;
         emit(AgentEvent::StatusChanged {
             session_id: self.session_id(),
             status,
@@ -1668,14 +1711,14 @@ impl AgentLoop {
                 session_id,
                 cache_health,
             })?;
-            self.record_cache_observation(cache_health)?;
+            self.record_cache_observation(cache_health).await?;
         }
         let assistant_text = model_response.text;
         if !assistant_text.is_empty() {
             let assistant_id = self
                 .store
                 .append_message(MessageRole::Assistant, assistant_text);
-            self.persist_message(assistant_id)?;
+            self.persist_message(assistant_id).await?;
             let assistant_text = self
                 .store
                 .messages()
@@ -1709,7 +1752,7 @@ impl AgentLoop {
             "session is already running"
         );
         cancellation.ensure_not_cancelled()?;
-        self.begin_running(&mut emit)?;
+        self.begin_running(&mut emit).await?;
         let result = self
             .run_compaction(
                 model,
@@ -1722,15 +1765,15 @@ impl AgentLoop {
             .await;
         match result {
             Ok(result) => {
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Ok(result)
             }
             Err(error) if is_turn_cancelled(&error) => {
-                self.set_status(SessionStatus::Idle, &mut emit)?;
+                self.set_status(SessionStatus::Idle, &mut emit).await?;
                 Err(error)
             }
             Err(error) => {
-                self.set_status(SessionStatus::Failed, &mut emit)?;
+                self.set_status(SessionStatus::Failed, &mut emit).await?;
                 let message = error.to_string();
                 emit(AgentEvent::Error {
                     session_id: self.session_id(),
@@ -1799,7 +1842,7 @@ impl AgentLoop {
         };
         let stored_result = result.clone();
         let compaction_id = self.store.append_compaction(stored_result);
-        self.persist_message(compaction_id)?;
+        self.persist_message(compaction_id).await?;
         self.store
             .prune_history_with_compaction(self.context_window, self.compaction);
         emit(AgentEvent::CompactionCompleted {
@@ -1914,7 +1957,7 @@ impl AgentLoop {
             .collect::<Vec<_>>();
         let first_new_message = self.store.messages().len();
         self.store.append_tool_transcript(tool_calls, executions);
-        self.persist_messages_from(first_new_message)?;
+        self.persist_messages_from(first_new_message).await?;
         for (tool_call_id, tool_name, success) in completions {
             emit(AgentEvent::ToolCallCompleted {
                 session_id,
@@ -1961,7 +2004,7 @@ impl AgentLoop {
         let success = execution.success;
         let first_new_message = self.store.messages().len();
         self.store.append_tool_transcript([tool_call], [execution]);
-        self.persist_messages_from(first_new_message)?;
+        self.persist_messages_from(first_new_message).await?;
         emit(AgentEvent::ToolCallCompleted {
             session_id,
             tool_call_id: &tool_call_id,
@@ -1972,16 +2015,19 @@ impl AgentLoop {
     }
 }
 
-fn rollback_persisted_message<T>(
-    database: Option<&SessionDatabase>,
+async fn rollback_persisted_message<T>(
+    database: Option<SessionDatabase>,
     session_id: SessionId,
     message_id: MessageId,
     error: anyhow::Error,
 ) -> Result<T> {
     if let Some(database) = database {
-        database
-            .delete_message(session_id, message_id)
-            .context("failed to roll back persisted message")?;
+        run_blocking("message rollback task failed", move || {
+            database
+                .delete_message(session_id, message_id)
+                .context("failed to roll back persisted message")
+        })
+        .await?;
     }
     Err(error)
 }
@@ -2564,7 +2610,7 @@ mod tests {
             .submit_user_message("hello", &streamer, |_| Ok(()))
             .await
             .unwrap();
-        agent.set_model("second-model").unwrap();
+        agent.set_model("second-model").await.unwrap();
         agent
             .submit_user_message("again", &streamer, |_| Ok(()))
             .await

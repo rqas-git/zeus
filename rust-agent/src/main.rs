@@ -237,7 +237,7 @@ async fn run_interactive_loop(
                 println!("Model: {}", service.session_model(session_id).await?);
             }
             InteractiveInput::SetModel(model) => {
-                match service.set_session_model(session_id, &model) {
+                match service.set_session_model(session_id, &model).await {
                     Ok(model) => println!("Model: {model}"),
                     Err(error) => println!("Error: {error}"),
                 }

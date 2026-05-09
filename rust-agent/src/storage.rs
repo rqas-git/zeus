@@ -72,6 +72,20 @@ pub(crate) struct SessionDatabase {
     inner: Arc<Mutex<Connection>>,
 }
 
+/// Runs a synchronous storage operation on Tokio's blocking worker pool.
+///
+/// # Errors
+/// Returns an error when the blocking task panics or the storage operation fails.
+pub(crate) async fn run_blocking<T>(
+    context: &'static str,
+    action: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(action).await.context(context)?
+}
+
 impl SessionDatabase {
     /// Opens a session database at `path`, creating the schema when needed.
     ///
@@ -840,7 +854,11 @@ impl Connection {
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
              );
              CREATE INDEX IF NOT EXISTS messages_session_order_idx
-                ON messages(session_id, message_id);",
+                ON messages(session_id, message_id);
+             CREATE INDEX IF NOT EXISTS messages_session_kind_order_idx
+                ON messages(session_id, kind, message_id);
+             CREATE INDEX IF NOT EXISTS sessions_updated_order_idx
+                ON sessions(updated_at_ms DESC, id DESC);",
         )?;
         self.ensure_messages_column(
             "first_kept_message_id",
