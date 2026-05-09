@@ -321,8 +321,23 @@ impl SessionDatabase {
         session_id: SessionId,
         message: &AgentMessage,
     ) -> Result<()> {
+        self.insert_messages(session_id, std::slice::from_ref(message))
+    }
+
+    /// Inserts ordered message rows in one transaction.
+    ///
+    /// # Errors
+    /// Returns an error when any database write fails.
+    pub(crate) fn insert_messages(
+        &self,
+        session_id: SessionId,
+        messages: &[AgentMessage],
+    ) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
         let now = now_millis()?;
-        self.with_connection(|connection| insert_message(connection, session_id, message, now))
+        self.with_connection(|connection| insert_messages(connection, session_id, messages, now))
     }
 
     /// Deletes one message row.
@@ -540,27 +555,40 @@ fn decode_message_row(statement: &Statement<'_>) -> Result<AgentMessage> {
     Ok(AgentMessage::from_parts(message_id, item))
 }
 
-fn insert_message(
+const INSERT_MESSAGE_SQL: &str = "INSERT INTO messages \
+     (session_id, message_id, kind, role, text, item_id, call_id, name, arguments, output, success, created_at_ms, first_kept_message_id, tokens_before, details_json) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+
+const UPDATE_SESSION_TIMESTAMP_SQL: &str = "UPDATE sessions SET updated_at_ms = ?2 WHERE id = ?1";
+
+fn insert_messages(
+    connection: &mut Connection,
+    session_id: SessionId,
+    messages: &[AgentMessage],
+    now: i64,
+) -> Result<()> {
+    connection.transaction(|connection| {
+        for message in messages {
+            insert_message_row(connection, session_id, message, now)?;
+        }
+        touch_session(connection, session_id, now)
+    })
+}
+
+fn insert_message_row(
     connection: &mut Connection,
     session_id: SessionId,
     message: &AgentMessage,
     now: i64,
 ) -> Result<()> {
     let mut values = MessageInsert::new(session_id, message, now)?;
-    connection.transaction(|connection| {
-        connection.execute(
-            "INSERT INTO messages \
-             (session_id, message_id, kind, role, text, item_id, call_id, name, arguments, output, success, created_at_ms, first_kept_message_id, tokens_before, details_json) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            |statement| values.bind(statement),
-        )?;
-        connection.execute(
-            "UPDATE sessions SET updated_at_ms = ?2 WHERE id = ?1",
-            |statement| {
-                statement.bind_i64(1, session_id_i64(session_id)?)?;
-                statement.bind_i64(2, now)
-            },
-        )
+    connection.execute(INSERT_MESSAGE_SQL, |statement| values.bind(statement))
+}
+
+fn touch_session(connection: &mut Connection, session_id: SessionId, now: i64) -> Result<()> {
+    connection.execute(UPDATE_SESSION_TIMESTAMP_SQL, |statement| {
+        statement.bind_i64(1, session_id_i64(session_id)?)?;
+        statement.bind_i64(2, now)
     })
 }
 
@@ -1235,6 +1263,56 @@ mod tests {
 
         assert_eq!(loaded.config.model(), "test-model");
         assert_eq!(loaded.status, SessionStatus::Idle);
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].text(), "hello");
+        assert_eq!(loaded.messages[1].text(), "ok");
+    }
+
+    #[test]
+    fn inserts_message_batches_atomically() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let session_id = SessionId::new(17);
+        database.ensure_session(session_id, "test-model").unwrap();
+        let messages = vec![
+            AgentMessage::from_parts(
+                MessageId::new(1),
+                AgentItem::Message {
+                    role: MessageRole::User,
+                    text: "hello".to_string(),
+                },
+            ),
+            AgentMessage::from_parts(
+                MessageId::new(2),
+                AgentItem::FunctionOutput {
+                    call_id: "call_1".to_string(),
+                    output: "ok".to_string(),
+                    success: true,
+                },
+            ),
+        ];
+        database.insert_messages(session_id, &messages).unwrap();
+
+        let duplicate_batch = vec![
+            AgentMessage::from_parts(
+                MessageId::new(3),
+                AgentItem::Message {
+                    role: MessageRole::User,
+                    text: "partial".to_string(),
+                },
+            ),
+            AgentMessage::from_parts(
+                MessageId::new(3),
+                AgentItem::Message {
+                    role: MessageRole::Assistant,
+                    text: "duplicate".to_string(),
+                },
+            ),
+        ];
+        assert!(database
+            .insert_messages(session_id, &duplicate_batch)
+            .is_err());
+
+        let loaded = database.load_session(session_id).unwrap().unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].text(), "hello");
         assert_eq!(loaded.messages[1].text(), "ok");

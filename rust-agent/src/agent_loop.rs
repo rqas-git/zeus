@@ -1481,10 +1481,7 @@ impl AgentLoop {
         let Some(database) = &self.database else {
             return Ok(());
         };
-        for message in &self.store.messages()[start..] {
-            database.insert_message(self.session_id(), message)?;
-        }
-        Ok(())
+        database.insert_messages(self.session_id(), &self.store.messages()[start..])
     }
 
     fn persist_status(&self, status: SessionStatus) -> Result<()> {
