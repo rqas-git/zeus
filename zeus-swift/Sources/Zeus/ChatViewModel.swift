@@ -675,7 +675,7 @@ final class ChatViewModel: ObservableObject {
         }
         lines[index].text += delta
         lines[index].isStreaming = true
-        lines[index].markdownBlocks = nil
+        lines[index].renderedMarkdown = nil
         refreshSearchMatches()
         requestScrollTo(id)
     }
@@ -686,7 +686,7 @@ final class ChatViewModel: ObservableObject {
         guard let index = lines.firstIndex(where: { $0.id == id }) else { return }
         lines[index].text = text
         lines[index].isStreaming = false
-        lines[index].markdownBlocks = TerminalMarkdownParser.parse(text)
+        lines[index].renderedMarkdown = RenderedTerminalMarkdown(text: text)
         assistantPlaceholderLineID = nil
         refreshSearchMatches()
         requestScrollTo(id)
@@ -708,7 +708,7 @@ final class ChatViewModel: ObservableObject {
         guard assistantPlaceholderLineID == id || lines[index].text.isEmpty else { return }
         lines[index].text = text
         lines[index].isStreaming = true
-        lines[index].markdownBlocks = nil
+        lines[index].renderedMarkdown = nil
         assistantPlaceholderLineID = id
         refreshSearchMatches()
         requestScrollTo(id)
@@ -744,9 +744,9 @@ final class ChatViewModel: ObservableObject {
         }
         lines[index].isStreaming = isStreaming
         if isStreaming {
-            lines[index].markdownBlocks = nil
+            lines[index].renderedMarkdown = nil
         } else if lines[index].kind == .assistant {
-            lines[index].markdownBlocks = TerminalMarkdownParser.parse(lines[index].text)
+            lines[index].renderedMarkdown = RenderedTerminalMarkdown(text: lines[index].text)
         }
     }
 
@@ -849,7 +849,7 @@ final class ChatViewModel: ObservableObject {
                 restoredLines.append(TranscriptLine(
                     kind: kind,
                     text: text,
-                    markdownBlocks: kind == .assistant ? TerminalMarkdownParser.parse(text) : nil
+                    renderedMarkdown: kind == .assistant ? RenderedTerminalMarkdown(text: text) : nil
                 ))
             case "function_call":
                 let display = toolDisplay(

@@ -906,10 +906,11 @@ private struct TerminalLineView: View {
             if line.isStreaming {
                 Text(line.text.isEmpty ? " " : line.text)
                     .foregroundStyle(TerminalPalette.primaryText)
-            } else if let blocks = line.markdownBlocks {
-                TerminalMarkdownView(blocks: blocks)
+            } else if let markdown = line.renderedMarkdown {
+                TerminalMarkdownView(markdown: markdown)
             } else {
-                TerminalMarkdownView(text: line.text)
+                Text(line.text.isEmpty ? " " : line.text)
+                    .foregroundStyle(TerminalPalette.primaryText)
             }
 
             if isCacheStatsVisible {

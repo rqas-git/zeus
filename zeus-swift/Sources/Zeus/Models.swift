@@ -9,6 +9,70 @@ enum TranscriptKind: Equatable {
     case error
 }
 
+struct RenderedTerminalMarkdown: Equatable, Sendable {
+    let blocks: [RenderedTerminalMarkdownBlock]
+
+    init(text: String) {
+        self.init(blocks: TerminalMarkdownParser.parse(text))
+    }
+
+    init(blocks: [TerminalMarkdownBlock]) {
+        self.blocks = blocks.map(Self.render)
+    }
+
+    private static func render(_ block: TerminalMarkdownBlock) -> RenderedTerminalMarkdownBlock {
+        switch block {
+        case let .paragraph(text):
+            return .paragraph(renderInline(text))
+        case let .heading(level, text):
+            return .heading(level: level, text: renderInline(text))
+        case let .unorderedList(items):
+            return .unorderedList(items.map(renderInline))
+        case let .orderedList(items):
+            return .orderedList(items.map { item in
+                RenderedOrderedListItem(number: item.number, text: renderInline(item.text))
+            })
+        case let .quote(lines):
+            return .quote(lines.map(renderInline))
+        case let .codeBlock(language, code):
+            return .codeBlock(language: language, code: code)
+        case .rule:
+            return .rule
+        }
+    }
+
+    private static func renderInline(_ source: String) -> RenderedInlineText {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        if let attributed = try? AttributedString(markdown: source, options: options) {
+            return .attributed(attributed)
+        }
+        return .plain(source)
+    }
+}
+
+enum RenderedTerminalMarkdownBlock: Equatable, Sendable {
+    case paragraph(RenderedInlineText)
+    case heading(level: Int, text: RenderedInlineText)
+    case unorderedList([RenderedInlineText])
+    case orderedList([RenderedOrderedListItem])
+    case quote([RenderedInlineText])
+    case codeBlock(language: String?, code: String)
+    case rule
+}
+
+struct RenderedOrderedListItem: Equatable, Sendable {
+    let number: Int
+    let text: RenderedInlineText
+}
+
+enum RenderedInlineText: Equatable, Sendable {
+    case plain(String)
+    case attributed(AttributedString)
+}
+
 struct TranscriptLine: Identifiable, Equatable {
     let id: UUID
     var kind: TranscriptKind
@@ -16,7 +80,7 @@ struct TranscriptLine: Identifiable, Equatable {
     var toolCall: ToolCallTranscript?
     var cacheStats: [ResponseCacheStats]
     var isStreaming: Bool
-    var markdownBlocks: [TerminalMarkdownBlock]?
+    var renderedMarkdown: RenderedTerminalMarkdown?
 
     init(
         id: UUID = UUID(),
@@ -25,7 +89,7 @@ struct TranscriptLine: Identifiable, Equatable {
         toolCall: ToolCallTranscript? = nil,
         cacheStats: [ResponseCacheStats] = [],
         isStreaming: Bool = false,
-        markdownBlocks: [TerminalMarkdownBlock]? = nil
+        renderedMarkdown: RenderedTerminalMarkdown? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -33,7 +97,7 @@ struct TranscriptLine: Identifiable, Equatable {
         self.toolCall = toolCall
         self.cacheStats = cacheStats
         self.isStreaming = isStreaming
-        self.markdownBlocks = markdownBlocks
+        self.renderedMarkdown = renderedMarkdown
     }
 
     static func == (lhs: TranscriptLine, rhs: TranscriptLine) -> Bool {

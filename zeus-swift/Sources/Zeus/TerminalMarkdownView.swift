@@ -2,23 +2,19 @@ import SwiftUI
 import ZeusCore
 
 struct TerminalMarkdownView: View {
-    private let blocks: [TerminalMarkdownBlock]
+    private let markdown: RenderedTerminalMarkdown
 
-    init(text: String) {
-        self.blocks = TerminalMarkdownParser.parse(text)
-    }
-
-    init(blocks: [TerminalMarkdownBlock]) {
-        self.blocks = blocks
+    init(markdown: RenderedTerminalMarkdown) {
+        self.markdown = markdown
     }
 
     var body: some View {
-        if blocks.isEmpty {
+        if markdown.blocks.isEmpty {
             Text(" ")
                 .foregroundStyle(TerminalPalette.primaryText)
         } else {
             VStack(alignment: .leading, spacing: 7) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                ForEach(Array(markdown.blocks.enumerated()), id: \.offset) { _, block in
                     blockView(block)
                 }
             }
@@ -27,7 +23,7 @@ struct TerminalMarkdownView: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: TerminalMarkdownBlock) -> some View {
+    private func blockView(_ block: RenderedTerminalMarkdownBlock) -> some View {
         switch block {
         case let .paragraph(text):
             inlineText(text)
@@ -72,7 +68,7 @@ struct TerminalMarkdownView: View {
         }
     }
 
-    private func listRow(marker: String, text: String, markerWidth: CGFloat) -> some View {
+    private func listRow(marker: String, text: RenderedInlineText, markerWidth: CGFloat) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 5) {
             Text(marker)
                 .foregroundStyle(TerminalPalette.cyan)
@@ -83,15 +79,13 @@ struct TerminalMarkdownView: View {
         }
     }
 
-    private func inlineText(_ source: String) -> Text {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace,
-            failurePolicy: .returnPartiallyParsedIfPossible
-        )
-        if let attributed = try? AttributedString(markdown: source, options: options) {
+    private func inlineText(_ text: RenderedInlineText) -> Text {
+        switch text {
+        case let .attributed(attributed):
             return Text(attributed)
+        case let .plain(source):
+            return Text(source)
         }
-        return Text(source)
     }
 
     private func headingSize(_ level: Int) -> CGFloat {
