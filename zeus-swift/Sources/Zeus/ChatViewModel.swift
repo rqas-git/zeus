@@ -94,6 +94,7 @@ final class ChatViewModel: ObservableObject {
     private var assistantDeltaFlushTask: Task<Void, Never>?
     private var markdownRenderTask: Task<Void, Never>?
     private var pendingAssistantDelta = ""
+    private var assistantStreamText = ""
     private var pendingCacheStats: [ResponseCacheStats] = []
     private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
     private var isSessionEventStreamConnected = false
@@ -218,6 +219,7 @@ final class ChatViewModel: ObservableObject {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         activeAssistantStream = nil
+        assistantStreamText = ""
         lastAssistantScrollRequest = .distantPast
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
@@ -681,12 +683,14 @@ final class ChatViewModel: ObservableObject {
     private func applyAssistantDelta(_ delta: String) {
         let id = ensureAssistantLine()
         guard let index = lineIndex(for: id) else { return }
-        let previousText = activeAssistantStream?.lineID == id
-            ? activeAssistantStream?.text ?? ""
-            : lines[index].text
-        let baseText = assistantPlaceholderLineID == id ? "" : previousText
+        if assistantPlaceholderLineID == id {
+            assistantStreamText = ""
+        } else if assistantStreamText.isEmpty {
+            assistantStreamText = lines[index].text
+        }
         assistantPlaceholderLineID = nil
-        activeAssistantStream = ActiveAssistantStream(lineID: id, text: baseText + delta)
+        assistantStreamText.append(contentsOf: delta)
+        activeAssistantStream = ActiveAssistantStream(lineID: id, text: assistantStreamText)
         if !lines[index].isStreaming {
             lines[index].isStreaming = true
         }
@@ -705,6 +709,7 @@ final class ChatViewModel: ObservableObject {
         if activeAssistantStream?.lineID == id {
             activeAssistantStream = nil
         }
+        assistantStreamText = ""
         scheduleMarkdownRendering(for: lines[index])
         refreshSearchMatches()
         requestScrollTo(id)
@@ -728,6 +733,7 @@ final class ChatViewModel: ObservableObject {
             : lines[index].text
         guard assistantPlaceholderLineID == id || visibleText.isEmpty else { return }
         activeAssistantStream = ActiveAssistantStream(lineID: id, text: text)
+        assistantStreamText = ""
         if !lines[index].isStreaming {
             lines[index].isStreaming = true
         }
@@ -744,6 +750,7 @@ final class ChatViewModel: ObservableObject {
         if activeAssistantStream?.lineID == assistantPlaceholderLineID {
             activeAssistantStream = nil
         }
+        assistantStreamText = ""
         removeLine(at: index)
         self.assistantPlaceholderLineID = nil
         refreshSearchMatches()
@@ -771,6 +778,9 @@ final class ChatViewModel: ObservableObject {
            activeAssistantStream?.lineID == currentAssistantLineID {
             lines[index].text = activeAssistantStream?.text ?? lines[index].text
             activeAssistantStream = nil
+        }
+        if !isStreaming {
+            assistantStreamText = ""
         }
         lines[index].isStreaming = isStreaming
         if isStreaming {
@@ -912,6 +922,7 @@ final class ChatViewModel: ObservableObject {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         activeAssistantStream = nil
+        assistantStreamText = ""
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
