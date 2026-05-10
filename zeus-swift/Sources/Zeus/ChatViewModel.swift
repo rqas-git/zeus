@@ -75,6 +75,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
+    private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
     private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
     private let server: any AgentServerProtocol
     private let auth: any AgentAuthProtocol
@@ -92,6 +93,7 @@ final class ChatViewModel: ObservableObject {
     private var branchSwitchTask: Task<Void, Never>?
     private var terminalTask: Task<Void, Never>?
     private var assistantDeltaFlushTask: Task<Void, Never>?
+    private var searchRefreshTask: Task<Void, Never>?
     private var markdownRenderTask: Task<Void, Never>?
     private var pendingAssistantDelta = ""
     private var assistantStreamText = ""
@@ -102,6 +104,7 @@ final class ChatViewModel: ObservableObject {
     private var sessionPermission = "read-only"
     private var lineIndexesByID: [UUID: Int] = [:]
     private var searchMatchedLineIDsInOrder: [UUID] = []
+    private var searchRefreshRevision = 0
     private var transcriptScrollRevision = 0
     private var submittedMessageHistory = PromptHistory()
     private var isApplyingDraftFromHistory = false
@@ -124,6 +127,7 @@ final class ChatViewModel: ObservableObject {
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
         assistantDeltaFlushTask?.cancel()
+        searchRefreshTask?.cancel()
         markdownRenderTask?.cancel()
         auth.cancelLogin()
         server.stop()
@@ -281,6 +285,8 @@ final class ChatViewModel: ObservableObject {
         branchSwitchTask = nil
         terminalTask?.cancel()
         terminalTask = nil
+        searchRefreshTask?.cancel()
+        searchRefreshTask = nil
         markdownRenderTask?.cancel()
         markdownRenderTask = nil
         pendingMarkdownRenders.removeAll(keepingCapacity: true)
@@ -353,10 +359,13 @@ final class ChatViewModel: ObservableObject {
 
     func showSearch() {
         isSearchVisible = true
-        refreshSearchMatches()
+        refreshSearchMatches(debounce: false)
     }
 
     func closeSearch() {
+        searchRefreshRevision += 1
+        searchRefreshTask?.cancel()
+        searchRefreshTask = nil
         isSearchVisible = false
         searchQuery = ""
         searchMatchedLineIDsInOrder.removeAll(keepingCapacity: true)
@@ -1138,7 +1147,11 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func refreshSearchMatches() {
+    private func refreshSearchMatches(debounce: Bool = true) {
+        searchRefreshRevision += 1
+        searchRefreshTask?.cancel()
+        searchRefreshTask = nil
+
         guard isSearchVisible else {
             clearSearchMatchesIfNeeded()
             return
@@ -1150,13 +1163,37 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        let snapshots = searchLineSnapshots()
         let preferredLineID = selectedSearchLineID
-        let matches = lines.compactMap { line -> UUID? in
-            searchableText(for: line).range(
-                of: query,
-                options: [.caseInsensitive, .diacriticInsensitive]
-            ) == nil ? nil : line.id
+        let revision = searchRefreshRevision
+        searchRefreshTask = Task { [weak self] in
+            if debounce {
+                do {
+                    try await Task.sleep(nanoseconds: Self.searchRefreshDebounceNanoseconds)
+                } catch {
+                    return
+                }
+            }
+
+            let matches = await Task.detached(priority: .utility) {
+                Self.searchMatches(in: snapshots, query: query)
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.applySearchMatches(
+                matches,
+                preferredLineID: preferredLineID,
+                revision: revision
+            )
         }
+    }
+
+    private func applySearchMatches(
+        _ matches: [UUID],
+        preferredLineID: UUID?,
+        revision: Int
+    ) {
+        guard revision == searchRefreshRevision else { return }
+        searchRefreshTask = nil
         searchMatchedLineIDsInOrder = matches
         searchMatchLineIDs = Set(matches)
 
@@ -1171,6 +1208,24 @@ final class ChatViewModel: ObservableObject {
             ?? 0
         selectedSearchLineID = matches[selectedIndex]
         searchResultSummary = "\(selectedIndex + 1) / \(matches.count) lines"
+    }
+
+    private func searchLineSnapshots() -> [SearchLineSnapshot] {
+        lines.map { line in
+            SearchLineSnapshot(id: line.id, text: searchableText(for: line))
+        }
+    }
+
+    nonisolated private static func searchMatches(
+        in snapshots: [SearchLineSnapshot],
+        query: String
+    ) -> [UUID] {
+        snapshots.compactMap { snapshot -> UUID? in
+            snapshot.text.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == nil ? nil : snapshot.id
+        }
     }
 
     private func clearSearchMatchesIfNeeded() {
@@ -1422,6 +1477,11 @@ private struct MarkdownRenderAssignment: Sendable {
     let lineID: UUID
     let text: String
     let markdown: RenderedTerminalMarkdown
+}
+
+private struct SearchLineSnapshot: Sendable {
+    let id: UUID
+    let text: String
 }
 
 private enum SessionEventStreamError: LocalizedError {

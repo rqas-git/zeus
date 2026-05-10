@@ -20,7 +20,9 @@ published SwiftUI state and coordinates asynchronous backend work.
    readiness flags.
 7. `/restore <session id>` replaces transcript and prompt history from backend
    durable records.
-8. Terminal passthrough sends commands to `terminal:run` and appends bounded
+8. Transcript search refreshes are debounced and scan line snapshots off the
+   main actor.
+9. Terminal passthrough sends commands to `terminal:run` and appends bounded
    command output to the transcript.
 
 ## Responsibilities
@@ -42,6 +44,7 @@ published SwiftUI state and coordinates asynchronous backend work.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
 - `assistantDeltaFlushTask` batches assistant text updates.
+- `searchRefreshTask` debounces transcript search updates.
 
 Tasks are cancelled on deinit and when a newer operation supersedes the old
 one. Same-session turn ordering is enforced by the backend; the frontend avoids
