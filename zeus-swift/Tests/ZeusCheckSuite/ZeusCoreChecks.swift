@@ -218,6 +218,44 @@ public enum ZeusCoreChecks {
         try require(cache?.usage?.totalTokens == 13, "unexpected total tokens")
     }
 
+    public static func testServerSentEventParser() throws {
+        let stream = """
+        event: server.connected
+        data: {"type":"server_connected","session_id":42}
+
+        event: server.heartbeat
+        data: {"type":"server_heartbeat","session_id":42}
+
+        """
+
+        var lineDecoder = ServerSentEventLineDecoder()
+        var parser = ServerSentEventDataParser()
+        var events: [AgentServerEvent] = []
+
+        for byte in stream.utf8 {
+            guard let line = lineDecoder.append(byte) else { continue }
+            if let dataLines = parser.append(line: line) {
+                events.append(try decodeEvent(dataLines: dataLines))
+            }
+        }
+
+        if let line = lineDecoder.finish(),
+           let dataLines = parser.append(line: line) {
+            events.append(try decodeEvent(dataLines: dataLines))
+        }
+        if let dataLines = parser.finish() {
+            events.append(try decodeEvent(dataLines: dataLines))
+        }
+
+        try require(
+            events == [
+                .serverConnected(sessionID: 42),
+                .serverHeartbeat(sessionID: 42)
+            ],
+            "unexpected SSE events"
+        )
+    }
+
     public static func testResponseCacheStatsDisplay() throws {
         let event = try decodeEvent(
             #"{"type":"cache_health","session_id":1,"cache":{"model":"gpt-5.5","response_id":"resp_1","cache_status":"reused_prefix","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":2,"total_tokens":13}}}"#
@@ -309,6 +347,10 @@ public enum ZeusCoreChecks {
 
     private static func decodeEvent(_ json: String) throws -> AgentServerEvent {
         try JSONDecoder().decode(AgentServerEvent.self, from: Data(json.utf8))
+    }
+
+    private static func decodeEvent(dataLines: [String]) throws -> AgentServerEvent {
+        try decodeEvent(dataLines.joined(separator: "\n"))
     }
 }
 

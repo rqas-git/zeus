@@ -11,8 +11,8 @@ uses typed `ZeusCore` request and response models.
 3. Session, workspace, model, permission, terminal, and restore routes include
    `Authorization: Bearer <token>`.
 4. JSON requests and responses use `AgentAPIContract.swift` types.
-5. Turn and session event streams are read as SSE and decoded into
-   `AgentServerEvent`.
+5. Turn and session event streams are read as raw SSE bytes, preserving blank
+   event-separator lines before decoding payloads into `AgentServerEvent`.
 6. HTTP non-2xx responses become `AgentClientError.httpStatus`.
 7. Empty or unparsable streams include a short preview in the thrown error.
 

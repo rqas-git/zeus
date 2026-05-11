@@ -155,16 +155,25 @@ struct AgentAPIClient: AgentClientProtocol {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         try validate(response: response)
 
-        var parser = SSELineParser()
+        var lineDecoder = ServerSentEventLineDecoder()
+        var parser = ServerSentEventDataParser()
         let decoder = JSONDecoder()
         var receivedEvent = false
 
-        for try await line in bytes.lines {
-            if let dataLines = parser.append(line),
+        for try await byte in bytes {
+            guard let line = lineDecoder.append(byte) else { continue }
+            if let dataLines = parser.append(line: line),
                let event = try decodeEvent(fromDataLines: dataLines, decoder: decoder) {
                 receivedEvent = true
                 await onEvent(event)
             }
+        }
+
+        if let line = lineDecoder.finish(),
+           let dataLines = parser.append(line: line),
+           let event = try decodeEvent(fromDataLines: dataLines, decoder: decoder) {
+            receivedEvent = true
+            await onEvent(event)
         }
 
         if let dataLines = parser.finish(),
@@ -216,57 +225,6 @@ struct AgentAPIClient: AgentClientProtocol {
         guard !dataLines.isEmpty else { return nil }
         let eventData = Data(dataLines.joined(separator: "\n").utf8)
         return try decoder.decode(AgentServerEvent.self, from: eventData)
-    }
-}
-
-private struct SSELineParser {
-    private static let previewLimit = 1_000
-
-    private var dataLines: [String] = []
-    private(set) var preview = ""
-
-    mutating func append(_ rawLine: String) -> [String]? {
-        let line = normalized(rawLine)
-        appendPreview(line)
-
-        guard !line.isEmpty else {
-            return flush()
-        }
-
-        guard line.hasPrefix("data:") else {
-            return nil
-        }
-
-        var value = String(line.dropFirst(5))
-        if value.first == " " {
-            value.removeFirst()
-        }
-        dataLines.append(value)
-        return nil
-    }
-
-    mutating func finish() -> [String]? {
-        flush()
-    }
-
-    private mutating func flush() -> [String]? {
-        guard !dataLines.isEmpty else { return nil }
-        let lines = dataLines
-        dataLines.removeAll(keepingCapacity: true)
-        return lines
-    }
-
-    private func normalized(_ line: String) -> String {
-        line.hasSuffix("\r") ? String(line.dropLast()) : line
-    }
-
-    private mutating func appendPreview(_ line: String) {
-        guard preview.count < Self.previewLimit else { return }
-        preview += line
-        preview += "\n"
-        if preview.count > Self.previewLimit {
-            preview = String(preview.prefix(Self.previewLimit))
-        }
     }
 }
 

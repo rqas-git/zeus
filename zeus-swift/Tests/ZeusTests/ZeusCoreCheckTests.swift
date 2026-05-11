@@ -32,6 +32,11 @@ func agentServerEventDecodesTypedEvents() throws {
 }
 
 @Test
+func serverSentEventParserPreservesEventBoundaries() throws {
+    try ZeusCoreChecks.testServerSentEventParser()
+}
+
+@Test
 func rustAgentAPIContractFixturesDecode() throws {
     try ZeusCoreChecks.testRustAgentAPIContractFixtures()
 }
