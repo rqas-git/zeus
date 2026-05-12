@@ -66,7 +66,11 @@ struct ChatWindow: View {
             TerminalBackground()
 
             VStack(spacing: 0) {
-                HeaderBar(onLoginStatus: viewModel.showLoginStatus)
+                HeaderBar(
+                    isLoggedIn: viewModel.isLoggedIn,
+                    onLogin: viewModel.startLogin,
+                    onLoginStatus: viewModel.showLoginStatus
+                )
 
                 if viewModel.isSearchVisible {
                     SearchBar(
@@ -617,6 +621,8 @@ private struct TerminalBackground: View {
 }
 
 private struct HeaderBar: View {
+    let isLoggedIn: Bool
+    let onLogin: () -> Void
     let onLoginStatus: () -> Void
     @State private var isShowingSettings = false
 
@@ -647,9 +653,13 @@ private struct HeaderBar: View {
         .frame(height: 16)
         .overlay(alignment: .topTrailing) {
             if isShowingSettings {
-                SettingsDropdown {
+                SettingsDropdown(isLoggedIn: isLoggedIn) {
                     isShowingSettings = false
-                    onLoginStatus()
+                    if isLoggedIn {
+                        onLoginStatus()
+                    } else {
+                        onLogin()
+                    }
                 }
                 .offset(y: 20)
                 .zIndex(20)
@@ -660,18 +670,19 @@ private struct HeaderBar: View {
 }
 
 private struct SettingsDropdown: View {
-    let onLoginStatus: () -> Void
+    let isLoggedIn: Bool
+    let onLoginAction: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button(action: onLoginStatus) {
+            Button(action: onLoginAction) {
                 HStack(spacing: 7) {
                     Image(systemName: "person.crop.circle")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundStyle(TerminalPalette.cyan)
                         .frame(width: 12)
 
-                    Text("Login Status")
+                    Text(isLoggedIn ? "Login Status" : "Login")
                         .font(.system(size: 11, weight: .regular, design: .monospaced))
                         .foregroundStyle(TerminalPalette.primaryText)
 

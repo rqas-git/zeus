@@ -37,6 +37,7 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isReady = false
     @Published private(set) var isSending = false
     @Published private(set) var canCancelTurn = false
+    @Published private(set) var isLoggedIn = false
     @Published private(set) var isLoggingIn = false
     @Published private(set) var isSelectingModel = false
     @Published private(set) var isSelectingPermissions = false
@@ -300,8 +301,10 @@ final class ChatViewModel: ObservableObject {
             let location = auth.authFileDisplayPath
             switch await auth.status() {
             case let .loggedIn(output):
+                isLoggedIn = true
                 append(kind: .status, text: "\(output). auth: \(location)")
             case .loggedOut:
+                isLoggedIn = false
                 append(kind: .status, text: "Logged out. auth: \(location)")
             case let .unknown(message):
                 append(kind: .error, text: "Login status unavailable: \(message)")
@@ -503,7 +506,7 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func startLogin() {
+    func startLogin() {
         guard !isLoggingIn else {
             append(kind: .status, text: "login already running")
             return
@@ -517,6 +520,7 @@ final class ChatViewModel: ObservableObject {
                 try await auth.runDeviceLogin { [weak self] line in
                     self?.append(kind: .status, text: line)
                 }
+                isLoggedIn = true
                 append(kind: .status, text: "login complete")
                 try await createFreshSession()
             } catch {
@@ -1139,8 +1143,9 @@ final class ChatViewModel: ObservableObject {
     private func refreshAuthStatus() async {
         switch await auth.status() {
         case .loggedIn:
-            break
+            isLoggedIn = true
         case .loggedOut:
+            isLoggedIn = false
             append(kind: .status, text: "not logged in. type /login to authorize rust-agent")
         case let .unknown(message):
             append(kind: .error, text: message)
