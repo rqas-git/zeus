@@ -61,7 +61,7 @@ private struct TerminalLineView: View {
                     lineText
                 }
             } else {
-                HStack(alignment: .top, spacing: TerminalLayout.markerTextSpacing) {
+                HStack(alignment: .firstTextBaseline, spacing: TerminalLayout.markerTextSpacing) {
                     prefix
                         .frame(width: TerminalLayout.markerWidth, alignment: .leading)
                     lineText
@@ -135,18 +135,16 @@ private struct TerminalLineView: View {
     }
 
     private var toolPrefix: some View {
-        marker(color: TerminalPalette.green, topPadding: 0)
+        Circle()
+            .fill(TerminalPalette.green)
+            .frame(width: 7, height: 7)
     }
 
     private func marker(color: Color) -> some View {
-        marker(color: color, topPadding: 4)
-    }
-
-    private func marker(color: Color, topPadding: CGFloat) -> some View {
         Circle()
             .fill(color)
             .frame(width: 7, height: 7)
-            .padding(.top, topPadding)
+            .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 5 }
     }
 
     private var textColor: Color {
