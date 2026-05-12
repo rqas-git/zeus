@@ -47,7 +47,8 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `GET /workspace` returns the canonical workspace root plus Git branch
   metadata when the workspace is a Git repository.
 - `POST /workspace/branch` switches the workspace to a local branch, auto-stashes
-  dirty changes, and refreshes backend search state.
+  dirty changes, and refreshes backend search state. The switch is rejected
+  while a turn or terminal command is using the workspace.
 - `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
   recent activity.
 - `POST /sessions` creates a random session and returns its current model and

@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::RwLock;
 
 use crate::agent_loop::AgentEvent;
 use crate::agent_loop::AgentLoop;
@@ -38,6 +39,7 @@ pub(crate) struct AgentService<M> {
     compaction: CompactionConfig,
     model_config: ModelConfig,
     tools: ToolRegistry,
+    workspace_lock: RwLock<()>,
     database: Option<SessionDatabase>,
     max_sessions: usize,
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
@@ -156,6 +158,7 @@ where
             compaction: CompactionConfig::disabled(),
             model_config,
             tools,
+            workspace_lock: RwLock::new(()),
             database: None,
             max_sessions: usize::MAX,
             sessions: Mutex::new(HashMap::new()),
@@ -384,6 +387,10 @@ where
 
     /// Switches the configured workspace to a local branch and refreshes search state.
     pub(crate) fn switch_workspace_branch(&self, branch: &str) -> Result<BranchSwitchResult> {
+        let Ok(_workspace_guard) = self.workspace_lock.try_write() else {
+            anyhow::bail!("cannot switch branches while a workspace operation is running");
+        };
+
         let result = crate::workspace::switch_branch(self.tools.root(), branch)?;
         self.tools.reset_search_index()?;
         let _warmup = self.tools.spawn_search_index_warmup();
@@ -495,6 +502,7 @@ where
         cancellation: TurnCancellation,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<()> {
+        let _workspace_guard = self.workspace_lock.read().await;
         let session = self.session_or_insert_default(session_id).await?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn_with_cancellation(cancellation)?;
@@ -522,6 +530,7 @@ where
         command: impl Into<String>,
         emit: impl FnMut(AgentEvent<'_>) -> Result<()> + Send,
     ) -> Result<TerminalCommandResult> {
+        let _workspace_guard = self.workspace_lock.read().await;
         let session = self.session_or_insert_default(session_id).await?;
         let mut agent = session.agent.lock().await;
         let cancellation = session.begin_turn()?;
@@ -733,10 +742,14 @@ fn session_last_message_from_stored(stored: StoredSessionLastMessage) -> Session
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use tokio::sync::Barrier;
     use tokio::sync::Notify;
@@ -1223,8 +1236,59 @@ mod tests {
         assert_eq!(started_calls.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn rejects_branch_switch_while_turn_is_running() {
+        let root = temp_workspace("service-branch-lock");
+        fs::create_dir_all(&root).unwrap();
+
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let started_calls = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(AgentService::with_tools(
+            CancellableStreamer {
+                first_started: Arc::clone(&first_started),
+                release_first: Arc::clone(&release_first),
+                started_calls: Arc::clone(&started_calls),
+            },
+            ContextWindowConfig::default(),
+            test_model_config(),
+            ToolRegistry::for_root(&root),
+        ));
+
+        let running = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move {
+                service
+                    .submit_user_message(SessionId::new(1), "one", |_| Ok(()))
+                    .await
+            }
+        });
+
+        first_started.notified().await;
+        let error = service
+            .switch_workspace_branch("feature")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("workspace operation is running"));
+
+        release_first.notify_waiters();
+        running.await.unwrap().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn test_model_config() -> ModelConfig {
         ModelConfig::new("test-default", ["test-default", "test-fast"]).unwrap()
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rust-agent-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 
     struct FnStreamer<F> {
