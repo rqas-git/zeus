@@ -111,7 +111,7 @@ struct ChatWindow: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(WindowConfigurator())
         .background(LocalEventMonitor(onEvent: handleLocalEvent(_:)))
-        .font(CodexTypography.chat)
+        .font(CodexTypography.chatSmall)
         .foregroundStyle(TerminalPalette.primaryText)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             viewModel.shutdown()
