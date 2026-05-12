@@ -129,6 +129,7 @@ private struct FooterShortcutsMenu: View {
 
     var body: some View {
         Text("shortcuts")
+            .font(CodexTypography.chatSmallBold)
             .foregroundStyle(TerminalPalette.cyan)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
@@ -218,6 +219,7 @@ private struct FooterMenu: View {
 
     var body: some View {
         Text(config.title)
+            .font(CodexTypography.chatSmallBold)
             .foregroundStyle(config.isEnabled ? config.enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)

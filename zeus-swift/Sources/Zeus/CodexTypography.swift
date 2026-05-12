@@ -13,6 +13,7 @@ enum CodexTypography {
 
     static let chat = Font.custom(fontName, size: chatSize)
     static let chatSmall = Font.custom(fontName, size: chatSmallSize)
+    static let chatSmallBold = Font.custom(fontNameSemiBold, size: chatSmallSize)
     static let chatXSmall = Font.custom(fontName, size: chatXSmallSize)
     static let code = Font.custom(fontName, size: codeSize)
     static let codeSmall = Font.custom(fontName, size: codeSmallSize)
