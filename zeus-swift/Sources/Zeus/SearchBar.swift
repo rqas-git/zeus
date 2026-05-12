@@ -21,7 +21,7 @@ struct SearchBar: View {
                 onHistoryPrevious: { false },
                 onHistoryNext: { false }
             )
-            .frame(height: 18)
+            .frame(height: 20)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(resultSummary)
@@ -33,8 +33,8 @@ struct SearchBar: View {
             searchButton(systemName: "chevron.down", help: "Next Match", action: onNext)
             searchButton(systemName: "xmark", help: "Close Search", action: onClose)
         }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
-        .frame(height: 20)
+        .font(CodexTypography.chatSmall)
+        .frame(height: 22)
     }
 
     private func searchButton(
@@ -53,4 +53,3 @@ struct SearchBar: View {
         .help(help)
     }
 }
-

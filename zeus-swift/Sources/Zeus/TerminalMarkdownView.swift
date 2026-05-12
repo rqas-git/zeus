@@ -30,7 +30,7 @@ struct TerminalMarkdownView: View {
                 .foregroundStyle(TerminalPalette.primaryText)
         case let .heading(level, text):
             inlineText(text)
-                .font(.system(size: headingSize(level), weight: .semibold, design: .monospaced))
+                .font(CodexTypography.heading(level: level))
                 .foregroundStyle(TerminalPalette.cyan)
                 .padding(.top, level == 1 ? 1 : 0)
         case let .unorderedList(items):
@@ -88,16 +88,6 @@ struct TerminalMarkdownView: View {
         }
     }
 
-    private func headingSize(_ level: Int) -> CGFloat {
-        switch level {
-        case 1:
-            return 13
-        case 2:
-            return 12.5
-        default:
-            return 12
-        }
-    }
 }
 
 private struct CodeBlockView: View {
@@ -108,7 +98,7 @@ private struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
                 Text(language.lowercased())
-                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                    .font(CodexTypography.codeSmall)
                     .foregroundStyle(TerminalPalette.cyan)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -118,7 +108,7 @@ private struct CodeBlockView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code.isEmpty ? " " : code)
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .font(CodexTypography.code)
                     .foregroundStyle(TerminalPalette.primaryText)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 8)

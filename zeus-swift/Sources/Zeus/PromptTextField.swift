@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct PromptTextField: NSViewRepresentable {
-    private static let textFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private static let textFont = CodexTypography.chatNSFont
 
     @Binding var text: String
     let placeholder: String

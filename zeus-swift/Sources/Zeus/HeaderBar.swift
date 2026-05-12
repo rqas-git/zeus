@@ -28,7 +28,7 @@ struct HeaderBar: View {
     var body: some View {
         HStack {
             Text("zeus")
-                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .font(CodexTypography.chat)
                 .foregroundStyle(TerminalPalette.dimText)
                 .padding(.leading, 66)
                 .allowsHitTesting(false)
@@ -49,7 +49,7 @@ struct HeaderBar: View {
             .buttonStyle(.plain)
             .help("Settings")
         }
-        .frame(height: 16)
+        .frame(height: 18)
         .overlay(alignment: .topTrailing) {
             if isShowingSettings {
                 SettingsDropdown(isLoggedIn: isLoggedIn) {
@@ -82,7 +82,7 @@ private struct SettingsDropdown: View {
                         .frame(width: 12)
 
                     Text(isLoggedIn ? "Login Status" : "Login")
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .font(CodexTypography.chatSmall)
                         .foregroundStyle(TerminalPalette.primaryText)
 
                     Spacer(minLength: 0)
@@ -115,4 +115,3 @@ struct TerminalMenuButtonStyle: ButtonStyle {
             )
     }
 }
-

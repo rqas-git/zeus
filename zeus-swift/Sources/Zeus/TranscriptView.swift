@@ -112,7 +112,7 @@ private struct TerminalLineView: View {
             if isCacheStatsVisible {
                 ForEach(line.cacheStats.indices, id: \.self) { index in
                     Text(line.cacheStats[index].displayText)
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .font(CodexTypography.chatXSmall)
                         .foregroundStyle(TerminalPalette.dimText)
                 }
             }
@@ -198,7 +198,7 @@ private struct ToolCallLine: View {
                 }
             }
         }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .font(CodexTypography.chatSmall)
         .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -273,4 +273,3 @@ private struct ToolCallLine: View {
         }
     }
 }
-

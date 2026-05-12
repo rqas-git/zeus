@@ -144,8 +144,8 @@ struct FooterBar: View {
             }
             .frame(maxWidth: 360, alignment: .trailing)
         }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
-        .frame(height: 18)
+        .font(CodexTypography.chatSmall)
+        .frame(height: 20)
     }
 
     private func footerText(_ text: String, color: Color) -> some View {
@@ -173,7 +173,7 @@ private struct FooterShortcutsMenu: View {
             .foregroundStyle(TerminalPalette.cyan)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            .frame(height: 18, alignment: .center)
+            .frame(height: 20, alignment: .center)
             .padding(.horizontal, 3)
             .background(
                 Rectangle()
@@ -240,7 +240,7 @@ private struct ShortcutsDropdown: View {
                 .padding(.trailing, 28)
                 .offset(y: -5)
         }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .font(CodexTypography.chatSmall)
         .fixedSize(horizontal: true, vertical: true)
     }
 }
@@ -278,7 +278,7 @@ private struct FooterMenu: View {
             .foregroundStyle(isEnabled ? enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            .frame(height: 18, alignment: .center)
+            .frame(height: 20, alignment: .center)
             .padding(.horizontal, 3)
             .background(
                 Rectangle()
@@ -359,7 +359,7 @@ private struct FooterDropdown: View {
                 .rotationEffect(.degrees(45))
                 .offset(y: -5)
         }
-        .font(.system(size: 11, weight: .regular, design: .monospaced))
+        .font(CodexTypography.chatSmall)
         .fixedSize(horizontal: true, vertical: true)
     }
 

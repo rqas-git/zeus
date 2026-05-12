@@ -28,7 +28,7 @@ struct InputPrompt: View {
                     return true
                 }
             )
-                .frame(height: 18)
+                .frame(height: 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if isCancelVisible {
@@ -36,7 +36,7 @@ struct InputPrompt: View {
                     Image(systemName: "xmark.circle")
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(TerminalPalette.red)
-                        .frame(width: 18, height: 18)
+                        .frame(width: 20, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -45,4 +45,3 @@ struct InputPrompt: View {
         }
     }
 }
-
