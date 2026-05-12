@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 enum CodexTypography {
-    static let chatSize: CGFloat = 11.2
-    static let chatSmallSize: CGFloat = 9.6
-    static let chatXSmallSize: CGFloat = 8.8
-    static let codeSize: CGFloat = 9.6
-    static let codeSmallSize: CGFloat = 8.8
+    static let chatSize: CGFloat = 12.5
+    static let chatSmallSize: CGFloat = 11
+    static let chatXSmallSize: CGFloat = 10
+    static let codeSize: CGFloat = 11
+    static let codeSmallSize: CGFloat = 10
 
     private static let fontName = "ShareTechMono-Regular"
 
@@ -24,9 +24,9 @@ enum CodexTypography {
     static func heading(level: Int) -> Font {
         switch level {
         case 1:
-            return .custom(fontName, size: 12)
+            return .custom(fontName, size: 14)
         case 2:
-            return .custom(fontName, size: 11.6)
+            return .custom(fontName, size: 13)
         default:
             return .custom(fontName, size: chatSize)
         }
