@@ -84,16 +84,15 @@ private struct SettingsDropdown: View {
                     Text(isLoggedIn ? "Login Status" : "Login")
                         .font(CodexTypography.chatSmall)
                         .foregroundStyle(TerminalPalette.primaryText)
-
-                    Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(TerminalMenuButtonStyle())
         }
-        .frame(width: 142)
+        .fixedSize(horizontal: true, vertical: true)
         .background(
             Rectangle()
                 .fill(TerminalPalette.background)
