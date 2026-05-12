@@ -1,48 +1,50 @@
 import Foundation
+import Observation
 import ZeusCore
 
 @MainActor
-final class ChatViewModel: ObservableObject {
-    @Published var lines: [TranscriptLine] = []
-    @Published private(set) var transcriptScrollTarget: TranscriptScrollTarget?
-    @Published private(set) var activeAssistantStream: ActiveAssistantStream?
-    @Published var draft = "" {
+@Observable
+final class ChatViewModel {
+    var lines: [TranscriptLine] = []
+    private(set) var transcriptScrollTarget: TranscriptScrollTarget?
+    private(set) var activeAssistantStream: ActiveAssistantStream?
+    var draft = "" {
         didSet {
             guard !isApplyingDraftFromHistory else { return }
             resetDraftHistoryNavigation()
         }
     }
-    @Published var searchQuery = ""
-    @Published private(set) var isSearchVisible = false
-    @Published private(set) var searchResultSummary = ""
-    @Published private(set) var searchMatchLineIDs: Set<UUID> = []
-    @Published private(set) var selectedSearchLineID: UUID?
-    @Published private(set) var isTerminalPassthroughEnabled = false
-    @Published private(set) var workspace: WorkspaceMetadata
-    @Published private(set) var branchOptions: [String]
-    @Published private(set) var model = "gpt 5.5"
-    @Published private(set) var selectedModel = "gpt-5.5"
-    @Published private(set) var modelOptions = ["gpt-5.5"]
-    @Published private(set) var effort = "medium"
-    @Published private(set) var effortOptions = ["medium"]
-    @Published private(set) var permissions = "read"
-    @Published private(set) var selectedPermission = "read-only"
-    @Published private(set) var permissionOptions = [
+    var searchQuery = ""
+    private(set) var isSearchVisible = false
+    private(set) var searchResultSummary = ""
+    private(set) var searchMatchLineIDs: Set<UUID> = []
+    private(set) var selectedSearchLineID: UUID?
+    private(set) var isTerminalPassthroughEnabled = false
+    private(set) var workspace: WorkspaceMetadata
+    private(set) var branchOptions: [String]
+    private(set) var model = "gpt 5.5"
+    private(set) var selectedModel = "gpt-5.5"
+    private(set) var modelOptions = ["gpt-5.5"]
+    private(set) var effort = "medium"
+    private(set) var effortOptions = ["medium"]
+    private(set) var permissions = "read"
+    private(set) var selectedPermission = "read-only"
+    private(set) var permissionOptions = [
         "read-only",
         "workspace-write",
         "workspace-exec"
     ]
-    @Published private(set) var showCacheStats = false
-    @Published private(set) var tokenUsage = "0 / 272k tokens"
-    @Published private(set) var isReady = false
-    @Published private(set) var isSending = false
-    @Published private(set) var canCancelTurn = false
-    @Published private(set) var isLoggedIn = false
-    @Published private(set) var isLoggingIn = false
-    @Published private(set) var isSelectingModel = false
-    @Published private(set) var isSelectingPermissions = false
-    @Published private(set) var isSwitchingBranch = false
-    @Published private(set) var isRunningTerminalCommand = false
+    private(set) var showCacheStats = false
+    private(set) var tokenUsage = "0 / 272k tokens"
+    private(set) var isReady = false
+    private(set) var isSending = false
+    private(set) var canCancelTurn = false
+    private(set) var isLoggedIn = false
+    private(set) var isLoggingIn = false
+    private(set) var isSelectingModel = false
+    private(set) var isSelectingPermissions = false
+    private(set) var isSwitchingBranch = false
+    private(set) var isRunningTerminalCommand = false
 
     var canChangeModel: Bool {
         isReady && !isLoggingIn
@@ -78,37 +80,37 @@ final class ChatViewModel: ObservableObject {
     private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
     private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
     private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
-    private let server: any AgentServerProtocol
-    private let auth: any AgentAuthProtocol
-    private var client: (any AgentClientProtocol)?
-    private var sessionID: UInt64?
-    private var started = false
-    private var currentAssistantLineID: UUID?
-    private var assistantPlaceholderLineID: UUID?
-    private var toolLineIDsByCallID: [String: UUID] = [:]
-    private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
-    private var lastAssistantScrollRequest = Date.distantPast
-    private var streamTask: Task<Void, Never>?
-    private var sessionEventTask: Task<Void, Never>?
-    private var loginTask: Task<Void, Never>?
-    private var branchSwitchTask: Task<Void, Never>?
-    private var terminalTask: Task<Void, Never>?
-    private var assistantDeltaFlushTask: Task<Void, Never>?
-    private var searchRefreshTask: Task<Void, Never>?
-    private var markdownRenderTask: Task<Void, Never>?
-    private var pendingAssistantDelta = ""
-    private var assistantStreamText = ""
-    private var pendingCacheStats: [ResponseCacheStats] = []
-    private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
-    private var isSessionEventStreamConnected = false
-    private var sessionModel = "gpt-5.5"
-    private var sessionPermission = "read-only"
-    private var lineIndexesByID: [UUID: Int] = [:]
-    private var searchMatchedLineIDsInOrder: [UUID] = []
-    private var searchRefreshRevision = 0
-    private var transcriptScrollRevision = 0
-    private var submittedMessageHistory = PromptHistory()
-    private var isApplyingDraftFromHistory = false
+    @ObservationIgnored private let server: any AgentServerProtocol
+    @ObservationIgnored private let auth: any AgentAuthProtocol
+    @ObservationIgnored private var client: (any AgentClientProtocol)?
+    @ObservationIgnored private var sessionID: UInt64?
+    @ObservationIgnored private var started = false
+    @ObservationIgnored private var currentAssistantLineID: UUID?
+    @ObservationIgnored private var assistantPlaceholderLineID: UUID?
+    @ObservationIgnored private var toolLineIDsByCallID: [String: UUID] = [:]
+    @ObservationIgnored private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
+    @ObservationIgnored private var lastAssistantScrollRequest = Date.distantPast
+    @ObservationIgnored private var streamTask: Task<Void, Never>?
+    @ObservationIgnored private var sessionEventTask: Task<Void, Never>?
+    @ObservationIgnored private var loginTask: Task<Void, Never>?
+    @ObservationIgnored private var branchSwitchTask: Task<Void, Never>?
+    @ObservationIgnored private var terminalTask: Task<Void, Never>?
+    @ObservationIgnored private var assistantDeltaFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingAssistantDelta = ""
+    @ObservationIgnored private var assistantStreamText = ""
+    @ObservationIgnored private var pendingCacheStats: [ResponseCacheStats] = []
+    @ObservationIgnored private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
+    @ObservationIgnored private var isSessionEventStreamConnected = false
+    @ObservationIgnored private var sessionModel = "gpt-5.5"
+    @ObservationIgnored private var sessionPermission = "read-only"
+    @ObservationIgnored private var lineIndexesByID: [UUID: Int] = [:]
+    @ObservationIgnored private var searchMatchedLineIDsInOrder: [UUID] = []
+    @ObservationIgnored private var searchRefreshRevision = 0
+    @ObservationIgnored private var transcriptScrollRevision = 0
+    @ObservationIgnored private var submittedMessageHistory = PromptHistory()
+    @ObservationIgnored private var isApplyingDraftFromHistory = false
 
     init(
         server: any AgentServerProtocol = RustAgentServer(),

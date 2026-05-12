@@ -11,7 +11,7 @@ let developerLibraries = "\(developerDir)/Library/Developer/usr/lib"
 let package = Package(
     name: "Zeus",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(name: "zeus", targets: ["Zeus"]),

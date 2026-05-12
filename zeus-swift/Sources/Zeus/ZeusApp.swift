@@ -19,7 +19,7 @@ struct ZeusApp: App {
 }
 
 private struct ChatWindowScene: View {
-    @StateObject private var viewModel = ChatViewModel()
+    @State private var viewModel = ChatViewModel()
 
     var body: some View {
         ChatWindow(viewModel: viewModel)

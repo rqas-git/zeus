@@ -53,7 +53,7 @@ private enum KeyCode {
 }
 
 struct ChatWindow: View {
-    @ObservedObject var viewModel: ChatViewModel
+    @Bindable var viewModel: ChatViewModel
     @State private var activeFooterMenu: FooterMenuID?
     @State private var focusedFooterMenu: FooterMenuID?
     @State private var branchMenuHighlightedOption: String?
@@ -851,12 +851,12 @@ private struct TranscriptView: View {
                 .padding(.bottom, 6)
             }
             .scrollIndicators(.hidden)
-            .onChange(of: scrollTarget) { target in
+            .onChange(of: scrollTarget) { _, target in
                 guard selectedSearchLineID == nil else { return }
                 guard let target else { return }
                 proxy.scrollTo(target.lineID, anchor: .bottom)
             }
-            .onChange(of: selectedSearchLineID) { lineID in
+            .onChange(of: selectedSearchLineID) { _, lineID in
                 guard let lineID else { return }
                 withAnimation(.easeOut(duration: 0.12)) {
                     proxy.scrollTo(lineID, anchor: .center)
@@ -1431,7 +1431,7 @@ private struct FooterMenu: View {
                     .zIndex(30)
                 }
             }
-            .onChange(of: isEnabled) { newValue in
+            .onChange(of: isEnabled) { _, newValue in
                 if !newValue {
                     activeMenu = nil
                     if focusedMenu == id {

@@ -1,5 +1,8 @@
 # Packaging
 
+Zeus uses Swift's Observation framework in the macOS frontend, so packaged apps
+target macOS 14 or newer.
+
 Build a local installable DMG that embeds a release `rust-agent` binary inside
 `Zeus.app`:
 

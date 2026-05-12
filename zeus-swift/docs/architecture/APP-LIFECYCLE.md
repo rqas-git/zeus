@@ -6,7 +6,7 @@ window and talks to it over the local HTTP compatibility API.
 ## Flow
 
 1. `ZeusApp` creates a `ChatWindowScene`.
-2. The scene owns a `ChatViewModel`.
+2. The scene owns an Observation-backed `ChatViewModel` in SwiftUI `@State`.
 3. `ChatViewModel.start()` appends startup status, asks `RustAgentServer` to
    launch the backend for the selected workspace, and receives an
    `AgentAPIClient`.

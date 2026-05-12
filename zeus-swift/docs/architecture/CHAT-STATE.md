@@ -1,7 +1,10 @@
 # Chat State Architecture
 
 `ChatViewModel` is the main UI state machine. It is `@MainActor` because it owns
-published SwiftUI state and coordinates asynchronous backend work.
+SwiftUI-facing state and coordinates asynchronous backend work. It uses Swift's
+granular Observation model (`@Observable`) so views only subscribe to the
+properties they read; implementation-only dependencies, indexes, buffers, and
+tasks are marked `@ObservationIgnored`.
 
 ## Flow
 
@@ -9,9 +12,10 @@ published SwiftUI state and coordinates asynchronous backend work.
    creates a session.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
-3. Assistant text deltas are buffered briefly before updating the transcript to
-   avoid excessive UI churn. The active assistant line renders as plain text
-   while streaming, then stores parsed Markdown blocks after completion.
+3. Assistant text deltas are buffered briefly before updating observed
+   transcript state to avoid excessive UI churn. The active assistant line
+   renders as plain text while streaming, then stores parsed Markdown blocks
+   after completion.
 4. Tool-call start and completion events upsert tool transcript rows by call id.
 5. Token usage updates come from cache-health and turn-token-usage events.
    Cache-health events are also collected for the active assistant response and
