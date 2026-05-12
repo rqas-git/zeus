@@ -28,39 +28,55 @@ private let shortcutItems = [
     ShortcutItem(shortcut: "Esc", action: "Cancel response, close search, or close footer UI")
 ]
 
+struct FooterMenuConfig {
+    let id: FooterMenuID
+    let title: String
+    let options: [String]
+    let selectedOption: String
+    let isEnabled: Bool
+    let enabledColor: Color
+    let highlightedOption: String?
+    let optionTitle: (String) -> String
+    let help: String
+    let onSelect: (String) -> Void
+    let onHighlight: (String) -> Void
+
+    init(
+        id: FooterMenuID,
+        title: String,
+        options: [String],
+        selectedOption: String,
+        isEnabled: Bool,
+        enabledColor: Color = TerminalPalette.cyan,
+        highlightedOption: String?,
+        optionTitle: @escaping (String) -> String = { $0 },
+        help: String,
+        onSelect: @escaping (String) -> Void,
+        onHighlight: @escaping (String) -> Void
+    ) {
+        self.id = id
+        self.title = title
+        self.options = options
+        self.selectedOption = selectedOption
+        self.isEnabled = isEnabled
+        self.enabledColor = enabledColor
+        self.highlightedOption = highlightedOption
+        self.optionTitle = optionTitle
+        self.help = help
+        self.onSelect = onSelect
+        self.onHighlight = onHighlight
+    }
+}
+
 struct FooterBar: View {
     let workspace: WorkspaceMetadata
-    let branchOptions: [String]
-    let selectedBranch: String
-    let isBranchMenuEnabled: Bool
-    let model: String
-    let modelOptions: [String]
-    let selectedModel: String
-    let isModelMenuEnabled: Bool
-    let effort: String
-    let effortOptions: [String]
-    let isEffortMenuEnabled: Bool
-    let permissions: String
-    let permissionOptions: [String]
-    let selectedPermission: String
-    let isPermissionsMenuEnabled: Bool
+    let branch: FooterMenuConfig
+    let model: FooterMenuConfig
+    let effort: FooterMenuConfig
+    let permissions: FooterMenuConfig
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
     @Binding var focusedMenu: FooterMenuID?
-    let branchHighlightedOption: String?
-    let modelHighlightedOption: String?
-    let effortHighlightedOption: String?
-    let permissionsHighlightedOption: String?
-    let modelTitle: (String) -> String
-    let permissionTitle: (String) -> String
-    let onSelectBranch: (String) -> Void
-    let onSelectModel: (String) -> Void
-    let onSelectEffort: (String) -> Void
-    let onSelectPermissions: (String) -> Void
-    let onHighlightBranch: (String) -> Void
-    let onHighlightModel: (String) -> Void
-    let onHighlightEffort: (String) -> Void
-    let onHighlightPermissions: (String) -> Void
     private let itemSpacing: CGFloat = 22
     private let pathSpacing: CGFloat = 32
 
@@ -68,63 +84,10 @@ struct FooterBar: View {
         HStack(spacing: 0) {
             HStack(spacing: itemSpacing) {
                 footerText(workspace.name, color: TerminalPalette.dimText)
-                FooterMenu(
-                    id: .branch,
-                    title: workspace.branch,
-                    options: branchOptions,
-                    selectedOption: selectedBranch,
-                    highlightedOption: branchHighlightedOption,
-                    isEnabled: isBranchMenuEnabled,
-                    enabledColor: TerminalPalette.green,
-                    activeMenu: $activeMenu,
-                    focusedMenu: $focusedMenu,
-                    optionTitle: { $0 },
-                    help: "Branch",
-                    onSelect: onSelectBranch,
-                    onHighlight: onHighlightBranch
-                )
-                FooterMenu(
-                    id: .model,
-                    title: model,
-                    options: modelOptions,
-                    selectedOption: selectedModel,
-                    highlightedOption: modelHighlightedOption,
-                    isEnabled: isModelMenuEnabled,
-                    activeMenu: $activeMenu,
-                    focusedMenu: $focusedMenu,
-                    optionTitle: modelTitle,
-                    help: "Model",
-                    onSelect: onSelectModel,
-                    onHighlight: onHighlightModel
-                )
-                FooterMenu(
-                    id: .effort,
-                    title: effort,
-                    options: effortOptions,
-                    selectedOption: effort,
-                    highlightedOption: effortHighlightedOption,
-                    isEnabled: isEffortMenuEnabled,
-                    activeMenu: $activeMenu,
-                    focusedMenu: $focusedMenu,
-                    optionTitle: { $0 },
-                    help: "Reasoning Effort",
-                    onSelect: onSelectEffort,
-                    onHighlight: onHighlightEffort
-                )
-                FooterMenu(
-                    id: .permissions,
-                    title: permissions,
-                    options: permissionOptions,
-                    selectedOption: selectedPermission,
-                    highlightedOption: permissionsHighlightedOption,
-                    isEnabled: isPermissionsMenuEnabled,
-                    activeMenu: $activeMenu,
-                    focusedMenu: $focusedMenu,
-                    optionTitle: permissionTitle,
-                    help: "Permissions",
-                    onSelect: onSelectPermissions,
-                    onHighlight: onHighlightPermissions
-                )
+                FooterMenu(config: branch, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
+                FooterMenu(config: model, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
+                FooterMenu(config: effort, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
+                FooterMenu(config: permissions, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
                 footerText(tokenUsage, color: TerminalPalette.dimText)
             }
             .layoutPriority(1)
@@ -242,81 +205,64 @@ private struct ShortcutsDropdown: View {
 }
 
 private struct FooterMenu: View {
-    let id: FooterMenuID
-    let title: String
-    let options: [String]
-    let selectedOption: String
-    let highlightedOption: String?
-    let isEnabled: Bool
-    var enabledColor = TerminalPalette.cyan
+    let config: FooterMenuConfig
     @Binding var activeMenu: FooterMenuID?
     @Binding var focusedMenu: FooterMenuID?
-    let optionTitle: (String) -> String
-    let help: String
-    let onSelect: (String) -> Void
-    let onHighlight: (String) -> Void
 
     private var menuOptions: [String] {
-        options.isEmpty ? [selectedOption] : options
+        config.options.isEmpty ? [config.selectedOption] : config.options
     }
 
-    private var isOpen: Bool {
-        activeMenu == id
-    }
-
-    private var isFocused: Bool {
-        focusedMenu == id
-    }
+    private var isOpen: Bool { activeMenu == config.id }
+    private var isFocused: Bool { focusedMenu == config.id }
 
     var body: some View {
-        Text(title)
-            .foregroundStyle(isEnabled ? enabledColor : TerminalPalette.dimText)
+        Text(config.title)
+            .foregroundStyle(config.isEnabled ? config.enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
             .frame(height: 20, alignment: .center)
             .padding(.horizontal, 3)
             .background(
                 Rectangle()
-                    .fill(isFocused ? enabledColor.opacity(0.12) : .clear)
+                    .fill(isFocused ? config.enabledColor.opacity(0.12) : .clear)
             )
             .contentShape(Rectangle())
             .onTapGesture {
-                guard isEnabled else { return }
+                guard config.isEnabled else { return }
                 if isOpen {
                     activeMenu = nil
-                    focusedMenu = id
+                    focusedMenu = config.id
                 } else {
                     DispatchQueue.main.async {
-                        focusedMenu = id
-                        activeMenu = id
+                        focusedMenu = config.id
+                        activeMenu = config.id
                     }
                 }
             }
-            .help(help)
+            .help(config.help)
             .overlay(alignment: .bottom) {
                 if isOpen {
                     FooterDropdown(
                         options: menuOptions,
-                        selectedOption: selectedOption,
-                        highlightedOption: highlightedOption,
-                        optionTitle: optionTitle
+                        selectedOption: config.selectedOption,
+                        highlightedOption: config.highlightedOption,
+                        optionTitle: config.optionTitle
                     ) { option in
                         activeMenu = nil
                         focusedMenu = nil
-                        onSelect(option)
+                        config.onSelect(option)
                     } onHighlight: { option in
-                        onHighlight(option)
+                        config.onHighlight(option)
                     }
                     .offset(y: -23)
                     .zIndex(30)
                 }
             }
-            .onChange(of: isEnabled) { _, newValue in
+            .onChange(of: config.isEnabled) { _, newValue in
                 if !newValue {
                     activeMenu = nil
-                    if focusedMenu == id {
-                        focusedMenu = nil
-                    }
+                    if focusedMenu == config.id { focusedMenu = nil }
                 }
             }
             .zIndex(isOpen ? 30 : 0)
