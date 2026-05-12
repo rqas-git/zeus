@@ -15,6 +15,7 @@ enum CodexTypography {
     static let codeSmall = Font.system(size: codeSmallSize, weight: .regular, design: .monospaced)
 
     static let chatNSFont = NSFont.systemFont(ofSize: chatSize, weight: .regular)
+    static let chatSmallNSFont = NSFont.systemFont(ofSize: chatSmallSize, weight: .regular)
 
     static func heading(level: Int) -> Font {
         switch level {
