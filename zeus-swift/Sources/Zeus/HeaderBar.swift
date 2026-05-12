@@ -4,14 +4,6 @@ struct TerminalBackground: View {
     var body: some View {
         ZStack {
             TerminalPalette.background
-            LinearGradient(
-                colors: [
-                    TerminalPalette.backgroundHighlight.opacity(0.75),
-                    TerminalPalette.backgroundLow
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
             Rectangle()
                 .strokeBorder(TerminalPalette.border.opacity(0.24), lineWidth: 1)
         }
