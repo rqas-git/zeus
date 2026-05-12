@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 enum CodexTypography {
-    static let chatSize: CGFloat = 14
-    static let chatSmallSize: CGFloat = 12.5
-    static let chatXSmallSize: CGFloat = 11.5
-    static let codeSize: CGFloat = 12.5
-    static let codeSmallSize: CGFloat = 11.5
+    static let chatSize: CGFloat = 12.5
+    static let chatSmallSize: CGFloat = 11
+    static let chatXSmallSize: CGFloat = 10
+    static let codeSize: CGFloat = 11
+    static let codeSmallSize: CGFloat = 10
 
     private static let fontName = "JetBrainsMono-Regular"
     private static let fontNameSemiBold = "JetBrainsMono-SemiBold"
@@ -25,9 +25,9 @@ enum CodexTypography {
     static func heading(level: Int) -> Font {
         switch level {
         case 1:
-            return .custom(fontNameSemiBold, size: 15.5)
+            return .custom(fontNameSemiBold, size: 14)
         case 2:
-            return .custom(fontNameSemiBold, size: 14.5)
+            return .custom(fontNameSemiBold, size: 13)
         default:
             return .custom(fontNameSemiBold, size: chatSize)
         }
