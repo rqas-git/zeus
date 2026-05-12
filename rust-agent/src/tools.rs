@@ -1930,6 +1930,10 @@ fn configure_process_group(command: &mut Command) {
 }
 
 async fn kill_process(child_id: Option<u32>, child: &mut tokio::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+
     #[cfg(unix)]
     if let Some(child_id) = child_id {
         // SAFETY: Negative PID targets the process group created by
