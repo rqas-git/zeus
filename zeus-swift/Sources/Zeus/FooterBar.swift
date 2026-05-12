@@ -79,7 +79,6 @@ struct FooterBar: View {
                     activeMenu: $activeMenu,
                     focusedMenu: $focusedMenu,
                     optionTitle: { $0 },
-                    menuWidth: 164,
                     help: "Branch",
                     onSelect: onSelectBranch,
                     onHighlight: onHighlightBranch
@@ -94,7 +93,6 @@ struct FooterBar: View {
                     activeMenu: $activeMenu,
                     focusedMenu: $focusedMenu,
                     optionTitle: modelTitle,
-                    menuWidth: 178,
                     help: "Model",
                     onSelect: onSelectModel,
                     onHighlight: onHighlightModel
@@ -109,7 +107,6 @@ struct FooterBar: View {
                     activeMenu: $activeMenu,
                     focusedMenu: $focusedMenu,
                     optionTitle: { $0 },
-                    menuWidth: 88,
                     help: "Reasoning Effort",
                     onSelect: onSelectEffort,
                     onHighlight: onHighlightEffort
@@ -124,7 +121,6 @@ struct FooterBar: View {
                     activeMenu: $activeMenu,
                     focusedMenu: $focusedMenu,
                     optionTitle: permissionTitle,
-                    menuWidth: 88,
                     help: "Permissions",
                     onSelect: onSelectPermissions,
                     onHighlight: onHighlightPermissions
@@ -256,7 +252,6 @@ private struct FooterMenu: View {
     @Binding var activeMenu: FooterMenuID?
     @Binding var focusedMenu: FooterMenuID?
     let optionTitle: (String) -> String
-    let menuWidth: CGFloat
     let help: String
     let onSelect: (String) -> Void
     let onHighlight: (String) -> Void
@@ -304,8 +299,7 @@ private struct FooterMenu: View {
                         options: menuOptions,
                         selectedOption: selectedOption,
                         highlightedOption: highlightedOption,
-                        optionTitle: optionTitle,
-                        menuWidth: menuWidth
+                        optionTitle: optionTitle
                     ) { option in
                         activeMenu = nil
                         focusedMenu = nil
@@ -334,7 +328,6 @@ private struct FooterDropdown: View {
     let selectedOption: String
     let highlightedOption: String?
     let optionTitle: (String) -> String
-    let menuWidth: CGFloat
     let onSelect: (String) -> Void
     let onHighlight: (String) -> Void
 
@@ -345,7 +338,6 @@ private struct FooterDropdown: View {
                     dropdownButton(for: option)
                 }
             }
-            .frame(width: menuWidth)
             .background(Rectangle().fill(TerminalPalette.background))
             .overlay(
                 Rectangle()
@@ -388,11 +380,10 @@ private struct FooterDropdown: View {
                             : TerminalPalette.primaryText
                     )
                     .lineLimit(1)
-
-                Spacer(minLength: 0)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .background(
                 Rectangle()
