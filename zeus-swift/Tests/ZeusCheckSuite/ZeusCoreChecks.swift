@@ -2,6 +2,21 @@ import Foundation
 import ZeusCore
 
 public enum ZeusCoreChecks {
+    public static let all: [ZeusCheck] = [
+        ZeusCheck("TerminalMarkdownParser parses common blocks", testCommonMarkdownBlocks),
+        ZeusCheck("TerminalMarkdownParser stops paragraphs at block starts", testParagraphBoundaries),
+        ZeusCheck("ToolMetadata maps known tools", testToolMetadata),
+        ZeusCheck("ToolMetadata maps display names", testToolDisplayNames),
+        ZeusCheck("ToolMetadata summarizes arguments", testToolTargets),
+        ZeusCheck("AgentServerEvent decodes typed events", testAgentServerEvents),
+        ZeusCheck("SSE parser preserves event boundaries", testServerSentEventParser),
+        ZeusCheck("Response cache stats format compactly", testResponseCacheStatsDisplay),
+        ZeusCheck("rust-agent API contract fixtures decode", testRustAgentAPIContractFixtures),
+        ZeusCheck("PathDisplay abbreviates home paths", testPathDisplay),
+        ZeusCheck("PromptHistory navigates like a terminal", testPromptHistoryNavigation),
+        ZeusCheck("PromptHistory resets and restores entries", testPromptHistoryResetAndReplace)
+    ]
+
     public static func testCommonMarkdownBlocks() throws {
         let blocks = TerminalMarkdownParser.parse(
             """

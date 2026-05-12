@@ -53,7 +53,6 @@ Use the narrowest relevant checks:
 
 ```bash
 cd /Users/ajc/zeus
-swift test
 swift run zeus-checks
 ```
 

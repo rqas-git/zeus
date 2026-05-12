@@ -217,7 +217,6 @@ Frontend:
 ```bash
 cd /Users/ajc/zeus
 swift build
-swift test
 swift run zeus-checks
 swift run zeus
 ```
@@ -256,5 +255,5 @@ JSON is a checked-in artifact and should be updated when its Rust generator
 changes.
 
 Before finishing a change, run the narrowest relevant checks. For contract or
-integration changes, run both `cargo test` in `rust-agent/` and `swift test` or
+integration changes, run both `cargo test` in `rust-agent/` and
 `swift run zeus-checks` from the repository root.

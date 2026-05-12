@@ -4,13 +4,13 @@ Run frontend checks from the repository root:
 
 ```bash
 cd /Users/ajc/zeus
-swift test
 swift run zeus-checks
 ```
 
-`swift test` runs the Swift Testing wrapper. `swift run zeus-checks` runs the
-same reusable check suite as a command-line executable and prints pass/fail
-lines.
+`swift run zeus-checks` runs the reusable check suite and prints pass/fail
+lines. `swift test` builds the Swift Testing wrapper around the same registered
+checks, but the command-line tools runner may not emit per-check output; use
+`zeus-checks` when validating behavior locally.
 
 ## What Is Covered
 

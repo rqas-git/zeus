@@ -5,27 +5,9 @@ import ZeusCheckSuite
 struct ZeusChecks {
     static func main() {
         var checks = CheckRunner()
-        checks.run(
-            "TerminalMarkdownParser parses common blocks",
-            ZeusCoreChecks.testCommonMarkdownBlocks
-        )
-        checks.run(
-            "TerminalMarkdownParser stops paragraphs at block starts",
-            ZeusCoreChecks.testParagraphBoundaries
-        )
-        checks.run("ToolMetadata maps known tools", ZeusCoreChecks.testToolMetadata)
-        checks.run("ToolMetadata maps display names", ZeusCoreChecks.testToolDisplayNames)
-        checks.run("ToolMetadata summarizes arguments", ZeusCoreChecks.testToolTargets)
-        checks.run("AgentServerEvent decodes typed events", ZeusCoreChecks.testAgentServerEvents)
-        checks.run("SSE parser preserves event boundaries", ZeusCoreChecks.testServerSentEventParser)
-        checks.run("Response cache stats format compactly", ZeusCoreChecks.testResponseCacheStatsDisplay)
-        checks.run(
-            "rust-agent API contract fixtures decode",
-            ZeusCoreChecks.testRustAgentAPIContractFixtures
-        )
-        checks.run("PathDisplay abbreviates home paths", ZeusCoreChecks.testPathDisplay)
-        checks.run("PromptHistory navigates like a terminal", ZeusCoreChecks.testPromptHistoryNavigation)
-        checks.run("PromptHistory resets and restores entries", ZeusCoreChecks.testPromptHistoryResetAndReplace)
+        for check in ZeusCoreChecks.all {
+            checks.run(check)
+        }
         checks.finish()
     }
 }
@@ -33,13 +15,13 @@ struct ZeusChecks {
 private struct CheckRunner {
     private var failures: [String] = []
 
-    mutating func run(_ name: String, _ body: () throws -> Void) {
+    mutating func run(_ check: ZeusCheck) {
         do {
-            try body()
-            print("PASS \(name)")
+            try check.body()
+            print("PASS \(check.name)")
         } catch {
-            failures.append("\(name): \(error.localizedDescription)")
-            print("FAIL \(name): \(error.localizedDescription)")
+            failures.append("\(check.name): \(error.localizedDescription)")
+            print("FAIL \(check.name): \(error.localizedDescription)")
         }
     }
 
