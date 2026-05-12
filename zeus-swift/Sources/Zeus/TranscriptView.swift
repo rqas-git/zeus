@@ -125,9 +125,7 @@ private struct TerminalLineView: View {
         case .user:
             Text(">")
                 .foregroundStyle(TerminalPalette.cyan)
-        case .assistant:
-            marker(color: TerminalPalette.green)
-        case .status, .tool:
+        case .assistant, .status, .tool:
             marker(color: TerminalPalette.green)
         case .error:
             marker(color: TerminalPalette.red)
@@ -159,7 +157,6 @@ private struct TerminalLineView: View {
 
 private struct ToolCallLine: View {
     let toolCall: ToolCallTranscript
-    private let toolCellChromeColor = Color.clear
 
     var body: some View {
         HStack(alignment: .center, spacing: 4) {
@@ -208,32 +205,16 @@ private struct ToolCallLine: View {
     ) -> some View {
         Group {
             if let width {
-                toolCellStyle(
-                    content()
-                        .padding(.horizontal, horizontalPadding)
-                        .frame(width: width, alignment: alignment)
-                        .frame(minHeight: 23, alignment: .center)
-                )
+                content()
+                    .padding(.horizontal, horizontalPadding)
+                    .frame(width: width, alignment: alignment)
+                    .frame(minHeight: 23, alignment: .center)
             } else {
-                toolCellStyle(
-                    content()
-                        .padding(.horizontal, horizontalPadding)
-                        .frame(minHeight: 23, alignment: .center)
-                )
+                content()
+                    .padding(.horizontal, horizontalPadding)
+                    .frame(minHeight: 23, alignment: .center)
             }
         }
-    }
-
-    private func toolCellStyle<Content: View>(_ content: Content) -> some View {
-        content
-            .background(
-                Rectangle()
-                    .fill(toolCellChromeColor)
-            )
-            .overlay(
-                Rectangle()
-                    .stroke(toolCellChromeColor, lineWidth: 1)
-            )
     }
 
     private var statusText: String {
