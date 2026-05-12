@@ -8,8 +8,11 @@ struct ZeusApp: App {
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
-        if let url = Bundle.module.url(forResource: "ShareTechMono-Regular", withExtension: "ttf") {
-            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        if let fontsDir = Bundle.module.url(forResource: "Fonts", withExtension: nil) {
+            let files = (try? FileManager.default.contentsOfDirectory(at: fontsDir, includingPropertiesForKeys: nil)) ?? []
+            for url in files where url.pathExtension == "ttf" {
+                CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+            }
         }
     }
 

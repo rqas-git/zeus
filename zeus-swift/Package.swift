@@ -28,7 +28,7 @@ let package = Package(
             name: "Zeus",
             dependencies: ["ZeusCore"],
             resources: [
-                .copy("Resources/ShareTechMono-Regular.ttf")
+                .copy("Resources/Fonts")
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

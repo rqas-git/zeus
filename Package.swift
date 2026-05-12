@@ -30,7 +30,7 @@ let package = Package(
             dependencies: ["ZeusCore"],
             path: "zeus-swift/Sources/Zeus",
             resources: [
-                .copy("Resources/ShareTechMono-Regular.ttf")
+                .copy("Resources/Fonts")
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)

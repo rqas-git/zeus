@@ -8,7 +8,8 @@ enum CodexTypography {
     static let codeSize: CGFloat = 12.5
     static let codeSmallSize: CGFloat = 11.5
 
-    private static let fontName = "ShareTechMono-Regular"
+    private static let fontName = "JetBrainsMono-Regular"
+    private static let fontNameSemiBold = "JetBrainsMono-SemiBold"
 
     static let chat = Font.custom(fontName, size: chatSize)
     static let chatSmall = Font.custom(fontName, size: chatSmallSize)
@@ -24,11 +25,11 @@ enum CodexTypography {
     static func heading(level: Int) -> Font {
         switch level {
         case 1:
-            return .custom(fontName, size: 15.5)
+            return .custom(fontNameSemiBold, size: 15.5)
         case 2:
-            return .custom(fontName, size: 14.5)
+            return .custom(fontNameSemiBold, size: 14.5)
         default:
-            return .custom(fontName, size: chatSize)
+            return .custom(fontNameSemiBold, size: chatSize)
         }
     }
 }
