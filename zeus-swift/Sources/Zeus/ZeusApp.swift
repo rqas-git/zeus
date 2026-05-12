@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import SwiftUI
 
 @main
@@ -7,6 +8,9 @@ struct ZeusApp: App {
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
+        if let url = Bundle.module.url(forResource: "ShareTechMono-Regular", withExtension: "ttf") {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
     }
 
     var body: some Scene {

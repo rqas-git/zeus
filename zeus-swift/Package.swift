@@ -27,6 +27,9 @@ let package = Package(
         .executableTarget(
             name: "Zeus",
             dependencies: ["ZeusCore"],
+            resources: [
+                .copy("Resources/ShareTechMono-Regular.ttf")
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

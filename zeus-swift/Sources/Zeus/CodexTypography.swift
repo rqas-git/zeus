@@ -8,23 +8,27 @@ enum CodexTypography {
     static let codeSize: CGFloat = 9.6
     static let codeSmallSize: CGFloat = 8.8
 
-    static let chat = Font.system(size: chatSize, weight: .regular, design: .monospaced)
-    static let chatSmall = Font.system(size: chatSmallSize, weight: .regular, design: .monospaced)
-    static let chatXSmall = Font.system(size: chatXSmallSize, weight: .regular, design: .monospaced)
-    static let code = Font.system(size: codeSize, weight: .regular, design: .monospaced)
-    static let codeSmall = Font.system(size: codeSmallSize, weight: .regular, design: .monospaced)
+    private static let fontName = "ShareTechMono-Regular"
 
-    static let chatNSFont = NSFont.monospacedSystemFont(ofSize: chatSize, weight: .regular)
-    static let chatSmallNSFont = NSFont.monospacedSystemFont(ofSize: chatSmallSize, weight: .regular)
+    static let chat = Font.custom(fontName, size: chatSize)
+    static let chatSmall = Font.custom(fontName, size: chatSmallSize)
+    static let chatXSmall = Font.custom(fontName, size: chatXSmallSize)
+    static let code = Font.custom(fontName, size: codeSize)
+    static let codeSmall = Font.custom(fontName, size: codeSmallSize)
+
+    static let chatNSFont = NSFont(name: fontName, size: chatSize)
+        ?? NSFont.monospacedSystemFont(ofSize: chatSize, weight: .regular)
+    static let chatSmallNSFont = NSFont(name: fontName, size: chatSmallSize)
+        ?? NSFont.monospacedSystemFont(ofSize: chatSmallSize, weight: .regular)
 
     static func heading(level: Int) -> Font {
         switch level {
         case 1:
-            return .system(size: 12, weight: .semibold, design: .monospaced)
+            return .custom(fontName, size: 12)
         case 2:
-            return .system(size: 11.6, weight: .semibold, design: .monospaced)
+            return .custom(fontName, size: 11.6)
         default:
-            return .system(size: chatSize, weight: .semibold, design: .monospaced)
+            return .custom(fontName, size: chatSize)
         }
     }
 }
