@@ -29,6 +29,9 @@ let package = Package(
             name: "Zeus",
             dependencies: ["ZeusCore"],
             path: "zeus-swift/Sources/Zeus",
+            resources: [
+                .copy("Resources/ShareTechMono-Regular.ttf")
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
