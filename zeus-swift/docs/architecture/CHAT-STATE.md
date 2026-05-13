@@ -17,6 +17,9 @@ tasks are marked `@ObservationIgnored`.
    renders as plain text while streaming, then stores parsed Markdown blocks
    after completion.
 4. Tool-call start and completion events upsert tool transcript rows by call id.
+   If the active assistant row is only a synthetic placeholder, the placeholder
+   is removed before the first tool row is inserted so the transcript stays in
+   chronological order during tool-only model rounds.
 5. Token usage updates come from cache-health and turn-token-usage events.
    Cache-health events are also collected for the active assistant response and
    shown only when `/show-cache` is enabled.

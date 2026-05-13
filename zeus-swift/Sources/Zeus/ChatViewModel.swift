@@ -896,7 +896,7 @@ final class ChatViewModel {
             lines[index].text = text
             lines[index].toolCall = display
             refreshSearchMatches()
-            requestScrollTo(currentAssistantLineID ?? lineID)
+            requestScrollTo(lineID)
             return
         }
 
@@ -906,19 +906,15 @@ final class ChatViewModel {
 
     @discardableResult
     private func insertToolLine(_ text: String, display: ToolCallTranscript? = nil) -> UUID {
+        flushPendingAssistantDelta()
+        removePlaceholderBeforeToolLine()
+
         let line = TranscriptLine(kind: .tool, text: text, toolCall: display)
         let lineID = line.id
 
         if let currentAssistantLineID,
            let index = lineIndex(for: currentAssistantLineID) {
-            insertLine(line, at: index)
-            refreshSearchMatches()
-            requestScrollTo(currentAssistantLineID)
-            return lineID
-        }
-
-        if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
-            insertLine(line, at: index)
+            insertLine(line, at: index + 1)
             refreshSearchMatches()
             requestScrollTo(lineID)
             return lineID
@@ -928,6 +924,31 @@ final class ChatViewModel {
         refreshSearchMatches()
         requestScrollTo(lineID)
         return lineID
+    }
+
+    private func removePlaceholderBeforeToolLine() {
+        guard let assistantPlaceholderLineID else { return }
+        guard let index = lineIndex(for: assistantPlaceholderLineID) else {
+            if activeAssistantStream?.lineID == assistantPlaceholderLineID {
+                activeAssistantStream = nil
+            }
+            assistantStreamText = ""
+            self.assistantPlaceholderLineID = nil
+            if currentAssistantLineID == assistantPlaceholderLineID {
+                currentAssistantLineID = nil
+            }
+            return
+        }
+
+        if activeAssistantStream?.lineID == assistantPlaceholderLineID {
+            activeAssistantStream = nil
+        }
+        assistantStreamText = ""
+        removeLine(at: index)
+        self.assistantPlaceholderLineID = nil
+        if currentAssistantLineID == assistantPlaceholderLineID {
+            currentAssistantLineID = nil
+        }
     }
 
     private func applyRestoredSession(_ restored: RestoreSessionResponse) {
