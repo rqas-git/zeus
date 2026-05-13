@@ -28,7 +28,7 @@ struct InputPrompt: View {
                     return true
                 }
             )
-                .frame(height: 20)
+                .frame(height: TerminalLayout.controlHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if isCancelVisible {

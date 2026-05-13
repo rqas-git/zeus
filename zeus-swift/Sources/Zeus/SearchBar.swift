@@ -21,7 +21,7 @@ struct SearchBar: View {
                 onHistoryPrevious: { false },
                 onHistoryNext: { false }
             )
-            .frame(height: 20)
+            .frame(height: TerminalLayout.controlHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(resultSummary)
@@ -29,27 +29,11 @@ struct SearchBar: View {
                 .lineLimit(1)
                 .frame(minWidth: 82, alignment: .trailing)
 
-            searchButton(systemName: "chevron.up", help: "Previous Match", action: onPrevious)
-            searchButton(systemName: "chevron.down", help: "Next Match", action: onNext)
-            searchButton(systemName: "xmark", help: "Close Search", action: onClose)
+            TerminalIconButton(systemName: "chevron.up", help: "Previous Match", action: onPrevious)
+            TerminalIconButton(systemName: "chevron.down", help: "Next Match", action: onNext)
+            TerminalIconButton(systemName: "xmark", help: "Close Search", action: onClose)
         }
-        .font(CodexTypography.chatSmall)
-        .frame(height: 22)
-    }
-
-    private func searchButton(
-        systemName: String,
-        help: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(TerminalPalette.dimText)
-                .frame(width: 18, height: 18)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
+        .font(TerminalTypography.chatSmall)
+        .frame(height: TerminalLayout.searchHeight)
     }
 }
