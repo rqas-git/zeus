@@ -46,9 +46,13 @@ drops the shared FFF search state and starts a fresh warmup so later
 *** End Patch
 ```
 
-Update hunks are exact replacements. Each hunk must include context or removed
-lines so the tool can find a unique target in the current file. Add and delete
-operations are path-based.
+Update hunks are applied as line-based chunks. The optional text after `@@` is
+used as a forward context anchor before matching that hunk, so repeated local
+snippets can be disambiguated without requiring a globally unique replacement.
+The matcher first tries exact line sequences, then falls back through trailing
+whitespace, full trim, and Unicode punctuation/space normalization. `*** End of
+File` makes each matcher try the final possible chunk before the normal forward
+search. Add and delete operations are path-based.
 
 ## Read and List Tools
 

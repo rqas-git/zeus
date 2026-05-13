@@ -91,9 +91,10 @@ transport, and session state separate.
   before running the search. `read_file` reads only one byte past its output cap
   before truncating, and paged reads bound each line before building returned
   strings.
-- `apply_patch` is sequential, parses bounded patch input, validates all touched
-  paths before writing, caps target file size, and replaces individual files via
-  temporary-file rename.
+- `apply_patch` is sequential, parses bounded patch input, matches update hunks
+  as ordered line chunks with optional `@@` context and fuzzy whitespace
+  fallback, validates all touched paths before writing, caps target file size,
+  and replaces individual files via temporary-file rename.
 - `exec_command` is sequential, timeout-bounded, and returns capped stdout and
   stderr. Oversized command output kills the process group and returns a failed
   tool result. It currently permits any bash command string; command-level
