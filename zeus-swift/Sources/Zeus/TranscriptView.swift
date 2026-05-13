@@ -195,6 +195,8 @@ private struct ToolCallLine: View {
         }
         .font(TerminalTypography.chatSmall)
         .fixedSize(horizontal: false, vertical: true)
+        .background(Rectangle().fill(TerminalPalette.backgroundLow))
+        .overlay(Rectangle().stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1))
     }
 
     private func toolCell<Content: View>(
