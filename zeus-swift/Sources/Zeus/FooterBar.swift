@@ -1,33 +1,5 @@
 import SwiftUI
 
-private struct ShortcutItem: Identifiable {
-    let shortcut: String
-    let action: String
-
-    var id: String {
-        shortcut
-    }
-}
-
-private let shortcutItems = [
-    ShortcutItem(shortcut: "Cmd+N", action: "Open a new Zeus window"),
-    ShortcutItem(shortcut: "Cmd+B", action: "Open branch menu"),
-    ShortcutItem(shortcut: "Cmd+M", action: "Open model menu"),
-    ShortcutItem(shortcut: "Cmd+E", action: "Open effort menu"),
-    ShortcutItem(shortcut: "Cmd+P", action: "Open permissions menu"),
-    ShortcutItem(shortcut: "Cmd+F", action: "Open transcript search"),
-    ShortcutItem(shortcut: "Cmd+G", action: "Next search match"),
-    ShortcutItem(shortcut: "Cmd+Shift+G", action: "Previous search match"),
-    ShortcutItem(shortcut: "Cmd+T", action: "Toggle terminal passthrough"),
-    ShortcutItem(shortcut: "Ctrl+C", action: "Clear input"),
-    ShortcutItem(shortcut: "Ctrl+Enter", action: "Insert newline"),
-    ShortcutItem(shortcut: "Up Arrow", action: "Previous message, open footer menu, or previous option"),
-    ShortcutItem(shortcut: "Down Arrow", action: "Next message, next option, or close menu at bottom"),
-    ShortcutItem(shortcut: "Left / Right Arrow", action: "Move between footer controls"),
-    ShortcutItem(shortcut: "Return / Enter", action: "Activate footer control or menu option"),
-    ShortcutItem(shortcut: "Esc", action: "Cancel response, close search, or close footer UI")
-]
-
 struct FooterMenuConfig {
     let id: FooterMenuID
     let title: String
@@ -77,12 +49,10 @@ struct FooterBar: View {
     let tokenUsage: String
     @Binding var activeMenu: FooterMenuID?
     @Binding var focusedMenu: FooterMenuID?
-    private let itemSpacing: CGFloat = 22
-    private let pathSpacing: CGFloat = 32
 
     var body: some View {
         HStack(spacing: 0) {
-            HStack(spacing: itemSpacing) {
+            HStack(spacing: TerminalLayout.footerItemSpacing) {
                 footerText(workspace.name, color: TerminalPalette.dimText)
                 FooterMenu(config: branch, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
                 FooterMenu(config: model, activeMenu: $activeMenu, focusedMenu: $focusedMenu)
@@ -92,7 +62,7 @@ struct FooterBar: View {
             }
             .layoutPriority(1)
 
-            Spacer(minLength: pathSpacing)
+            Spacer(minLength: TerminalLayout.footerPathSpacing)
 
             HStack(spacing: 18) {
                 FooterShortcutsMenu(activeMenu: $activeMenu, focusedMenu: $focusedMenu)
@@ -101,10 +71,10 @@ struct FooterBar: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .frame(maxWidth: 360, alignment: .trailing)
+            .frame(maxWidth: TerminalLayout.footerPathMaxWidth, alignment: .trailing)
         }
-        .font(CodexTypography.chatSmall)
-        .frame(height: 20)
+        .font(TerminalTypography.chatSmall)
+        .frame(height: TerminalLayout.controlHeight)
     }
 
     private func footerText(_ text: String, color: Color) -> some View {
@@ -129,33 +99,29 @@ private struct FooterShortcutsMenu: View {
 
     var body: some View {
         Text("shortcuts")
-            .font(CodexTypography.chatSmallBold)
+            .font(TerminalTypography.chatSmallBold)
             .foregroundStyle(TerminalPalette.cyan)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            .frame(height: 20, alignment: .center)
+            .frame(height: TerminalLayout.controlHeight, alignment: .center)
             .padding(.horizontal, 3)
-            .background(
-                Rectangle()
-                    .fill(isFocused ? TerminalPalette.cyan.opacity(0.12) : .clear)
-            )
+            .terminalFocusBackground(isFocused)
             .contentShape(Rectangle())
             .onTapGesture {
                 if isOpen {
                     activeMenu = nil
                     focusedMenu = .shortcuts
                 } else {
-                    DispatchQueue.main.async {
-                        focusedMenu = .shortcuts
-                        activeMenu = .shortcuts
-                    }
+                    focusedMenu = .shortcuts
+                    activeMenu = .shortcuts
                 }
             }
             .help("Shortcuts")
+            .accessibilityLabel("Shortcuts menu")
             .overlay(alignment: .bottomTrailing) {
                 if isOpen {
-                    ShortcutsDropdown(items: shortcutItems)
-                        .offset(y: -23)
+                    ShortcutsDropdown()
+                        .offset(y: TerminalLayout.dropdownYOffset)
                         .zIndex(30)
                 }
             }
@@ -164,18 +130,16 @@ private struct FooterShortcutsMenu: View {
 }
 
 private struct ShortcutsDropdown: View {
-    let items: [ShortcutItem]
-
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(items) { item in
+                ForEach(AppShortcut.allCases) { shortcut in
                     HStack(spacing: 12) {
-                        Text(item.shortcut)
+                        Text(shortcut.display)
                             .foregroundStyle(TerminalPalette.cyan)
                             .frame(width: 96, alignment: .leading)
 
-                        Text(item.action)
+                        Text(shortcut.actionDescription)
                             .foregroundStyle(TerminalPalette.primaryText)
                             .lineLimit(1)
 
@@ -186,12 +150,7 @@ private struct ShortcutsDropdown: View {
                 }
             }
             .frame(width: 386)
-            .background(Rectangle().fill(TerminalPalette.background))
-            .overlay(
-                Rectangle()
-                    .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
-            )
-            .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
+            .terminalDropdownChrome()
 
             Rectangle()
                 .fill(TerminalPalette.background)
@@ -200,7 +159,7 @@ private struct ShortcutsDropdown: View {
                 .padding(.trailing, 28)
                 .offset(y: -5)
         }
-        .font(CodexTypography.chatSmall)
+        .font(TerminalTypography.chatSmall)
         .fixedSize(horizontal: true, vertical: true)
     }
 }
@@ -219,16 +178,13 @@ private struct FooterMenu: View {
 
     var body: some View {
         Text(config.title)
-            .font(CodexTypography.chatSmallBold)
+            .font(TerminalTypography.chatSmallBold)
             .foregroundStyle(config.isEnabled ? config.enabledColor : TerminalPalette.dimText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-            .frame(height: 20, alignment: .center)
+            .frame(height: TerminalLayout.controlHeight, alignment: .center)
             .padding(.horizontal, 3)
-            .background(
-                Rectangle()
-                    .fill(isFocused ? config.enabledColor.opacity(0.12) : .clear)
-            )
+            .terminalFocusBackground(isFocused, color: config.enabledColor)
             .contentShape(Rectangle())
             .onTapGesture {
                 guard config.isEnabled else { return }
@@ -236,13 +192,13 @@ private struct FooterMenu: View {
                     activeMenu = nil
                     focusedMenu = config.id
                 } else {
-                    DispatchQueue.main.async {
-                        focusedMenu = config.id
-                        activeMenu = config.id
-                    }
+                    focusedMenu = config.id
+                    activeMenu = config.id
                 }
             }
             .help(config.help)
+            .accessibilityLabel("\(config.help) menu")
+            .accessibilityValue(config.title)
             .overlay(alignment: .bottom) {
                 if isOpen {
                     FooterDropdown(
@@ -257,7 +213,7 @@ private struct FooterMenu: View {
                     } onHighlight: { option in
                         config.onHighlight(option)
                     }
-                    .offset(y: -23)
+                    .offset(y: TerminalLayout.dropdownYOffset)
                     .zIndex(30)
                 }
             }
@@ -286,12 +242,7 @@ private struct FooterDropdown: View {
                     dropdownButton(for: option)
                 }
             }
-            .background(Rectangle().fill(TerminalPalette.background))
-            .overlay(
-                Rectangle()
-                    .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
-            )
-            .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
+            .terminalDropdownChrome()
 
             Rectangle()
                 .fill(TerminalPalette.background)
@@ -299,7 +250,7 @@ private struct FooterDropdown: View {
                 .rotationEffect(.degrees(45))
                 .offset(y: -5)
         }
-        .font(CodexTypography.chatSmall)
+        .font(TerminalTypography.chatSmall)
         .fixedSize(horizontal: true, vertical: true)
     }
 
