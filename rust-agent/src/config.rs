@@ -27,9 +27,9 @@ const DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 // backend request on every launch.
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
-// Long enough for backend streaming setup under local network stalls, while
-// still bounding hung requests for terminal use.
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+// Match Codex/opencode's five-minute model stream budget while still bounding
+// hung requests for terminal use.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
 // Prompt-window caps keep interactive requests small. Raising them can improve
 // recall but increases latency and prompt-cache churn.
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
@@ -1197,6 +1197,14 @@ mod tests {
     #[test]
     fn prompt_cache_key_is_stable_per_session() {
         assert_eq!(ClientConfig::default().prompt_cache_key(7), "rust-agent-7");
+    }
+
+    #[test]
+    fn default_request_timeout_matches_codex_stream_budget() {
+        assert_eq!(
+            ClientConfig::default().request_timeout(),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]

@@ -74,6 +74,9 @@ telemetry, and tool configuration.
 - Configuration is loaded once, not per turn.
 - Model and reasoning-effort changes validate against in-memory allowlists.
 - Prompt, history, and output limits are plain copyable values.
+- `RUST_AGENT_REQUEST_TIMEOUT_SECS` defaults to `300`, matching Codex and
+  opencode's five-minute model stream budget while still bounding hung
+  requests.
 - Compaction defaults match pi-style behavior: enabled, 272,000 context tokens,
   16,384 reserve tokens, and 20,000 recent tokens retained verbatim.
 - Server bind addresses, remote-HTTP opt-in, bearer token, session bounds,
