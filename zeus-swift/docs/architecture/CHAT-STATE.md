@@ -12,11 +12,15 @@ tasks are marked `@ObservationIgnored`.
    creates a session.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
-3. Assistant text deltas are buffered briefly before updating observed
-   transcript state to avoid excessive UI churn. The active assistant line
-   renders as plain text while streaming, then stores parsed Markdown blocks
-   after completion.
+3. Assistant text deltas are buffered until complete newline-terminated lines
+   are available before updating observed transcript state, with any final
+   partial line flushed at turn boundaries. The active assistant line renders as
+   plain text while streaming, then stores parsed Markdown blocks after
+   completion.
 4. Tool-call start and completion events upsert tool transcript rows by call id.
+   If the active assistant row is only a synthetic placeholder, the placeholder
+   is removed before the first tool row is inserted so the transcript stays in
+   chronological order during tool-only model rounds.
 5. Token usage updates come from cache-health and turn-token-usage events.
    Cache-health events are also collected for the active assistant response and
    shown only when `/show-cache` is enabled.
@@ -26,15 +30,16 @@ tasks are marked `@ObservationIgnored`.
    durable records.
 8. Transcript search refreshes are debounced and scan line snapshots off the
    main actor.
-9. Terminal passthrough sends commands to `terminal:run` and appends bounded
-   command output to the transcript.
+9. Terminal passthrough applies the selected permission policy, sends commands
+   to `terminal:run`, and appends bounded command output to the transcript.
 
 ## Responsibilities
 
 - Own readiness, sending, login, branch-switch, terminal, and cancellation flags.
 - Own selected model, reasoning effort, tool permission, workspace, and branch
   options.
-- Apply selected model and permission before the next model turn.
+- Apply selected model and permission before the next model turn, and apply the
+  selected permission before terminal passthrough commands.
 - Keep backend branch switches in the backend API path.
 - Keep prompt-history and transcript-search behavior local to the frontend.
 - Translate `AgentServerEvent` values into transcript lines.
@@ -47,7 +52,7 @@ tasks are marked `@ObservationIgnored`.
 - `loginTask` owns device-code login.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
-- `assistantDeltaFlushTask` batches assistant text updates.
+- Assistant text line buffering is synchronous within the active model turn.
 - `searchRefreshTask` debounces transcript search updates.
 
 Tasks are cancelled on deinit and when a newer operation supersedes the old

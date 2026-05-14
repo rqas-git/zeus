@@ -39,6 +39,9 @@ uses typed `ZeusCore` request and response models.
 The direct turn stream is the canonical source for events from a submitted user
 message. The passive session event stream keeps the UI aware of session events
 outside the direct turn path, including terminal command and compaction events.
+Both streams use long request timeouts because reasoning and tool execution can
+legitimately keep a turn open without producing assistant text for several
+minutes.
 
 ## Current Scope
 

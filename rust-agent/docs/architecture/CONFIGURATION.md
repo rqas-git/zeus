@@ -28,7 +28,7 @@ telemetry, and tool configuration.
 - `RUST_AGENT_VERSION`
 - `RUST_AGENT_HOME`
 - `RUST_AGENT_STATE_DB`
-- `RUST_AGENT_REQUEST_TIMEOUT_SECS`
+- `RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS`
 - `RUST_AGENT_PROMPT_CACHE_NAMESPACE`
 - `RUST_AGENT_CONTEXT_MAX_MESSAGES`
 - `RUST_AGENT_CONTEXT_MAX_BYTES`
@@ -74,6 +74,11 @@ telemetry, and tool configuration.
 - Configuration is loaded once, not per turn.
 - Model and reasoning-effort changes validate against in-memory allowlists.
 - Prompt, history, and output limits are plain copyable values.
+- `RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS` defaults to `300`, matching Codex's
+  five-minute SSE idle budget. The model transport does not impose a total
+  request timeout, so long-running turns can continue while the backend keeps
+  streaming data. The legacy `RUST_AGENT_REQUEST_TIMEOUT_SECS` name is still
+  accepted as a fallback for this idle timeout when the new variable is unset.
 - Compaction defaults match pi-style behavior: enabled, 272,000 context tokens,
   16,384 reserve tokens, and 20,000 recent tokens retained verbatim.
 - Server bind addresses, remote-HTTP opt-in, bearer token, session bounds,

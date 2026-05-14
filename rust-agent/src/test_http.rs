@@ -8,20 +8,27 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TestResponse {
     status: u16,
-    body: String,
+    body: TestResponseBody,
     content_type: &'static str,
     headers: Vec<(&'static str, String)>,
+}
+
+#[derive(Clone, Debug)]
+enum TestResponseBody {
+    Full(String),
+    Chunks(Vec<(Duration, String)>),
 }
 
 impl TestResponse {
     pub(crate) fn json(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
-            body: body.into(),
+            body: TestResponseBody::Full(body.into()),
             content_type: "application/json",
             headers: Vec::new(),
         }
@@ -30,7 +37,16 @@ impl TestResponse {
     pub(crate) fn sse(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
-            body: body.into(),
+            body: TestResponseBody::Full(body.into()),
+            content_type: "text/event-stream",
+            headers: Vec::new(),
+        }
+    }
+
+    pub(crate) fn sse_chunks(status: u16, chunks: Vec<(Duration, String)>) -> Self {
+        Self {
+            status,
+            body: TestResponseBody::Chunks(chunks),
             content_type: "text/event-stream",
             headers: Vec::new(),
         }
@@ -158,5 +174,30 @@ fn write_response(stream: &mut TcpStream, response: TestResponse) {
     for (name, value) in response.headers {
         write!(stream, "{name}: {value}\r\n").unwrap();
     }
-    write!(stream, "\r\n{}", response.body).unwrap();
+    write!(stream, "\r\n").unwrap();
+    response.body.write_to(stream);
+}
+
+impl TestResponseBody {
+    fn len(&self) -> usize {
+        match self {
+            Self::Full(body) => body.len(),
+            Self::Chunks(chunks) => chunks.iter().map(|(_, chunk)| chunk.len()).sum(),
+        }
+    }
+
+    fn write_to(self, stream: &mut TcpStream) {
+        match self {
+            Self::Full(body) => {
+                write!(stream, "{body}").unwrap();
+            }
+            Self::Chunks(chunks) => {
+                for (delay, chunk) in chunks {
+                    std::thread::sleep(delay);
+                    write!(stream, "{chunk}").unwrap();
+                    stream.flush().unwrap();
+                }
+            }
+        }
+    }
 }

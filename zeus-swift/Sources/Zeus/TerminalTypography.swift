@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-enum CodexTypography {
+enum TerminalTypography {
     static let chatSize: CGFloat = 12.5
     static let chatSmallSize: CGFloat = 11
     static let chatXSmallSize: CGFloat = 10
@@ -25,12 +25,9 @@ enum CodexTypography {
 
     static func heading(level: Int) -> Font {
         switch level {
-        case 1:
-            return .custom(fontNameSemiBold, size: 14)
-        case 2:
-            return .custom(fontNameSemiBold, size: 13)
-        default:
-            return .custom(fontNameSemiBold, size: chatSize)
+        case 1: .custom(fontNameSemiBold, size: 14.5)
+        case 2: .custom(fontNameSemiBold, size: 13)
+        default: .custom(fontNameSemiBold, size: chatSize)
         }
     }
 }

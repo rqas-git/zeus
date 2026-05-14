@@ -29,7 +29,8 @@ specific backend provider.
 
 ## Responsibilities
 
-- `ClientConfig` supplies endpoint, instructions, headers, and timeout.
+- `ClientConfig` supplies endpoint, instructions, headers, and the stream idle
+  timeout.
 - `AgentService` supplies the selected model for each request.
 - `AuthManager` owns rust-agent auth storage, device-code login, refresh, logout,
   and short-lived credentials for model calls.
@@ -64,6 +65,9 @@ specific backend provider.
   full-response byte caps. Like pi-mono's provider parsers, it assumes the
   configured backend is trusted and relies on context/history limits after
   parsing rather than truncating provider streams mid-response.
+- Model streams follow Codex timeout behavior: there is no fixed total request
+  timeout, but waiting for the next SSE body chunk is bounded by the configured
+  stream idle timeout.
 - Prompt-cache keys are stable per configured namespace and session.
   The same key is sent in the Responses body and session-affinity headers.
   Turn-scoped Codex sticky-routing state is replayed only inside the active
@@ -95,6 +99,8 @@ Request cancellation is caller-driven by dropping the streaming future; the
 client does not expose provider-side cancellation ids. The client does not yet
 support general retries, websocket transport, provider failover, remote
 provider-managed compaction, provider-specific tool repair, or hard byte caps on
-backend SSE streams. The only transport retry is the targeted one-shot auth
+backend SSE streams. The client also does not apply a total request timeout to
+model streams; stalled streams fail only when no SSE chunk arrives within the
+configured idle window. The only transport retry is the targeted one-shot auth
 refresh after a `401 Unauthorized` response. Add stream caps before using this
 client with untrusted providers.

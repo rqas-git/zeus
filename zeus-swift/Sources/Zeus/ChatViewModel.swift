@@ -77,7 +77,6 @@ final class ChatViewModel {
         return isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
     }
 
-    private static let assistantDeltaFlushNanoseconds: UInt64 = 33_000_000
     private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
     private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
     @ObservationIgnored private let server: any AgentServerProtocol
@@ -95,10 +94,9 @@ final class ChatViewModel {
     @ObservationIgnored private var loginTask: Task<Void, Never>?
     @ObservationIgnored private var branchSwitchTask: Task<Void, Never>?
     @ObservationIgnored private var terminalTask: Task<Void, Never>?
-    @ObservationIgnored private var assistantDeltaFlushTask: Task<Void, Never>?
     @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingAssistantDelta = ""
+    @ObservationIgnored private var pendingAssistantLineFragment = ""
     @ObservationIgnored private var assistantStreamText = ""
     @ObservationIgnored private var pendingCacheStats: [ResponseCacheStats] = []
     @ObservationIgnored private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
@@ -129,7 +127,6 @@ final class ChatViewModel {
         loginTask?.cancel()
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
-        assistantDeltaFlushTask?.cancel()
         searchRefreshTask?.cancel()
         markdownRenderTask?.cancel()
         auth.cancelLogin()
@@ -227,6 +224,7 @@ final class ChatViewModel {
         assistantPlaceholderLineID = nil
         activeAssistantStream = nil
         assistantStreamText = ""
+        clearPendingAssistantDelta()
         lastAssistantScrollRequest = .distantPast
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
@@ -448,6 +446,10 @@ final class ChatViewModel {
         let rootURL = workspace.url
         terminalTask = Task {
             do {
+                try await applySelectedPermissionsForNextTurn(
+                    client: client,
+                    sessionID: sessionID
+                )
                 let result = try await client.runTerminalCommand(
                     sessionID: sessionID,
                     command: command
@@ -664,35 +666,33 @@ final class ChatViewModel {
     private func appendAssistantDelta(_ delta: String) {
         guard !delta.isEmpty else { return }
         _ = ensureAssistantLine()
-        pendingAssistantDelta += delta
-        scheduleAssistantDeltaFlush()
-    }
 
-    private func scheduleAssistantDeltaFlush() {
-        guard assistantDeltaFlushTask == nil else { return }
-        assistantDeltaFlushTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: Self.assistantDeltaFlushNanoseconds)
-            } catch {
-                return
-            }
-            self?.flushPendingAssistantDelta()
+        pendingAssistantLineFragment.append(delta)
+
+        var flushEnd: String.Index?
+        var cursor = pendingAssistantLineFragment.startIndex
+        while let newline = pendingAssistantLineFragment[cursor...].firstIndex(of: "\n") {
+            let lineEnd = pendingAssistantLineFragment.index(after: newline)
+            flushEnd = lineEnd
+            cursor = lineEnd
         }
+
+        guard let flushEnd else { return }
+
+        let completeLines = String(pendingAssistantLineFragment[..<flushEnd])
+        pendingAssistantLineFragment.removeSubrange(..<flushEnd)
+        applyAssistantDelta(completeLines)
     }
 
     private func flushPendingAssistantDelta() {
-        assistantDeltaFlushTask?.cancel()
-        assistantDeltaFlushTask = nil
-        guard !pendingAssistantDelta.isEmpty else { return }
-        let delta = pendingAssistantDelta
-        pendingAssistantDelta = ""
+        guard !pendingAssistantLineFragment.isEmpty else { return }
+        let delta = pendingAssistantLineFragment
+        pendingAssistantLineFragment = ""
         applyAssistantDelta(delta)
     }
 
     private func clearPendingAssistantDelta() {
-        assistantDeltaFlushTask?.cancel()
-        assistantDeltaFlushTask = nil
-        pendingAssistantDelta = ""
+        pendingAssistantLineFragment = ""
     }
 
     private func applyAssistantDelta(_ delta: String) {
@@ -896,7 +896,7 @@ final class ChatViewModel {
             lines[index].text = text
             lines[index].toolCall = display
             refreshSearchMatches()
-            requestScrollTo(currentAssistantLineID ?? lineID)
+            requestScrollTo(lineID)
             return
         }
 
@@ -906,19 +906,15 @@ final class ChatViewModel {
 
     @discardableResult
     private func insertToolLine(_ text: String, display: ToolCallTranscript? = nil) -> UUID {
+        flushPendingAssistantDelta()
+        removePlaceholderBeforeToolLine()
+
         let line = TranscriptLine(kind: .tool, text: text, toolCall: display)
         let lineID = line.id
 
         if let currentAssistantLineID,
            let index = lineIndex(for: currentAssistantLineID) {
-            insertLine(line, at: index)
-            refreshSearchMatches()
-            requestScrollTo(currentAssistantLineID)
-            return lineID
-        }
-
-        if let index = lines.lastIndex(where: { $0.kind == .assistant }) {
-            insertLine(line, at: index)
+            insertLine(line, at: index + 1)
             refreshSearchMatches()
             requestScrollTo(lineID)
             return lineID
@@ -928,6 +924,31 @@ final class ChatViewModel {
         refreshSearchMatches()
         requestScrollTo(lineID)
         return lineID
+    }
+
+    private func removePlaceholderBeforeToolLine() {
+        guard let assistantPlaceholderLineID else { return }
+        guard let index = lineIndex(for: assistantPlaceholderLineID) else {
+            if activeAssistantStream?.lineID == assistantPlaceholderLineID {
+                activeAssistantStream = nil
+            }
+            assistantStreamText = ""
+            self.assistantPlaceholderLineID = nil
+            if currentAssistantLineID == assistantPlaceholderLineID {
+                currentAssistantLineID = nil
+            }
+            return
+        }
+
+        if activeAssistantStream?.lineID == assistantPlaceholderLineID {
+            activeAssistantStream = nil
+        }
+        assistantStreamText = ""
+        removeLine(at: index)
+        self.assistantPlaceholderLineID = nil
+        if currentAssistantLineID == assistantPlaceholderLineID {
+            currentAssistantLineID = nil
+        }
     }
 
     private func applyRestoredSession(_ restored: RestoreSessionResponse) {

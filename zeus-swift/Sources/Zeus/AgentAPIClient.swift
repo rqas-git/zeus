@@ -109,6 +109,7 @@ struct AgentAPIClient: AgentClientProtocol {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue("text/event-stream", forHTTPHeaderField: "accept")
+        request.timeoutInterval = 24 * 60 * 60
         request.httpBody = try encode(TurnRequest(
             message: message,
             reasoningEffort: reasoningEffort

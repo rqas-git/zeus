@@ -146,7 +146,7 @@ const SEARCH_TEXT_TOOL_SPEC: ToolSpec = ToolSpec {
 };
 const APPLY_PATCH_TOOL_SPEC: ToolSpec = ToolSpec {
     name: APPLY_PATCH_TOOL,
-    description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
+    description: "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files. Update hunks use line-based matching, optional @@ context, and fuzzy whitespace matching.",
     parameters: ToolParameters::ApplyPatch,
     supports_parallel: false,
 };
@@ -593,7 +593,7 @@ impl Serialize for ApplyPatchProperties {
         map.serialize_entry(
             "patch",
             &StringProperty {
-                description: "Patch text using *** Begin Patch / *** End Patch blocks.",
+                description: "Patch text using *** Begin Patch / *** End Patch blocks. Update hunks start with @@ or @@ context and contain space, -, or + lines.",
             },
         )?;
         map.end()
@@ -2326,8 +2326,17 @@ enum PatchOperation {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PatchHunk {
-    old: String,
-    new: String,
+    change_context: Option<String>,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+    is_end_of_file: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Replacement {
+    start: usize,
+    old_len: usize,
+    new_lines: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -2377,12 +2386,17 @@ fn parse_update_file_operation(
 ) -> Result<PatchOperation> {
     let mut hunks = Vec::new();
     while *index < lines.len() && !is_patch_operation_header(lines[*index]) {
+        if patch_line_body(lines[*index]).trim().is_empty() {
+            *index += 1;
+            continue;
+        }
         anyhow::ensure!(
             is_hunk_header(lines[*index]),
             "update file sections must contain @@ hunks for {path:?}"
         );
+        let change_context = parse_hunk_context(lines[*index]);
         *index += 1;
-        hunks.push(parse_patch_hunk(lines, index, path)?);
+        hunks.push(parse_patch_hunk(lines, index, path, change_context)?);
     }
 
     anyhow::ensure!(!hunks.is_empty(), "update file {path:?} contains no hunks");
@@ -2392,27 +2406,39 @@ fn parse_update_file_operation(
     })
 }
 
-fn parse_patch_hunk(lines: &[&str], index: &mut usize, path: &str) -> Result<PatchHunk> {
-    let mut old = String::new();
-    let mut new = String::new();
+fn parse_patch_hunk(
+    lines: &[&str],
+    index: &mut usize,
+    path: &str,
+    change_context: Option<String>,
+) -> Result<PatchHunk> {
+    let mut old_lines = Vec::new();
+    let mut new_lines = Vec::new();
     let mut changed = false;
+    let mut is_end_of_file = false;
 
     while *index < lines.len()
         && !is_patch_operation_header(lines[*index])
         && !is_hunk_header(lines[*index])
     {
-        let line = lines[*index];
+        let line = patch_line_body(lines[*index]);
+        if line == "*** End of File" {
+            is_end_of_file = true;
+            *index += 1;
+            break;
+        }
         if let Some(rest) = line.strip_prefix(' ') {
-            old.push_str(rest);
-            new.push_str(rest);
+            old_lines.push(rest.to_string());
+            new_lines.push(rest.to_string());
         } else if let Some(rest) = line.strip_prefix('-') {
-            old.push_str(rest);
+            old_lines.push(rest.to_string());
             changed = true;
         } else if let Some(rest) = line.strip_prefix('+') {
-            new.push_str(rest);
+            new_lines.push(rest.to_string());
             changed = true;
         } else if line.is_empty() {
-            anyhow::bail!("empty hunk line in {path:?}");
+            old_lines.push(String::new());
+            new_lines.push(String::new());
         } else {
             anyhow::bail!("hunk lines must start with space, -, or + in {path:?}");
         }
@@ -2420,11 +2446,12 @@ fn parse_patch_hunk(lines: &[&str], index: &mut usize, path: &str) -> Result<Pat
     }
 
     anyhow::ensure!(changed, "hunk in {path:?} contains no changes");
-    anyhow::ensure!(
-        !old.is_empty(),
-        "hunk in {path:?} must include context or removed lines"
-    );
-    Ok(PatchHunk { old, new })
+    Ok(PatchHunk {
+        change_context,
+        old_lines,
+        new_lines,
+        is_end_of_file,
+    })
 }
 
 fn parse_patch_path(path: &str) -> Result<String> {
@@ -2450,25 +2477,187 @@ fn is_hunk_header(line: &str) -> bool {
     patch_line_body(line).starts_with("@@")
 }
 
-fn apply_hunks(content: &str, hunks: &[PatchHunk], path: &str) -> Result<String> {
-    let mut content = content.to_string();
-    for hunk in hunks {
-        let index = unique_match_index(&content, &hunk.old, path)?;
-        content.replace_range(index..index + hunk.old.len(), &hunk.new);
-    }
-    Ok(content)
+fn parse_hunk_context(line: &str) -> Option<String> {
+    let context = patch_line_body(line)
+        .strip_prefix("@@")
+        .unwrap_or_default()
+        .trim();
+    (!context.is_empty()).then(|| context.to_string())
 }
 
-fn unique_match_index(content: &str, needle: &str, path: &str) -> Result<usize> {
-    let mut matches = content.match_indices(needle);
-    let Some((index, _)) = matches.next() else {
-        anyhow::bail!("patch hunk did not match {path}");
-    };
-    anyhow::ensure!(
-        matches.next().is_none(),
-        "patch hunk matched multiple locations in {path}"
-    );
-    Ok(index)
+fn apply_hunks(content: &str, hunks: &[PatchHunk], path: &str) -> Result<String> {
+    let mut lines = content.split('\n').map(String::from).collect::<Vec<_>>();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    let replacements = compute_line_replacements(&lines, hunks, path)?;
+    let mut new_lines = apply_line_replacements(lines, &replacements);
+    if !new_lines.last().is_some_and(String::is_empty) {
+        new_lines.push(String::new());
+    }
+    Ok(new_lines.join("\n"))
+}
+
+fn compute_line_replacements(
+    lines: &[String],
+    hunks: &[PatchHunk],
+    path: &str,
+) -> Result<Vec<Replacement>> {
+    let mut replacements = Vec::with_capacity(hunks.len());
+    let mut line_index = 0usize;
+
+    for hunk in hunks {
+        if let Some(context) = &hunk.change_context {
+            let Some(context_index) =
+                seek_line_sequence(lines, std::slice::from_ref(context), line_index, false)
+            else {
+                anyhow::bail!("failed to find context {context:?} in {path}");
+            };
+            line_index = context_index + 1;
+        }
+
+        if hunk.old_lines.is_empty() {
+            let insertion_index = lines.len();
+            replacements.push(Replacement {
+                start: insertion_index,
+                old_len: 0,
+                new_lines: hunk.new_lines.clone(),
+            });
+            continue;
+        }
+
+        let mut old_lines = hunk.old_lines.as_slice();
+        let mut new_lines = hunk.new_lines.as_slice();
+        let mut found = seek_line_sequence(lines, old_lines, line_index, hunk.is_end_of_file);
+
+        if found.is_none() && old_lines.last().is_some_and(String::is_empty) {
+            old_lines = &old_lines[..old_lines.len() - 1];
+            if new_lines.last().is_some_and(String::is_empty) {
+                new_lines = &new_lines[..new_lines.len() - 1];
+            }
+            found = seek_line_sequence(lines, old_lines, line_index, hunk.is_end_of_file);
+        }
+
+        let Some(start) = found else {
+            anyhow::bail!(
+                "failed to find expected lines in {path}:\n{}",
+                hunk.old_lines.join("\n")
+            );
+        };
+
+        replacements.push(Replacement {
+            start,
+            old_len: old_lines.len(),
+            new_lines: new_lines.to_vec(),
+        });
+        line_index = start + old_lines.len();
+    }
+
+    replacements.sort_by_key(|replacement| replacement.start);
+    Ok(replacements)
+}
+
+fn apply_line_replacements(mut lines: Vec<String>, replacements: &[Replacement]) -> Vec<String> {
+    for replacement in replacements.iter().rev() {
+        lines.splice(
+            replacement.start..replacement.start + replacement.old_len,
+            replacement.new_lines.clone(),
+        );
+    }
+    lines
+}
+
+fn seek_line_sequence(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(start.min(lines.len()));
+    }
+    if pattern.len() > lines.len() {
+        return None;
+    }
+
+    for matcher in [
+        lines_match_exact as fn(&str, &str) -> bool,
+        lines_match_trim_end,
+        lines_match_trim,
+        lines_match_normalized,
+    ] {
+        if let Some(index) = find_line_sequence(lines, pattern, start, eof, matcher) {
+            return Some(index);
+        }
+    }
+
+    None
+}
+
+fn find_line_sequence(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+    matcher: fn(&str, &str) -> bool,
+) -> Option<usize> {
+    let last_start = lines.len().checked_sub(pattern.len())?;
+    if eof && start <= last_start && line_sequence_matches(lines, pattern, last_start, matcher) {
+        return Some(last_start);
+    }
+
+    for index in start..=last_start {
+        if line_sequence_matches(lines, pattern, index, matcher) {
+            return Some(index);
+        }
+    }
+
+    None
+}
+
+fn line_sequence_matches(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    matcher: fn(&str, &str) -> bool,
+) -> bool {
+    pattern
+        .iter()
+        .enumerate()
+        .all(|(offset, expected)| matcher(&lines[start + offset], expected))
+}
+
+fn lines_match_exact(actual: &str, expected: &str) -> bool {
+    actual == expected
+}
+
+fn lines_match_trim_end(actual: &str, expected: &str) -> bool {
+    actual.trim_end() == expected.trim_end()
+}
+
+fn lines_match_trim(actual: &str, expected: &str) -> bool {
+    actual.trim() == expected.trim()
+}
+
+fn lines_match_normalized(actual: &str, expected: &str) -> bool {
+    normalize_patch_match_line(actual.trim()) == normalize_patch_match_line(expected.trim())
+}
+
+fn normalize_patch_match_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+            | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        })
+        .collect()
 }
 
 async fn read_patch_target(root: &Path, path: &Path) -> Result<(String, std::fs::Permissions)> {
@@ -2970,13 +3159,13 @@ mod tests {
             json!({
                 "type": "function",
                 "name": "apply_patch",
-                "description": "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files.",
+                "description": "Apply a workspace-confined patch that adds, updates, or deletes UTF-8 files. Update hunks use line-based matching, optional @@ context, and fuzzy whitespace matching.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "patch": {
                             "type": "string",
-                            "description": "Patch text using *** Begin Patch / *** End Patch blocks.",
+                            "description": "Patch text using *** Begin Patch / *** End Patch blocks. Update hunks start with @@ or @@ context and contain space, -, or + lines.",
                         },
                     },
                     "required": ["patch"],
@@ -3445,6 +3634,220 @@ mod tests {
             "pub fn created() {}\n"
         );
         assert!(!temp.join("obsolete.rs").exists());
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_uses_hunk_context_to_disambiguate_repeated_lines() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-context-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("multi.txt"),
+            "fn a\nx = 10\ny = 2\nfn b\nx = 10\ny = 20\n",
+        )
+        .unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: multi.txt\n",
+            "@@ fn b\n",
+            "-x = 10\n",
+            "+x = 11\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(temp.join("multi.txt")).unwrap(),
+            "fn a\nx = 10\ny = 2\nfn b\nx = 11\ny = 20\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_matches_repeated_hunks_in_order() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-ordered-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("repeat.txt"),
+            "first\nmarker\nmiddle\nmarker\nlast\n",
+        )
+        .unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: repeat.txt\n",
+            "@@\n",
+            "-marker\n",
+            "+first marker\n",
+            "@@\n",
+            "-marker\n",
+            "+second marker\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(temp.join("repeat.txt")).unwrap(),
+            "first\nfirst marker\nmiddle\nsecond marker\nlast\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_appends_insert_only_hunk() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-insert-only-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("insert.txt"), "alpha\nbeta\n").unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: insert.txt\n",
+            "@@\n",
+            "+omega\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(temp.join("insert.txt")).unwrap(),
+            "alpha\nbeta\nomega\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_falls_back_to_fuzzy_line_matching() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-fuzzy-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("fuzzy.txt"),
+            "line one  \nHe said \u{201C}hello\u{201D}\nend\n",
+        )
+        .unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: fuzzy.txt\n",
+            "@@\n",
+            "-line one\n",
+            "+line one changed\n",
+            "@@\n",
+            "-He said \"hello\"\n",
+            "+He said \"hi\"\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(temp.join("fuzzy.txt")).unwrap(),
+            "line one changed\nHe said \"hi\"\nend\n"
+        );
+
+        fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_uses_end_of_file_anchor() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-patch-eof-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("tail.txt"),
+            "start\nmarker\nmiddle\nmarker\nend\n",
+        )
+        .unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update File: tail.txt\n",
+            "@@\n",
+            "-marker\n",
+            "-end\n",
+            "+tail marker\n",
+            "+end\n",
+            "*** End of File\n",
+            "*** End Patch\n",
+        );
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+
+        let result = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: json!({ "patch": patch }).to_string(),
+            })
+            .await;
+
+        assert!(result.success, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(temp.join("tail.txt")).unwrap(),
+            "start\nmarker\nmiddle\ntail marker\nend\n"
+        );
 
         fs::remove_dir_all(&temp).unwrap();
     }

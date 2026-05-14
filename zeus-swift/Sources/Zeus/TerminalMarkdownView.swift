@@ -30,7 +30,7 @@ struct TerminalMarkdownView: View {
                 .foregroundStyle(TerminalPalette.primaryText)
         case let .heading(level, text):
             inlineText(text)
-                .font(CodexTypography.heading(level: level))
+                .font(TerminalTypography.heading(level: level))
                 .foregroundStyle(TerminalPalette.cyan)
                 .padding(.top, level == 1 ? 1 : 0)
         case let .unorderedList(items):
@@ -98,7 +98,7 @@ private struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let language, !language.isEmpty {
                 Text(language.lowercased())
-                    .font(CodexTypography.codeSmall)
+                    .font(TerminalTypography.codeSmall)
                     .foregroundStyle(TerminalPalette.cyan)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -108,21 +108,14 @@ private struct CodeBlockView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code.isEmpty ? " " : code)
-                    .font(CodexTypography.code)
+                    .font(TerminalTypography.code)
                     .foregroundStyle(TerminalPalette.primaryText)
                     .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 7)
             }
         }
-        .background(
-            Rectangle()
-                .fill(TerminalPalette.codeBackground.opacity(0.94))
-        )
-        .overlay(
-            Rectangle()
-                .stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1)
-        )
+        .terminalPanelChrome(background: TerminalPalette.codeBackground.opacity(0.94))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -112,7 +112,7 @@ private struct TerminalLineView: View {
             if isCacheStatsVisible {
                 ForEach(line.cacheStats.indices, id: \.self) { index in
                     Text(line.cacheStats[index].displayText)
-                        .font(CodexTypography.chatXSmall)
+                        .font(TerminalTypography.chatXSmall)
                         .foregroundStyle(TerminalPalette.dimText)
                 }
             }
@@ -193,8 +193,9 @@ private struct ToolCallLine: View {
                 }
             }
         }
-        .font(CodexTypography.chatSmall)
+        .font(TerminalTypography.chatSmall)
         .fixedSize(horizontal: false, vertical: true)
+        .terminalPanelChrome()
     }
 
     private func toolCell<Content: View>(

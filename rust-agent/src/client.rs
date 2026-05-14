@@ -15,6 +15,7 @@ use serde_json::value::RawValue;
 use std::borrow::Cow;
 #[cfg(test)]
 use std::io::Read;
+use std::time::Duration;
 
 use crate::agent_loop::CacheHealth;
 use crate::agent_loop::CacheStatus;
@@ -138,7 +139,6 @@ impl ChatGptClient {
     /// Returns an error if the HTTP client cannot be constructed.
     pub(crate) fn new(auth: AuthManager, config: ClientConfig) -> Result<Self> {
         let http = Client::builder()
-            .timeout(config.request_timeout())
             .build()
             .context("failed to build HTTP client")?;
 
@@ -334,7 +334,9 @@ impl ChatGptClient {
         }
 
         capture_codex_turn_state(response.headers(), turn_state);
-        let completion = read_assistant_text_stream(response, on_delta).await?;
+        let completion =
+            read_assistant_text_stream(response, self.config.stream_idle_timeout(), on_delta)
+                .await?;
         let cache_health = CacheHealth {
             model: model.to_string(),
             prompt_cache_key,
@@ -358,13 +360,25 @@ impl ChatGptClient {
 
 async fn read_assistant_text_stream(
     response: reqwest::Response,
+    stream_idle_timeout: Duration,
     mut on_delta: impl FnMut(&str) -> Result<()>,
 ) -> Result<StreamCompletion> {
     let mut state = AssistantText::default();
     let mut parser = SseDataParser::default();
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let Some(chunk) = tokio::time::timeout(stream_idle_timeout, stream.next())
+            .await
+            .with_context(|| {
+                format!(
+                    "idle timeout waiting for ChatGPT Codex response stream after {} seconds",
+                    stream_idle_timeout.as_secs()
+                )
+            })?
+        else {
+            break;
+        };
         let chunk = chunk.context("failed to read ChatGPT Codex response stream")?;
         parser.push_bytes(&chunk, &mut |data| state.handle_data(data, &mut on_delta))?;
     }
@@ -1012,7 +1026,6 @@ mod tests {
     use serde_json::json;
     use std::path::Path;
     use std::path::PathBuf;
-    use std::time::Duration;
     use std::time::Instant;
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
@@ -1354,6 +1367,75 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         assert!(auth_requests[0]
             .body
             .contains(r#""refresh_token":"refresh-old""#));
+
+        remove_parent(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn stream_idle_timeout_allows_total_response_longer_than_timeout() {
+        let auth_path = temp_auth_file("client-stream-idle-timeout");
+        let access = access_token(now_unix() + 600);
+        write_auth_file(&auth_path, "account-test", &access, "refresh-test");
+        let model_server = TestServer::new(vec![TestResponse::sse_chunks(
+            200,
+            vec![
+                (
+                    Duration::ZERO,
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n"
+                        .to_string(),
+                ),
+                (
+                    Duration::from_millis(50),
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"b\"}\n\n"
+                        .to_string(),
+                ),
+                (
+                    Duration::from_millis(50),
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"c\"}\n\n"
+                        .to_string(),
+                ),
+                (
+                    Duration::from_millis(50),
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"d\"}\n\n"
+                        .to_string(),
+                ),
+                (
+                    Duration::from_millis(50),
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"
+                        .to_string(),
+                ),
+            ],
+        )]);
+        let auth =
+            AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:1".to_string()).unwrap();
+        let client = ChatGptClient::new(
+            auth,
+            ClientConfig::new(
+                "instructions",
+                format!("{}/responses", model_server.url()),
+                "originator",
+                "version",
+                Duration::from_millis(120),
+                "stream-idle-timeout-test",
+            ),
+        )
+        .unwrap();
+        let messages = [ConversationMessage::user("hello")];
+
+        let response = client
+            .stream_conversation(
+                &messages,
+                &[],
+                true,
+                SessionId::new(7),
+                "gpt-test",
+                &mut |_| Ok(()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "abcd");
+        assert_eq!(model_server.requests().len(), 1);
 
         remove_parent(&auth_path);
     }

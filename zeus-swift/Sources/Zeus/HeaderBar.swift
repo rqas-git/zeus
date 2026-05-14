@@ -20,9 +20,9 @@ struct HeaderBar: View {
     var body: some View {
         HStack {
             Text("zeus")
-                .font(CodexTypography.chat)
+                .font(TerminalTypography.chat)
                 .foregroundStyle(TerminalPalette.dimText)
-                .padding(.leading, 66)
+                .padding(.leading, TerminalLayout.headerTitleLeadingPadding)
                 .allowsHitTesting(false)
 
             Spacer()
@@ -74,7 +74,7 @@ private struct SettingsDropdown: View {
                         .frame(width: 12)
 
                     Text(isLoggedIn ? "Login Status" : "Login")
-                        .font(CodexTypography.chatSmall)
+                        .font(TerminalTypography.chatSmall)
                         .foregroundStyle(TerminalPalette.primaryText)
                 }
                 .padding(.horizontal, 8)
@@ -85,15 +85,7 @@ private struct SettingsDropdown: View {
             .buttonStyle(TerminalMenuButtonStyle())
         }
         .fixedSize(horizontal: true, vertical: true)
-        .background(
-            Rectangle()
-                .fill(TerminalPalette.background)
-        )
-        .overlay(
-            Rectangle()
-                .stroke(TerminalPalette.border.opacity(0.45), lineWidth: 1)
-        )
-        .shadow(color: TerminalPalette.shadow.opacity(0.18), radius: 8, x: 0, y: 6)
+        .terminalDropdownChrome()
     }
 }
 

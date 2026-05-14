@@ -27,9 +27,9 @@ const DEFAULT_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 // backend request on every launch.
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const DEFAULT_INSTRUCTIONS: &str = "You are a concise assistant.";
-// Long enough for backend streaming setup under local network stalls, while
-// still bounding hung requests for terminal use.
-const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+// Match Codex's five-minute SSE idle budget without imposing a total timeout
+// on long-running model turns.
+const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
 // Prompt-window caps keep interactive requests small. Raising them can improve
 // recall but increases latency and prompt-cache churn.
 const DEFAULT_CONTEXT_MAX_MESSAGES: usize = 40;
@@ -108,7 +108,7 @@ pub(crate) struct ClientConfig {
     responses_url: String,
     originator: String,
     version: String,
-    request_timeout: Duration,
+    stream_idle_timeout: Duration,
     prompt_cache_namespace: String,
 }
 
@@ -116,19 +116,16 @@ impl ClientConfig {
     /// Loads client configuration from environment variables.
     ///
     /// # Errors
-    /// Returns an error if `RUST_AGENT_REQUEST_TIMEOUT_SECS` is invalid.
+    /// Returns an error if the configured stream idle timeout is invalid.
     pub(crate) fn from_env() -> Result<Self> {
-        let request_timeout_secs = env_parse_u64(
-            "RUST_AGENT_REQUEST_TIMEOUT_SECS",
-            DEFAULT_REQUEST_TIMEOUT_SECS,
-        )?;
+        let stream_idle_timeout_secs = env_parse_stream_idle_timeout_secs()?;
 
         Ok(Self {
             instructions: env_string("RUST_AGENT_INSTRUCTIONS", DEFAULT_INSTRUCTIONS),
             responses_url: env_string("RUST_AGENT_RESPONSES_URL", DEFAULT_CODEX_RESPONSES_URL),
             originator: env_string("RUST_AGENT_ORIGINATOR", DEFAULT_CODEX_ORIGINATOR),
             version: env_string("RUST_AGENT_VERSION", DEFAULT_CODEX_VERSION),
-            request_timeout: Duration::from_secs(request_timeout_secs),
+            stream_idle_timeout: Duration::from_secs(stream_idle_timeout_secs),
             prompt_cache_namespace: env_string("RUST_AGENT_PROMPT_CACHE_NAMESPACE", "rust-agent"),
         })
     }
@@ -140,7 +137,7 @@ impl ClientConfig {
         responses_url: impl Into<String>,
         originator: impl Into<String>,
         version: impl Into<String>,
-        request_timeout: Duration,
+        stream_idle_timeout: Duration,
         prompt_cache_namespace: impl Into<String>,
     ) -> Self {
         Self {
@@ -148,7 +145,7 @@ impl ClientConfig {
             responses_url: responses_url.into(),
             originator: originator.into(),
             version: version.into(),
-            request_timeout,
+            stream_idle_timeout,
             prompt_cache_namespace: prompt_cache_namespace.into(),
         }
     }
@@ -173,9 +170,9 @@ impl ClientConfig {
         &self.version
     }
 
-    /// Returns the total request timeout.
-    pub(crate) fn request_timeout(&self) -> Duration {
-        self.request_timeout
+    /// Returns the maximum time to wait for the next streamed SSE chunk.
+    pub(crate) const fn stream_idle_timeout(&self) -> Duration {
+        self.stream_idle_timeout
     }
 
     /// Builds the stable per-session prompt-cache routing key.
@@ -191,7 +188,7 @@ impl Default for ClientConfig {
             responses_url: DEFAULT_CODEX_RESPONSES_URL.to_string(),
             originator: DEFAULT_CODEX_ORIGINATOR.to_string(),
             version: DEFAULT_CODEX_VERSION.to_string(),
-            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            stream_idle_timeout: Duration::from_secs(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
             prompt_cache_namespace: "rust-agent".to_string(),
         }
     }
@@ -1114,6 +1111,24 @@ fn env_parse_u64(name: &str, default: u64) -> Result<u64> {
     parse_env(name, default)
 }
 
+fn env_parse_stream_idle_timeout_secs() -> Result<u64> {
+    if std::env::var("RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return env_parse_u64(
+            "RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS",
+            DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
+        );
+    }
+
+    env_parse_u64(
+        "RUST_AGENT_REQUEST_TIMEOUT_SECS",
+        DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
+    )
+}
+
 fn env_parse_usize(name: &str, default: usize) -> Result<usize> {
     parse_env(name, default)
 }
@@ -1197,6 +1212,14 @@ mod tests {
     #[test]
     fn prompt_cache_key_is_stable_per_session() {
         assert_eq!(ClientConfig::default().prompt_cache_key(7), "rust-agent-7");
+    }
+
+    #[test]
+    fn default_stream_idle_timeout_matches_codex_stream_budget() {
+        assert_eq!(
+            ClientConfig::default().stream_idle_timeout(),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]
