@@ -25,7 +25,7 @@ enum TerminalTypography {
 
     static func heading(level: Int) -> Font {
         switch level {
-        case 1: .custom(fontNameSemiBold, size: 14)
+        case 1: .custom(fontNameSemiBold, size: 14.5)
         case 2: .custom(fontNameSemiBold, size: 13)
         default: .custom(fontNameSemiBold, size: chatSize)
         }
