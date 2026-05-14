@@ -93,7 +93,7 @@ final class ChatViewModel {
     private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
     private static let assistantDisplayFlushNanoseconds: UInt64 = 33_000_000
     private static let assistantDisplayImmediateFlushCharacters = 2_000
-    private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
+    private static let assistantScrollThrottleSeconds: TimeInterval = 0.08
     @ObservationIgnored private let server: any AgentServerProtocol
     @ObservationIgnored private let auth: any AgentAuthProtocol
     @ObservationIgnored private var client: (any AgentClientProtocol)?

@@ -22,8 +22,12 @@ struct TranscriptView: View {
                             isSearchMatch: searchMatchLineIDs.contains(line.id),
                             isSelectedSearchMatch: selectedSearchLineID == line.id
                         )
+                            .equatable()
                             .id(line.id)
                     }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(TranscriptScrollID.bottom)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, 6)
@@ -31,8 +35,11 @@ struct TranscriptView: View {
             .scrollIndicators(.hidden)
             .onChange(of: scrollTarget) { _, target in
                 guard selectedSearchLineID == nil else { return }
-                guard let target else { return }
-                proxy.scrollTo(target.lineID, anchor: .bottom)
+                guard target != nil else { return }
+                Task { @MainActor in
+                    await Task.yield()
+                    proxy.scrollTo(TranscriptScrollID.bottom, anchor: .bottom)
+                }
             }
             .onChange(of: selectedSearchLineID) { _, lineID in
                 guard let lineID else { return }
@@ -45,7 +52,11 @@ struct TranscriptView: View {
     }
 }
 
-private struct TerminalLineView: View {
+private enum TranscriptScrollID {
+    static let bottom = "transcript-bottom"
+}
+
+private struct TerminalLineView: View, Equatable {
     let line: TranscriptLine
     let streamingStream: ActiveAssistantStream?
     let isCacheStatsVisible: Bool
@@ -81,19 +92,29 @@ private struct TerminalLineView: View {
         }
     }
 
+    @ViewBuilder
     private var lineText: some View {
-        Group {
-            if line.kind == .tool, let toolCall = line.toolCall {
-                ToolCallLine(toolCall: toolCall)
-            } else if line.kind == .assistant {
-                assistantLine
-            } else {
-                Text(line.text.isEmpty ? " " : line.text)
-                    .foregroundStyle(textColor)
-            }
+        if line.isStreaming {
+            lineTextContent
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.disabled)
+        } else {
+            lineTextContent
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
         }
-        .fixedSize(horizontal: false, vertical: true)
-        .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private var lineTextContent: some View {
+        if line.kind == .tool, let toolCall = line.toolCall {
+            ToolCallLine(toolCall: toolCall)
+        } else if line.kind == .assistant {
+            assistantLine
+        } else {
+            Text(line.text.isEmpty ? " " : line.text)
+                .foregroundStyle(textColor)
+        }
     }
 
     private var assistantLine: some View {
