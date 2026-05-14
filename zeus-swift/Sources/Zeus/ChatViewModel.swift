@@ -91,6 +91,8 @@ final class ChatViewModel {
     }
 
     private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
+    private static let assistantDisplayFlushNanoseconds: UInt64 = 33_000_000
+    private static let assistantDisplayImmediateFlushCharacters = 2_000
     private static let assistantScrollThrottleSeconds: TimeInterval = 0.12
     @ObservationIgnored private let server: any AgentServerProtocol
     @ObservationIgnored private let auth: any AgentAuthProtocol
@@ -110,8 +112,11 @@ final class ChatViewModel {
     @ObservationIgnored private var contextClearTask: Task<Void, Never>?
     @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingAssistantLineFragment = ""
-    @ObservationIgnored private var assistantStreamText = ""
+    @ObservationIgnored private var assistantDisplayFlushTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingAssistantDisplayFragment = ""
+    @ObservationIgnored private var assistantStreamChunks: [StreamingTextChunk] = []
+    @ObservationIgnored private var assistantStreamTail = ""
+    @ObservationIgnored private var nextAssistantStreamChunkID = 0
     @ObservationIgnored private var pendingCacheStats: [ResponseCacheStats] = []
     @ObservationIgnored private var pendingMarkdownRenders: [UUID: MarkdownRenderSnapshot] = [:]
     @ObservationIgnored private var isSessionEventStreamConnected = false
@@ -144,6 +149,7 @@ final class ChatViewModel {
         contextClearTask?.cancel()
         searchRefreshTask?.cancel()
         markdownRenderTask?.cancel()
+        assistantDisplayFlushTask?.cancel()
         auth.cancelLogin()
         server.stop()
     }
@@ -242,8 +248,7 @@ final class ChatViewModel {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         activeAssistantStream = nil
-        assistantStreamText = ""
-        clearPendingAssistantDelta()
+        resetAssistantStreamBuffers()
         lastAssistantScrollRequest = .distantPast
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
@@ -311,6 +316,8 @@ final class ChatViewModel {
         searchRefreshTask = nil
         markdownRenderTask?.cancel()
         markdownRenderTask = nil
+        assistantDisplayFlushTask?.cancel()
+        assistantDisplayFlushTask = nil
         pendingMarkdownRenders.removeAll(keepingCapacity: true)
         auth.cancelLogin()
         server.stop()
@@ -734,45 +741,41 @@ final class ChatViewModel {
         guard !delta.isEmpty else { return }
         _ = ensureAssistantLine()
 
-        pendingAssistantLineFragment.append(delta)
-
-        var flushEnd: String.Index?
-        var cursor = pendingAssistantLineFragment.startIndex
-        while let newline = pendingAssistantLineFragment[cursor...].firstIndex(of: "\n") {
-            let lineEnd = pendingAssistantLineFragment.index(after: newline)
-            flushEnd = lineEnd
-            cursor = lineEnd
+        pendingAssistantDisplayFragment.append(delta)
+        if pendingAssistantDisplayFragment.utf8.count
+            >= Self.assistantDisplayImmediateFlushCharacters {
+            flushPendingAssistantDelta()
+        } else {
+            scheduleAssistantDisplayFlush()
         }
-
-        guard let flushEnd else { return }
-
-        let completeLines = String(pendingAssistantLineFragment[..<flushEnd])
-        pendingAssistantLineFragment.removeSubrange(..<flushEnd)
-        applyAssistantDelta(completeLines)
     }
 
     private func flushPendingAssistantDelta() {
-        guard !pendingAssistantLineFragment.isEmpty else { return }
-        let delta = pendingAssistantLineFragment
-        pendingAssistantLineFragment = ""
+        assistantDisplayFlushTask?.cancel()
+        assistantDisplayFlushTask = nil
+        guard !pendingAssistantDisplayFragment.isEmpty else { return }
+        let delta = pendingAssistantDisplayFragment
+        pendingAssistantDisplayFragment = ""
         applyAssistantDelta(delta)
     }
 
     private func clearPendingAssistantDelta() {
-        pendingAssistantLineFragment = ""
+        assistantDisplayFlushTask?.cancel()
+        assistantDisplayFlushTask = nil
+        pendingAssistantDisplayFragment = ""
     }
 
     private func applyAssistantDelta(_ delta: String) {
         let id = ensureAssistantLine()
         guard let index = lineIndex(for: id) else { return }
         if assistantPlaceholderLineID == id {
-            assistantStreamText = ""
-        } else if assistantStreamText.isEmpty {
-            assistantStreamText = lines[index].text
+            resetAssistantStreamContent()
+        } else if isAssistantStreamContentEmpty {
+            appendToAssistantStream(lines[index].text)
         }
         assistantPlaceholderLineID = nil
-        assistantStreamText.append(contentsOf: delta)
-        activeAssistantStream = ActiveAssistantStream(lineID: id, text: assistantStreamText)
+        appendToAssistantStream(delta)
+        publishAssistantStream(lineID: id)
         if !lines[index].isStreaming {
             lines[index].isStreaming = true
         }
@@ -780,19 +783,81 @@ final class ChatViewModel {
         requestStreamingScrollTo(id)
     }
 
+    private func scheduleAssistantDisplayFlush() {
+        guard assistantDisplayFlushTask == nil else { return }
+        assistantDisplayFlushTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.assistantDisplayFlushNanoseconds)
+            } catch {
+                return
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.assistantDisplayFlushTask = nil
+                self.flushPendingAssistantDelta()
+            }
+        }
+    }
+
+    private var isAssistantStreamContentEmpty: Bool {
+        assistantStreamChunks.isEmpty && assistantStreamTail.isEmpty
+    }
+
+    private func resetAssistantStreamBuffers() {
+        clearPendingAssistantDelta()
+        resetAssistantStreamContent()
+    }
+
+    private func resetAssistantStreamContent() {
+        assistantStreamChunks.removeAll(keepingCapacity: true)
+        assistantStreamTail = ""
+        nextAssistantStreamChunkID = 0
+    }
+
+    private func appendToAssistantStream(_ text: String) {
+        guard !text.isEmpty else { return }
+        var remainder = text[...]
+
+        while let newline = remainder.firstIndex(of: "\n") {
+            assistantStreamTail += String(remainder[..<newline])
+            assistantStreamChunks.append(StreamingTextChunk(
+                id: nextAssistantStreamChunkID,
+                text: assistantStreamTail
+            ))
+            nextAssistantStreamChunkID += 1
+            assistantStreamTail = ""
+            remainder = remainder[remainder.index(after: newline)...]
+        }
+
+        assistantStreamTail += String(remainder)
+    }
+
+    private func publishAssistantStream(lineID: UUID) {
+        activeAssistantStream = ActiveAssistantStream(
+            lineID: lineID,
+            chunks: assistantStreamChunks,
+            tail: assistantStreamTail
+        )
+    }
+
     private func replaceAssistantText(_ text: String) {
         clearPendingAssistantDelta()
         let id = ensureAssistantLine()
         guard let index = lineIndex(for: id) else { return }
         lines[index].text = text
-        lines[index].isStreaming = false
         lines[index].renderedMarkdown = nil
         assistantPlaceholderLineID = nil
-        if activeAssistantStream?.lineID == id {
-            activeAssistantStream = nil
+        resetAssistantStreamContent()
+        appendToAssistantStream(text)
+        publishAssistantStream(lineID: id)
+        if !lines[index].isStreaming {
+            lines[index].isStreaming = true
         }
-        assistantStreamText = ""
-        scheduleMarkdownRendering(for: lines[index])
+        scheduleMarkdownRendering(MarkdownRenderSnapshot(
+            lineID: id,
+            text: text,
+            finalizesStreamingLine: true
+        ))
         refreshSearchMatches()
         requestScrollTo(id)
     }
@@ -814,8 +879,8 @@ final class ChatViewModel {
             ? activeAssistantStream?.text ?? ""
             : lines[index].text
         guard assistantPlaceholderLineID == id || visibleText.isEmpty else { return }
-        activeAssistantStream = ActiveAssistantStream(lineID: id, text: text)
-        assistantStreamText = ""
+        activeAssistantStream = ActiveAssistantStream(lineID: id, chunks: [], tail: text)
+        resetAssistantStreamContent()
         if !lines[index].isStreaming {
             lines[index].isStreaming = true
         }
@@ -832,7 +897,7 @@ final class ChatViewModel {
         if activeAssistantStream?.lineID == assistantPlaceholderLineID {
             activeAssistantStream = nil
         }
-        assistantStreamText = ""
+        resetAssistantStreamContent()
         removeLine(at: index)
         self.assistantPlaceholderLineID = nil
         refreshSearchMatches()
@@ -862,7 +927,7 @@ final class ChatViewModel {
             activeAssistantStream = nil
         }
         if !isStreaming {
-            assistantStreamText = ""
+            resetAssistantStreamContent()
         }
         lines[index].isStreaming = isStreaming
         if isStreaming {
@@ -999,7 +1064,7 @@ final class ChatViewModel {
             if activeAssistantStream?.lineID == assistantPlaceholderLineID {
                 activeAssistantStream = nil
             }
-            assistantStreamText = ""
+            resetAssistantStreamContent()
             self.assistantPlaceholderLineID = nil
             if currentAssistantLineID == assistantPlaceholderLineID {
                 currentAssistantLineID = nil
@@ -1010,7 +1075,7 @@ final class ChatViewModel {
         if activeAssistantStream?.lineID == assistantPlaceholderLineID {
             activeAssistantStream = nil
         }
-        assistantStreamText = ""
+        resetAssistantStreamContent()
         removeLine(at: index)
         self.assistantPlaceholderLineID = nil
         if currentAssistantLineID == assistantPlaceholderLineID {
@@ -1035,8 +1100,7 @@ final class ChatViewModel {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
         activeAssistantStream = nil
-        assistantStreamText = ""
-        clearPendingAssistantDelta()
+        resetAssistantStreamBuffers()
         pendingCacheStats.removeAll(keepingCapacity: true)
         toolLineIDsByCallID.removeAll(keepingCapacity: true)
         toolDisplaysByCallID.removeAll(keepingCapacity: true)
@@ -1100,9 +1164,17 @@ final class ChatViewModel {
     private func scheduleMarkdownRendering(for lines: [TranscriptLine]) {
         let snapshots = lines.compactMap { line -> MarkdownRenderSnapshot? in
             guard line.kind == .assistant, !line.text.isEmpty else { return nil }
-            return MarkdownRenderSnapshot(lineID: line.id, text: line.text)
+            return MarkdownRenderSnapshot(
+                lineID: line.id,
+                text: line.text,
+                finalizesStreamingLine: false
+            )
         }
         scheduleMarkdownRendering(snapshots)
+    }
+
+    private func scheduleMarkdownRendering(_ snapshot: MarkdownRenderSnapshot) {
+        scheduleMarkdownRendering([snapshot])
     }
 
     private func scheduleMarkdownRendering(_ snapshots: [MarkdownRenderSnapshot]) {
@@ -1124,6 +1196,7 @@ final class ChatViewModel {
                     MarkdownRenderAssignment(
                         lineID: snapshot.lineID,
                         text: snapshot.text,
+                        finalizesStreamingLine: snapshot.finalizesStreamingLine,
                         markdown: RenderedTerminalMarkdown(text: snapshot.text)
                     )
                 }
@@ -1137,11 +1210,19 @@ final class ChatViewModel {
         for assignment in assignments {
             guard let index = lineIndex(for: assignment.lineID),
                   lines[index].kind == .assistant,
-                  lines[index].text == assignment.text,
-                  !lines[index].isStreaming else {
+                  lines[index].text == assignment.text else {
                 continue
             }
-            lines[index].renderedMarkdown = assignment.markdown
+            if assignment.finalizesStreamingLine {
+                lines[index].renderedMarkdown = assignment.markdown
+                lines[index].isStreaming = false
+                if activeAssistantStream?.lineID == assignment.lineID {
+                    activeAssistantStream = nil
+                    resetAssistantStreamContent()
+                }
+            } else if !lines[index].isStreaming {
+                lines[index].renderedMarkdown = assignment.markdown
+            }
         }
 
         markdownRenderTask = nil
@@ -1574,11 +1655,13 @@ final class ChatViewModel {
 private struct MarkdownRenderSnapshot: Sendable {
     let lineID: UUID
     let text: String
+    let finalizesStreamingLine: Bool
 }
 
 private struct MarkdownRenderAssignment: Sendable {
     let lineID: UUID
     let text: String
+    let finalizesStreamingLine: Bool
     let markdown: RenderedTerminalMarkdown
 }
 

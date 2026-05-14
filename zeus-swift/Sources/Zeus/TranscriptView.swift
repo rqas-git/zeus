@@ -15,8 +15,8 @@ struct TranscriptView: View {
                     ForEach(lines) { line in
                         TerminalLineView(
                             line: line,
-                            streamingText: activeAssistantStream?.lineID == line.id
-                                ? activeAssistantStream?.text
+                            streamingStream: activeAssistantStream?.lineID == line.id
+                                ? activeAssistantStream
                                 : nil,
                             isCacheStatsVisible: isCacheStatsVisible,
                             isSearchMatch: searchMatchLineIDs.contains(line.id),
@@ -47,7 +47,7 @@ struct TranscriptView: View {
 
 private struct TerminalLineView: View {
     let line: TranscriptLine
-    let streamingText: String?
+    let streamingStream: ActiveAssistantStream?
     let isCacheStatsVisible: Bool
     let isSearchMatch: Bool
     let isSelectedSearchMatch: Bool
@@ -99,9 +99,7 @@ private struct TerminalLineView: View {
     private var assistantLine: some View {
         VStack(alignment: .leading, spacing: 4) {
             if line.isStreaming {
-                let text = streamingText ?? line.text
-                Text(text.isEmpty ? " " : text)
-                    .foregroundStyle(TerminalPalette.primaryText)
+                StreamingAssistantText(stream: streamingStream, fallbackText: line.text)
             } else if let markdown = line.renderedMarkdown {
                 TerminalMarkdownView(markdown: markdown)
             } else {
@@ -152,6 +150,31 @@ private struct TerminalLineView: View {
         default:
             return TerminalPalette.primaryText
         }
+    }
+}
+
+private struct StreamingAssistantText: View {
+    let stream: ActiveAssistantStream?
+    let fallbackText: String
+
+    var body: some View {
+        if let stream {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(stream.chunks) { chunk in
+                    text(chunk.text)
+                }
+                if !stream.tail.isEmpty || stream.chunks.isEmpty {
+                    text(stream.tail)
+                }
+            }
+        } else {
+            text(fallbackText)
+        }
+    }
+
+    private func text(_ value: String) -> some View {
+        Text(value.isEmpty ? " " : value)
+            .foregroundStyle(TerminalPalette.primaryText)
     }
 }
 

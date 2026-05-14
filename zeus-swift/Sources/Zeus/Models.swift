@@ -107,6 +107,7 @@ struct TranscriptLine: Identifiable, Equatable {
             && lhs.toolCall == rhs.toolCall
             && lhs.cacheStats == rhs.cacheStats
             && lhs.isStreaming == rhs.isStreaming
+            && lhs.renderedMarkdown == rhs.renderedMarkdown
     }
 }
 
@@ -117,6 +118,17 @@ struct TranscriptScrollTarget: Equatable {
 
 struct ActiveAssistantStream: Equatable {
     let lineID: UUID
+    let chunks: [StreamingTextChunk]
+    let tail: String
+
+    var text: String {
+        let completedLines = chunks.map { "\($0.text)\n" }.joined()
+        return completedLines + tail
+    }
+}
+
+struct StreamingTextChunk: Identifiable, Equatable {
+    let id: Int
     let text: String
 }
 
