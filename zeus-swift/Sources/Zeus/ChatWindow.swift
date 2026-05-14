@@ -12,6 +12,8 @@ struct ChatWindow: View {
             VStack(spacing: 0) {
                 HeaderBar(
                     isLoggedIn: viewModel.isLoggedIn,
+                    canClearContext: viewModel.canClearContext,
+                    onClearContext: viewModel.clearContext,
                     onLogin: viewModel.startLogin,
                     onLoginStatus: viewModel.showLoginStatus
                 )

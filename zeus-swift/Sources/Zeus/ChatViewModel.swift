@@ -45,17 +45,18 @@ final class ChatViewModel {
     private(set) var isSelectingPermissions = false
     private(set) var isSwitchingBranch = false
     private(set) var isRunningTerminalCommand = false
+    private(set) var isClearingContext = false
 
     var canChangeModel: Bool {
-        isReady && !isLoggingIn
+        isReady && !isLoggingIn && !isClearingContext
     }
 
     var canChangeEffort: Bool {
-        isReady && !isLoggingIn
+        isReady && !isLoggingIn && !isClearingContext
     }
 
     var canChangePermissions: Bool {
-        isReady && !isLoggingIn
+        isReady && !isLoggingIn && !isClearingContext
     }
 
     var canChangeBranch: Bool {
@@ -66,6 +67,18 @@ final class ChatViewModel {
             && !isLoggingIn
             && !isSwitchingBranch
             && !isRunningTerminalCommand
+            && !isClearingContext
+    }
+
+    var canClearContext: Bool {
+        isReady
+            && !isSending
+            && !isLoggingIn
+            && !isSwitchingBranch
+            && !isRunningTerminalCommand
+            && !isClearingContext
+            && client != nil
+            && sessionID != nil
     }
 
     var inputPrompt: String {
@@ -94,6 +107,7 @@ final class ChatViewModel {
     @ObservationIgnored private var loginTask: Task<Void, Never>?
     @ObservationIgnored private var branchSwitchTask: Task<Void, Never>?
     @ObservationIgnored private var terminalTask: Task<Void, Never>?
+    @ObservationIgnored private var contextClearTask: Task<Void, Never>?
     @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
     @ObservationIgnored private var pendingAssistantLineFragment = ""
@@ -127,6 +141,7 @@ final class ChatViewModel {
         loginTask?.cancel()
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
+        contextClearTask?.cancel()
         searchRefreshTask?.cancel()
         markdownRenderTask?.cancel()
         auth.cancelLogin()
@@ -171,6 +186,10 @@ final class ChatViewModel {
     func sendDraft() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+        guard !isClearingContext else {
+            append(kind: .status, text: "context clear already running")
+            return
+        }
 
         if isTerminalPassthroughEnabled {
             runTerminalCommand(message)
@@ -286,6 +305,8 @@ final class ChatViewModel {
         branchSwitchTask = nil
         terminalTask?.cancel()
         terminalTask = nil
+        contextClearTask?.cancel()
+        contextClearTask = nil
         searchRefreshTask?.cancel()
         searchRefreshTask = nil
         markdownRenderTask?.cancel()
@@ -334,6 +355,44 @@ final class ChatViewModel {
 
     func clearDraft() {
         draft = ""
+    }
+
+    func clearContext() {
+        guard canClearContext else { return }
+        guard let client, let previousSessionID = sessionID else {
+            append(kind: .error, text: "No rust-agent session is available.")
+            return
+        }
+
+        isClearingContext = true
+        contextClearTask = Task {
+            defer {
+                isClearingContext = false
+                contextClearTask = nil
+            }
+            do {
+                let session = try await client.createSession()
+                sessionID = session.sessionID
+                applySessionModel(session.model)
+                applySessionPermissions(session.toolPolicy ?? selectedPermission)
+                resetActiveTranscriptState()
+                tokenUsage = "0 / 272k tokens"
+                replaceSubmittedMessages(with: [])
+                replaceTranscriptLines([
+                    TranscriptLine(
+                        kind: .status,
+                        text: "cleared conversation with id \(previousSessionID)"
+                    )
+                ])
+                refreshSearchMatches(debounce: false)
+                requestScrollToLastLine()
+                try await startSessionEventStream(sessionID: session.sessionID, client: client)
+            } catch {
+                if !Self.isCancellation(error) {
+                    append(kind: .error, text: error.localizedDescription)
+                }
+            }
+        }
     }
 
     func selectPreviousSubmittedMessage() -> Bool {
@@ -422,6 +481,10 @@ final class ChatViewModel {
     }
 
     private func runTerminalCommand(_ command: String) {
+        guard !isClearingContext else {
+            append(kind: .status, text: "context clear already running")
+            return
+        }
         guard !isRunningTerminalCommand else {
             append(kind: .status, text: "terminal command already running")
             return
@@ -465,6 +528,10 @@ final class ChatViewModel {
     }
 
     private func restoreSession(_ targetSessionID: UInt64) {
+        guard !isClearingContext else {
+            append(kind: .status, text: "context clear already running")
+            return
+        }
         guard !isSending else {
             append(kind: .status, text: "turn already running")
             return
@@ -955,19 +1022,27 @@ final class ChatViewModel {
         sessionID = restored.sessionID
         applySessionModel(restored.model)
         applySessionPermissions(restored.toolPolicy)
-        currentAssistantLineID = nil
-        assistantPlaceholderLineID = nil
-        activeAssistantStream = nil
-        assistantStreamText = ""
-        pendingCacheStats.removeAll(keepingCapacity: true)
-        toolLineIDsByCallID.removeAll(keepingCapacity: true)
-        toolDisplaysByCallID.removeAll(keepingCapacity: true)
+        resetActiveTranscriptState()
         let restoredLines = transcriptLines(from: restored.messages)
         replaceTranscriptLines(restoredLines)
         scheduleMarkdownRendering(for: restoredLines)
         replaceSubmittedMessages(with: restored.messages)
         refreshSearchMatches()
         requestScrollToLastLine()
+    }
+
+    private func resetActiveTranscriptState() {
+        currentAssistantLineID = nil
+        assistantPlaceholderLineID = nil
+        activeAssistantStream = nil
+        assistantStreamText = ""
+        clearPendingAssistantDelta()
+        pendingCacheStats.removeAll(keepingCapacity: true)
+        toolLineIDsByCallID.removeAll(keepingCapacity: true)
+        toolDisplaysByCallID.removeAll(keepingCapacity: true)
+        pendingMarkdownRenders.removeAll(keepingCapacity: true)
+        markdownRenderTask?.cancel()
+        markdownRenderTask = nil
     }
 
     private func transcriptLines(from records: [TranscriptRecord]) -> [TranscriptLine] {

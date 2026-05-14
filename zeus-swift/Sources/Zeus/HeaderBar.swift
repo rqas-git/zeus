@@ -13,6 +13,8 @@ struct TerminalBackground: View {
 
 struct HeaderBar: View {
     let isLoggedIn: Bool
+    let canClearContext: Bool
+    let onClearContext: () -> Void
     let onLogin: () -> Void
     let onLoginStatus: () -> Void
     @State private var isShowingSettings = false
@@ -27,19 +29,39 @@ struct HeaderBar: View {
 
             Spacer()
 
-            Button {
-                isShowingSettings.toggle()
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(
-                        isShowingSettings ? TerminalPalette.cyan : TerminalPalette.dimText
-                    )
-                    .frame(width: 18, height: 16)
-                    .contentShape(Rectangle())
+            HStack(spacing: 2) {
+                Button {
+                    isShowingSettings = false
+                    onClearContext()
+                } label: {
+                    Image(systemName: "eraser")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(
+                            canClearContext
+                                ? TerminalPalette.dimText
+                                : TerminalPalette.dimText.opacity(0.35)
+                        )
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canClearContext)
+                .help("Clear Context")
+
+                Button {
+                    isShowingSettings.toggle()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(
+                            isShowingSettings ? TerminalPalette.cyan : TerminalPalette.dimText
+                        )
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
             }
-            .buttonStyle(.plain)
-            .help("Settings")
         }
         .frame(height: 18)
         .overlay(alignment: .topTrailing) {
@@ -88,4 +110,3 @@ private struct SettingsDropdown: View {
         .terminalDropdownChrome()
     }
 }
-
