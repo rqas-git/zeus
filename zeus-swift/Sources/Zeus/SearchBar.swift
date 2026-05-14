@@ -36,7 +36,6 @@ struct SearchBar: View {
         .font(TerminalTypography.chatSmall)
         .frame(height: TerminalLayout.searchHeight)
         .padding(.horizontal, 8)
-        .background(Rectangle().fill(TerminalPalette.backgroundLow))
-        .overlay(Rectangle().stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1))
+        .terminalPanelChrome()
     }
 }

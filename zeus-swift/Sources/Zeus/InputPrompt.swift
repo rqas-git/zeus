@@ -45,7 +45,6 @@ struct InputPrompt: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Rectangle().fill(TerminalPalette.backgroundLow))
-        .overlay(Rectangle().stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1))
+        .terminalPanelChrome()
     }
 }

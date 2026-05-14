@@ -115,14 +115,7 @@ private struct CodeBlockView: View {
                     .padding(.vertical, 7)
             }
         }
-        .background(
-            Rectangle()
-                .fill(TerminalPalette.codeBackground.opacity(0.94))
-        )
-        .overlay(
-            Rectangle()
-                .stroke(TerminalPalette.border.opacity(0.40), lineWidth: 1)
-        )
+        .terminalPanelChrome(background: TerminalPalette.codeBackground.opacity(0.94))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
