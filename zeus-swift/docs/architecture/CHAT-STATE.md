@@ -29,15 +29,16 @@ tasks are marked `@ObservationIgnored`.
    durable records.
 8. Transcript search refreshes are debounced and scan line snapshots off the
    main actor.
-9. Terminal passthrough sends commands to `terminal:run` and appends bounded
-   command output to the transcript.
+9. Terminal passthrough applies the selected permission policy, sends commands
+   to `terminal:run`, and appends bounded command output to the transcript.
 
 ## Responsibilities
 
 - Own readiness, sending, login, branch-switch, terminal, and cancellation flags.
 - Own selected model, reasoning effort, tool permission, workspace, and branch
   options.
-- Apply selected model and permission before the next model turn.
+- Apply selected model and permission before the next model turn, and apply the
+  selected permission before terminal passthrough commands.
 - Keep backend branch switches in the backend API path.
 - Keep prompt-history and transcript-search behavior local to the frontend.
 - Translate `AgentServerEvent` values into transcript lines.

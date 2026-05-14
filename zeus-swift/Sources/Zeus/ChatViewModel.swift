@@ -448,6 +448,10 @@ final class ChatViewModel {
         let rootURL = workspace.url
         terminalTask = Task {
             do {
+                try await applySelectedPermissionsForNextTurn(
+                    client: client,
+                    sessionID: sessionID
+                )
                 let result = try await client.runTerminalCommand(
                     sessionID: sessionID,
                     command: command
