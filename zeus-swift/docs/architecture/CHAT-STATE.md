@@ -12,11 +12,10 @@ tasks are marked `@ObservationIgnored`.
    creates a session.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
-3. Assistant text deltas are buffered until complete newline-terminated lines
-   are available before updating observed transcript state, with any final
-   partial line flushed at turn boundaries. The active assistant line renders as
-   plain text while streaming, then stores parsed Markdown blocks after
-   completion.
+3. Assistant text deltas are display-buffered on a short cadence, preserving
+   completed line chunks while only the active tail changes. The active
+   assistant line renders as plain text while streaming, then commits parsed
+   Markdown blocks with the final text at completion.
 4. Tool-call start and completion events upsert tool transcript rows by call id.
    If the active assistant row is only a synthetic placeholder, the placeholder
    is removed before the first tool row is inserted so the transcript stays in
@@ -56,7 +55,8 @@ tasks are marked `@ObservationIgnored`.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
 - `contextClearTask` owns fresh-session creation for the clear-context action.
-- Assistant text line buffering is synchronous within the active model turn.
+- Assistant text display buffering is synchronous within the active model turn,
+  with a short main-actor flush task for smoother partial-line rendering.
 - `searchRefreshTask` debounces transcript search updates.
 
 Tasks are cancelled on deinit and when a newer operation supersedes the old
