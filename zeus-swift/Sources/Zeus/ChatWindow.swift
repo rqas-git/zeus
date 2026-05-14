@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ChatWindow: View {
-    @Bindable var viewModel: ChatViewModel
+    let viewModel: ChatViewModel
     @State private var footerMenuController = FooterMenuController()
 
     var body: some View {
@@ -10,93 +10,17 @@ struct ChatWindow: View {
             TerminalBackground()
 
             VStack(spacing: 0) {
-                HeaderBar(
-                    isLoggedIn: viewModel.isLoggedIn,
-                    canClearContext: viewModel.canClearContext,
-                    onClearContext: viewModel.clearContext,
-                    onLogin: viewModel.startLogin,
-                    onLoginStatus: viewModel.showLoginStatus
+                HeaderSection(viewModel: viewModel)
+                SearchSection(viewModel: viewModel)
+                TranscriptSection(viewModel: viewModel)
+                InputSection(
+                    viewModel: viewModel,
+                    footerMenuController: footerMenuController
                 )
-
-                if viewModel.isSearchVisible {
-                    SearchBar(
-                        text: Binding(
-                            get: { viewModel.searchQuery },
-                            set: viewModel.setSearchQuery
-                        ),
-                        resultSummary: viewModel.searchResultSummary,
-                        onPrevious: viewModel.selectPreviousSearchMatch,
-                        onNext: viewModel.selectNextSearchMatch,
-                        onClose: viewModel.closeSearch
-                    )
-                    .padding(.top, TerminalLayout.inputTopPadding)
-                }
-
-                TranscriptView(
-                    lines: viewModel.lines,
-                    activeAssistantStream: viewModel.activeAssistantStream,
-                    isCacheStatsVisible: viewModel.showCacheStats,
-                    searchMatchLineIDs: viewModel.searchMatchLineIDs,
-                    selectedSearchLineID: viewModel.selectedSearchLineID,
-                    scrollTarget: viewModel.transcriptScrollTarget
+                FooterSection(
+                    viewModel: viewModel,
+                    footerMenuController: footerMenuController
                 )
-                .padding(.top, TerminalLayout.transcriptTopPadding)
-
-                InputPrompt(
-                    text: $viewModel.draft,
-                    prompt: viewModel.inputPrompt,
-                    placeholder: viewModel.inputPlaceholder,
-                    onSubmit: viewModel.sendDraft,
-                    onHistoryPrevious: viewModel.selectPreviousSubmittedMessage,
-                    onHistoryNext: viewModel.selectNextSubmittedMessage,
-                    onMoveDownFromCurrent: { footerMenuController.focusFirstMenu(viewModel: viewModel) },
-                    isCancelVisible: viewModel.canCancelTurn,
-                    onCancel: viewModel.cancelCurrentTurn
-                )
-                .padding(.top, TerminalLayout.inputTopPadding)
-
-                FooterBar(
-                    workspace: viewModel.workspace,
-                    branch: menuConfig(
-                        .branch,
-                        title: viewModel.workspace.branch,
-                        selectedOption: viewModel.workspace.branch,
-                        isEnabled: viewModel.canChangeBranch,
-                        enabledColor: TerminalPalette.green,
-                        help: "Branch",
-                        onSelect: viewModel.selectBranch
-                    ),
-                    model: menuConfig(
-                        .model,
-                        title: viewModel.model,
-                        selectedOption: viewModel.selectedModel,
-                        isEnabled: viewModel.canChangeModel,
-                        optionTitle: viewModel.displayModel,
-                        help: "Model",
-                        onSelect: viewModel.selectModel
-                    ),
-                    effort: menuConfig(
-                        .effort,
-                        title: viewModel.effort,
-                        selectedOption: viewModel.effort,
-                        isEnabled: viewModel.canChangeEffort,
-                        help: "Reasoning Effort",
-                        onSelect: viewModel.selectEffort
-                    ),
-                    permissions: menuConfig(
-                        .permissions,
-                        title: viewModel.permissions,
-                        selectedOption: viewModel.selectedPermission,
-                        isEnabled: viewModel.canChangePermissions,
-                        optionTitle: viewModel.displayPermission,
-                        help: "Permissions",
-                        onSelect: viewModel.selectPermissions
-                    ),
-                    tokenUsage: viewModel.tokenUsage,
-                    activeMenu: $footerMenuController.activeMenu,
-                    focusedMenu: $footerMenuController.focusedMenu
-                )
-                .padding(.top, TerminalLayout.footerTopPadding)
             }
             .padding(.horizontal, TerminalLayout.windowHorizontalPadding)
             .padding(.top, TerminalLayout.windowTopPadding)
@@ -113,6 +37,127 @@ struct ChatWindow: View {
         .onDisappear {
             viewModel.shutdown()
         }
+    }
+
+}
+
+private struct HeaderSection: View {
+    let viewModel: ChatViewModel
+
+    var body: some View {
+        HeaderBar(
+            isLoggedIn: viewModel.isLoggedIn,
+            canClearContext: viewModel.canClearContext,
+            onClearContext: viewModel.clearContext,
+            onLogin: viewModel.startLogin,
+            onLoginStatus: viewModel.showLoginStatus
+        )
+    }
+}
+
+private struct SearchSection: View {
+    @Bindable var viewModel: ChatViewModel
+
+    var body: some View {
+        if viewModel.isSearchVisible {
+            SearchBar(
+                text: Binding(
+                    get: { viewModel.searchQuery },
+                    set: viewModel.setSearchQuery
+                ),
+                resultSummary: viewModel.searchResultSummary,
+                onPrevious: viewModel.selectPreviousSearchMatch,
+                onNext: viewModel.selectNextSearchMatch,
+                onClose: viewModel.closeSearch
+            )
+            .padding(.top, TerminalLayout.inputTopPadding)
+        }
+    }
+}
+
+private struct TranscriptSection: View {
+    let viewModel: ChatViewModel
+
+    var body: some View {
+        TranscriptView(
+            lines: viewModel.lines,
+            activeAssistantStream: viewModel.activeAssistantStream,
+            isCacheStatsVisible: viewModel.showCacheStats,
+            searchMatchLineIDs: viewModel.searchMatchLineIDs,
+            selectedSearchLineID: viewModel.selectedSearchLineID,
+            scrollTarget: viewModel.transcriptScrollTarget
+        )
+        .padding(.top, TerminalLayout.transcriptTopPadding)
+    }
+}
+
+private struct InputSection: View {
+    @Bindable var viewModel: ChatViewModel
+    let footerMenuController: FooterMenuController
+
+    var body: some View {
+        InputPrompt(
+            text: $viewModel.draft,
+            prompt: viewModel.inputPrompt,
+            placeholder: viewModel.inputPlaceholder,
+            onSubmit: viewModel.sendDraft,
+            onHistoryPrevious: viewModel.selectPreviousSubmittedMessage,
+            onHistoryNext: viewModel.selectNextSubmittedMessage,
+            onMoveDownFromCurrent: { footerMenuController.focusFirstMenu(viewModel: viewModel) },
+            isCancelVisible: viewModel.canCancelTurn,
+            onCancel: viewModel.cancelCurrentTurn
+        )
+        .padding(.top, TerminalLayout.inputTopPadding)
+    }
+}
+
+private struct FooterSection: View {
+    let viewModel: ChatViewModel
+    @Bindable var footerMenuController: FooterMenuController
+
+    var body: some View {
+        FooterBar(
+            workspace: viewModel.workspace,
+            branch: menuConfig(
+                .branch,
+                title: viewModel.workspace.branch,
+                selectedOption: viewModel.workspace.branch,
+                isEnabled: viewModel.canChangeBranch,
+                enabledColor: TerminalPalette.green,
+                help: "Branch",
+                onSelect: viewModel.selectBranch
+            ),
+            model: menuConfig(
+                .model,
+                title: viewModel.model,
+                selectedOption: viewModel.selectedModel,
+                isEnabled: viewModel.canChangeModel,
+                optionTitle: viewModel.displayModel,
+                help: "Model",
+                onSelect: viewModel.selectModel
+            ),
+            effort: menuConfig(
+                .effort,
+                title: viewModel.effort,
+                selectedOption: viewModel.effort,
+                isEnabled: viewModel.canChangeEffort,
+                help: "Reasoning Effort",
+                onSelect: viewModel.selectEffort
+            ),
+            permissions: menuConfig(
+                .permissions,
+                title: viewModel.permissions,
+                selectedOption: viewModel.selectedPermission,
+                isEnabled: viewModel.canChangePermissions,
+                optionTitle: viewModel.displayPermission,
+                help: "Permissions",
+                onSelect: viewModel.selectPermissions
+            ),
+            tokenUsage: viewModel.tokenUsage,
+            activeMenu: $footerMenuController.activeMenu,
+            focusedMenu: $footerMenuController.focusedMenu
+        )
+        .padding(.top, TerminalLayout.footerTopPadding)
     }
 
     private func menuConfig(
@@ -139,6 +184,9 @@ struct ChatWindow: View {
             onHighlight: { footerMenuController.highlightedOptionByMenu[id] = $0 }
         )
     }
+}
+
+extension ChatWindow {
 
     private func handleLocalEvent(_ event: NSEvent) -> Bool {
         switch event.type {
