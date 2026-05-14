@@ -5,7 +5,7 @@ to `ChatViewModel` actions.
 
 ## Layout
 
-- `HeaderBar` shows workspace and branch context.
+- `HeaderBar` shows app chrome, clear-context, and settings controls.
 - `TranscriptView` renders transcript lines, assistant markdown, tool rows, and
   search highlights.
 - `InputPrompt` renders the prompt marker and text field.

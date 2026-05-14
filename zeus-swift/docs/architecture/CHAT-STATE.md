@@ -28,9 +28,12 @@ tasks are marked `@ObservationIgnored`.
    readiness flags.
 7. `/restore <session id>` replaces transcript and prompt history from backend
    durable records.
-8. Transcript search refreshes are debounced and scan line snapshots off the
+8. The clear-context header action creates a fresh backend session, preserves
+   the previous SQLite-backed session, and replaces the visible transcript with
+   the previous session id needed for `/restore`.
+9. Transcript search refreshes are debounced and scan line snapshots off the
    main actor.
-9. Terminal passthrough applies the selected permission policy, sends commands
+10. Terminal passthrough applies the selected permission policy, sends commands
    to `terminal:run`, and appends bounded command output to the transcript.
 
 ## Responsibilities
@@ -52,6 +55,7 @@ tasks are marked `@ObservationIgnored`.
 - `loginTask` owns device-code login.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
+- `contextClearTask` owns fresh-session creation for the clear-context action.
 - Assistant text line buffering is synchronous within the active model turn.
 - `searchRefreshTask` debounces transcript search updates.
 
