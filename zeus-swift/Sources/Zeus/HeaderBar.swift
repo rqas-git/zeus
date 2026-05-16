@@ -42,7 +42,7 @@ struct HeaderBar: View {
                 }
 
                 HeaderActionButton(
-                    title: "new session",
+                    title: "new",
                     isEnabled: canClearContext,
                     help: "New Session"
                 ) {
