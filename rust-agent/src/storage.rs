@@ -115,6 +115,31 @@ impl SessionDatabase {
         })
     }
 
+    /// Creates a session row with the next SQLite row ID.
+    ///
+    /// # Errors
+    /// Returns an error when the database write fails or the allocated ID is invalid.
+    pub(crate) fn create_session(&self, model: &str) -> Result<SessionId> {
+        let now = now_millis()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO sessions \
+                 (model, status, created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                |statement| {
+                    statement.bind_text(1, model)?;
+                    statement.bind_text(2, SessionStatus::Idle.as_str())?;
+                    statement.bind_i64(3, now)?;
+                    statement.bind_i64(4, now)
+                },
+            )?;
+            Ok(SessionId::new(i64_to_u64(
+                connection.last_insert_rowid(),
+                "session id",
+            )?))
+        })
+    }
+
     /// Inserts a session row if one does not already exist.
     ///
     /// # Errors
@@ -1003,6 +1028,11 @@ impl Connection {
     fn changes(&self) -> i32 {
         // SAFETY: `self.raw` is a live SQLite connection owned by `Connection`.
         unsafe { ffi::sqlite3_changes(self.raw) }
+    }
+
+    fn last_insert_rowid(&self) -> i64 {
+        // SAFETY: `self.raw` is a live SQLite connection owned by `Connection`.
+        unsafe { ffi::sqlite3_last_insert_rowid(self.raw) }
     }
 
     fn error_message(&self) -> String {

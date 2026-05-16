@@ -44,6 +44,7 @@ pub(crate) struct AgentService<M> {
     workspace_lock: RwLock<()>,
     database: Option<SessionDatabase>,
     max_sessions: usize,
+    next_ephemeral_session_id: Mutex<u64>,
     sessions: Mutex<HashMap<SessionId, SharedSession>>,
 }
 
@@ -163,6 +164,7 @@ where
             workspace_lock: RwLock::new(()),
             database: None,
             max_sessions: usize::MAX,
+            next_ephemeral_session_id: Mutex::new(1),
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -185,11 +187,21 @@ where
         self
     }
 
-    /// Creates an idle session with the default model.
+    /// Creates an idle session with the default model and the next sequential ID.
     ///
     /// # Errors
-    /// Returns an error when the session map is full or cannot be locked.
-    pub(crate) async fn create_session(&self, session_id: SessionId) -> Result<()> {
+    /// Returns an error when the session map is full, cannot be locked, or storage fails.
+    pub(crate) async fn create_session(&self) -> Result<SessionId> {
+        let session_id = self.allocate_session_id().await?;
+        self.create_session_with_id(session_id).await?;
+        Ok(session_id)
+    }
+
+    /// Creates an idle session with an explicit ID.
+    ///
+    /// # Errors
+    /// Returns an error when the session map is full, cannot be locked, or storage fails.
+    pub(crate) async fn create_session_with_id(&self, session_id: SessionId) -> Result<()> {
         self.session_or_insert_with(
             session_id,
             SessionConfig::new(self.model_config.default_model()),
@@ -574,6 +586,36 @@ where
             .await;
         session.clear_turn()?;
         result
+    }
+
+    async fn allocate_session_id(&self) -> Result<SessionId> {
+        {
+            let sessions = self.lock_sessions()?;
+            self.ensure_can_insert_session(&sessions)?;
+        }
+
+        if let Some(database) = self.database.clone() {
+            let model = self.model_config.default_model().to_string();
+            return run_blocking("session creation task failed", move || {
+                database.create_session(&model)
+            })
+            .await;
+        }
+
+        let mut next_id = self
+            .next_ephemeral_session_id
+            .lock()
+            .map_err(|error| anyhow::anyhow!("session id allocator lock was poisoned: {error}"))?;
+        let sessions = self.lock_sessions()?;
+        loop {
+            let session_id = SessionId::new(*next_id);
+            *next_id = next_id
+                .checked_add(1)
+                .context("session id counter overflowed")?;
+            if !sessions.contains_key(&session_id) {
+                return Ok(session_id);
+            }
+        }
     }
 
     fn session(&self, session_id: SessionId) -> Result<Option<SharedSession>> {
@@ -964,9 +1006,12 @@ mod tests {
         let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
             .with_session_limit(1);
 
-        service.create_session(SessionId::new(1)).await.unwrap();
+        service
+            .create_session_with_id(SessionId::new(1))
+            .await
+            .unwrap();
         let error = service
-            .create_session(SessionId::new(2))
+            .create_session_with_id(SessionId::new(2))
             .await
             .unwrap_err()
             .to_string();
@@ -989,14 +1034,20 @@ mod tests {
         let service = AgentService::new(model, ContextWindowConfig::default(), test_model_config())
             .with_session_limit(1);
 
-        service.create_session(SessionId::new(1)).await.unwrap();
+        service
+            .create_session_with_id(SessionId::new(1))
+            .await
+            .unwrap();
         assert_eq!(service.session_count().unwrap(), 1);
 
         assert!(service.delete_session(SessionId::new(1)).await.unwrap());
         assert_eq!(service.session_count().unwrap(), 0);
         assert!(!service.delete_session(SessionId::new(1)).await.unwrap());
 
-        service.create_session(SessionId::new(2)).await.unwrap();
+        service
+            .create_session_with_id(SessionId::new(2))
+            .await
+            .unwrap();
         assert_eq!(service.session_count().unwrap(), 1);
     }
 

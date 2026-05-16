@@ -83,12 +83,11 @@ const PARENT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 // 256 bits of token entropy is sufficient for local bearer auth and keeps the
 // base64url readiness payload compact.
 const GENERATED_TOKEN_BYTES: usize = 32;
-// JavaScript clients represent integers exactly only through 2^53 - 1.
-const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 // Session list pagination defaults keep UI requests small while allowing
 // explicit larger pages for sync operations.
 const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
 const MAX_SESSION_LIST_LIMIT: usize = 200;
+const MAX_SQLITE_SESSION_ID: u64 = i64::MAX as u64;
 // Bump this only when changing the externally visible HTTP contract.
 const SERVER_PROTOCOL_VERSION: u32 = 2;
 const CONTRACT_SCHEMA_HASH_PLACEHOLDER: &str = "contract-schema-hash";
@@ -546,7 +545,7 @@ impl<M> ServerState<M> {
     }
 
     fn require_session(&self, session_id: u64) -> Result<SessionId> {
-        let session_id = SessionId::new(session_id);
+        let session_id = validated_session_id(session_id)?;
         anyhow::ensure!(self.sessions.contains(session_id)?, "session not found");
         Ok(session_id)
     }
@@ -650,21 +649,6 @@ impl SessionRegistry {
         }
     }
 
-    fn reserve_random(&self) -> Result<SessionId> {
-        for _ in 0..128 {
-            let session_id = random_session_id()?;
-            let mut sessions = self
-                .sessions
-                .lock()
-                .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?;
-            anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
-            if sessions.insert(session_id) {
-                return Ok(session_id);
-            }
-        }
-        anyhow::bail!("failed to allocate unique session id")
-    }
-
     fn reserve(&self, session_id: SessionId) -> Result<bool> {
         let mut sessions = self
             .sessions
@@ -707,17 +691,6 @@ impl SessionRegistry {
         anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
         sessions.insert(session_id);
         Ok(())
-    }
-}
-
-fn random_session_id() -> Result<SessionId> {
-    loop {
-        let mut bytes = [0u8; 8];
-        getrandom::fill(&mut bytes).context("failed to generate session id")?;
-        let value = u64::from_le_bytes(bytes) & MAX_JSON_SAFE_INTEGER;
-        if value != 0 {
-            return Ok(SessionId::new(value));
-        }
     }
 }
 
@@ -943,20 +916,26 @@ async fn create_session<M>(State(state): State<ServerState<M>>) -> impl IntoResp
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    let session_id = match state.sessions.reserve_random() {
+    let session_id = match state.service.create_session().await {
         Ok(session_id) => session_id,
         Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
     };
-    if let Err(error) = state.service.create_session(session_id).await {
-        state.sessions.release(session_id);
-        return error_response(StatusCode::TOO_MANY_REQUESTS, error);
+    match state.sessions.reserve(session_id) {
+        Ok(true) => Json(CreateSessionResponse {
+            session_id: session_id.get(),
+            model: state.service.default_model().to_string(),
+            tool_policy: state.service.default_tool_policy().as_str().to_string(),
+        })
+        .into_response(),
+        Ok(false) => error_response(
+            StatusCode::CONFLICT,
+            anyhow::anyhow!("session already exists"),
+        ),
+        Err(error) => {
+            let _ = state.service.delete_session(session_id).await;
+            error_response(StatusCode::TOO_MANY_REQUESTS, error)
+        }
     }
-    Json(CreateSessionResponse {
-        session_id: session_id.get(),
-        model: state.service.default_model().to_string(),
-        tool_policy: state.service.default_tool_policy().as_str().to_string(),
-    })
-    .into_response()
 }
 
 async fn list_sessions<M>(
@@ -1031,14 +1010,10 @@ async fn restore_session<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    if !(1..=MAX_JSON_SAFE_INTEGER).contains(&request.session_id) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            anyhow::anyhow!("session_id must be between 1 and {MAX_JSON_SAFE_INTEGER}"),
-        );
-    }
-
-    let session_id = SessionId::new(request.session_id);
+    let session_id = match validated_session_id(request.session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
+    };
     let reserved = match state.sessions.reserve(session_id) {
         Ok(reserved) => reserved,
         Err(error) => return error_response(StatusCode::TOO_MANY_REQUESTS, error),
@@ -1063,8 +1038,8 @@ where
 
 fn validated_session_id(session_id: u64) -> Result<SessionId> {
     anyhow::ensure!(
-        (1..=MAX_JSON_SAFE_INTEGER).contains(&session_id),
-        "session_id must be between 1 and {MAX_JSON_SAFE_INTEGER}"
+        (1..=MAX_SQLITE_SESSION_ID).contains(&session_id),
+        "session_id must be between 1 and {MAX_SQLITE_SESSION_ID}"
     );
     Ok(SessionId::new(session_id))
 }
@@ -1616,6 +1591,7 @@ fn zeus_api_contract_fixture() -> serde_json::Value {
     reason = "contract fixture intentionally keeps the full API sample in one generator"
 )]
 fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
+    let contract_session_id = 42;
     serde_json::json!({
         "version": 1,
         "requests": {
@@ -1634,7 +1610,7 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 tool_policy: "workspace-write".to_string(),
             },
             "restore_session": RestoreSessionRequest {
-                session_id: 42,
+                session_id: contract_session_id,
             },
             "list_sessions": ListSessionsQuery {
                 limit: Some(50),
@@ -1726,12 +1702,12 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 ],
             },
             "create_session": CreateSessionResponse {
-                session_id: 42,
+                session_id: contract_session_id,
                 model: "gpt-5.5".to_string(),
                 tool_policy: "read-only".to_string(),
             },
             "restore_session": RestoreSessionResponse {
-                session_id: 42,
+                session_id: contract_session_id,
                 model: "gpt-5.5".to_string(),
                 tool_policy: "workspace-write".to_string(),
                 messages: vec![
@@ -1804,27 +1780,31 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
             },
         },
         "events": {
-            "server.connected": ServerEvent::ServerConnected { session_id: 42 },
-            "server.heartbeat": ServerEvent::ServerHeartbeat { session_id: 42 },
+            "server.connected": ServerEvent::ServerConnected {
+                session_id: contract_session_id,
+            },
+            "server.heartbeat": ServerEvent::ServerHeartbeat {
+                session_id: contract_session_id,
+            },
             "server.events_lagged": ServerEvent::EventsLagged {
-                session_id: 42,
+                session_id: contract_session_id,
                 skipped: 3,
             },
             "session.status_changed": ServerEvent::StatusChanged {
-                session_id: 42,
+                session_id: contract_session_id,
                 status: "running",
             },
             "message.text_delta": ServerEvent::TextDelta {
-                session_id: 42,
+                session_id: contract_session_id,
                 delta: "hello".to_string(),
             },
             "message.completed": ServerEvent::MessageCompleted {
-                session_id: 42,
+                session_id: contract_session_id,
                 role: "assistant",
                 text: "hello".to_string(),
             },
             "cache.health": ServerEvent::CacheHealth {
-                session_id: 42,
+                session_id: contract_session_id,
                 cache: CacheHealthEvent {
                     model: "gpt-5.5".to_string(),
                     prompt_cache_key: "contract-cache-key".to_string(),
@@ -1845,7 +1825,7 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 },
             },
             "turn.token_usage": ServerEvent::TurnTokenUsage {
-                session_id: 42,
+                session_id: contract_session_id,
                 usage: TokenUsageEvent {
                     input_tokens: Some(300),
                     cached_input_tokens: Some(200),
@@ -1855,27 +1835,27 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 },
             },
             "tool_call.started": ServerEvent::ToolCallStarted {
-                session_id: 42,
+                session_id: contract_session_id,
                 tool_call_id: "call_read".to_string(),
                 tool_name: "read_file".to_string(),
                 args: r#"{"path":"Cargo.toml"}"#.to_string(),
             },
             "tool_call.completed": ServerEvent::ToolCallCompleted {
-                session_id: 42,
+                session_id: contract_session_id,
                 tool_call_id: "call_read".to_string(),
                 tool_name: "read_file".to_string(),
                 success: true,
             },
             "session.error": ServerEvent::Error {
-                session_id: 42,
+                session_id: contract_session_id,
                 message: "not logged in".to_string(),
             },
             "compaction.started": ServerEvent::CompactionStarted {
-                session_id: 42,
+                session_id: contract_session_id,
                 reason: "manual",
             },
             "compaction.completed": ServerEvent::CompactionCompleted {
-                session_id: 42,
+                session_id: contract_session_id,
                 reason: "manual",
                 summary: "checkpoint".to_string(),
                 first_kept_message_id: 4,
@@ -1886,10 +1866,12 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                 },
             },
             "turn.completed": ServerEvent::TurnCompleted {
-                session_id: 42,
+                session_id: contract_session_id,
                 duration_ms: 123_000,
             },
-            "turn.cancelled": ServerEvent::TurnCancelled { session_id: 42 },
+            "turn.cancelled": ServerEvent::TurnCancelled {
+                session_id: contract_session_id,
+            },
         },
     })
 }
@@ -2779,12 +2761,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creates_random_sessions_before_turn_routes_are_available() {
-        let service = Arc::new(AgentService::new(
-            StaticStreamer::new("ok", []),
-            ContextWindowConfig::default(),
-            ModelConfig::new("test-default", ["test-default"]).unwrap(),
-        ));
+    async fn creates_sequential_sessions_before_turn_routes_are_available() {
+        let database = SessionDatabase::in_memory().unwrap();
+        let service = Arc::new(
+            AgentService::new(
+                StaticStreamer::new("ok", []),
+                ContextWindowConfig::default(),
+                ModelConfig::new("test-default", ["test-default"]).unwrap(),
+            )
+            .with_database(database),
+        );
         let state = ServerState::new(service, 16, "127.0.0.1:4433".parse().unwrap());
         let app = router(state);
         let created = app
@@ -2804,9 +2790,25 @@ mod tests {
         let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
         let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let session_id = created["session_id"].as_u64().unwrap();
-        assert_ne!(session_id, 0);
+        assert_eq!(session_id, 1);
         assert_eq!(created["model"], "test-default");
         assert_eq!(created["tool_policy"], "read-only");
+
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sessions")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(second["session_id"].as_u64().unwrap(), 2);
 
         let model = app
             .clone()
@@ -2862,16 +2864,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generated_session_ids_are_json_safe() {
-        for _ in 0..128 {
-            let session_id = random_session_id().unwrap().get();
-            assert!((1..=MAX_JSON_SAFE_INTEGER).contains(&session_id));
-        }
-    }
-
     #[tokio::test]
-    async fn rejects_unknown_numeric_sessions() {
+    async fn rejects_unknown_sessions() {
         let service = Arc::new(AgentService::new(
             StaticStreamer::new("ok", []),
             ContextWindowConfig::default(),

@@ -26,7 +26,7 @@ router through both HTTP compatibility and native HTTP/3 transports.
 10. Clients can request backend-served workspace or explicit absolute/home path
    completions for prompt UI.
 11. Clients can list durable SQLite session metadata for recent-session UIs.
-12. Clients create random server-issued sessions before using turn routes.
+12. Clients create sequential server-issued sessions before using turn routes.
 13. Clients can fetch metadata for one durable SQLite session by id.
 14. Clients can restore an existing durable SQLite session by id before using
    session routes.
@@ -57,7 +57,7 @@ router through both HTTP compatibility and native HTTP/3 transports.
   while a turn or terminal command is using the workspace.
 - `GET /sessions?limit=50&offset=0` lists durable session metadata ordered by
   recent activity.
-- `POST /sessions` creates a random session and returns its current model and
+- `POST /sessions` creates the next sequential session and returns its current model and
   tool policy.
 - `GET /sessions/{session_id}` returns metadata for one durable session.
 - `GET /sessions/{session_id}/model` returns the session model.
@@ -88,11 +88,10 @@ require `Authorization: Bearer <token>`. Set `RUST_AGENT_SERVER_TOKEN` for a
 stable token; otherwise startup prints a generated token to stderr. The
 plaintext HTTP compatibility listener rejects non-loopback bind addresses unless
 `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` is set for a trusted deployment.
-Numeric session IDs must come from `POST /sessions` or an existing local SQLite
-row discovered
+Session IDs are positive integers allocated from the SQLite `sessions` table.
+They must come from `POST /sessions` or an existing local SQLite row discovered
 through `GET /sessions`, `GET /sessions/{session_id}`, or restored through
-`POST /sessions:restore`; generated IDs stay within JavaScript's JSON-safe
-integer range.
+`POST /sessions:restore`.
 
 Session metadata responses are intended for clients such as Zeus's macOS
 sidebar. List responses are paginated with `limit`, `offset`, and nullable
@@ -207,7 +206,7 @@ a stable token, and read the startup readiness line when a supervisor needs the
 actual token or OS-assigned ports. Treat generated tokens as a local-development
 convenience. Set `RUST_AGENT_SERVER_ALLOW_REMOTE_HTTP=true` only for trusted
 deployments where remote plaintext HTTP access is acceptable.
-Server-issued session IDs are random and the active registry is process-local,
+Server-issued session IDs are sequential and the active registry is process-local,
 while session content is durable in SQLite. Clients can restore durable session
 rows by id, which re-adds that session id to the process-local active registry
 and returns ordered message, function-call, and function-output transcript

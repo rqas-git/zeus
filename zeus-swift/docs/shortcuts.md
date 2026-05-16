@@ -25,7 +25,7 @@
 | Command | Action |
 | --- | --- |
 | `/login` | Start rust-agent authorization. |
-| `/restore <session id>` | Restore a local rust-agent transcript session by id. |
+| `/restore <session id>` | Restore a local rust-agent transcript session by numeric id. |
 | `/show-cache` | Toggle per-response token and prompt-cache stats below assistant messages. |
 
 Implementation details live in `docs/architecture/TERMINAL-UI.md` and
