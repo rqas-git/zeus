@@ -29,7 +29,7 @@ struct HeaderBar: View {
 
             Spacer()
 
-            HStack(spacing: 2) {
+            HStack(spacing: 6) {
                 Button {
                     isShowingSettings = false
                     onClearContext()
@@ -41,7 +41,17 @@ struct HeaderBar: View {
                                 ? TerminalPalette.dimText
                                 : TerminalPalette.dimText.opacity(0.35)
                         )
+                        .padding(.horizontal, 6)
                         .frame(height: 16)
+                        .overlay(
+                            Rectangle()
+                                .stroke(
+                                    canClearContext
+                                        ? TerminalPalette.border.opacity(0.55)
+                                        : TerminalPalette.border.opacity(0.25),
+                                    lineWidth: 1
+                                )
+                        )
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
