@@ -12,18 +12,24 @@ struct TranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(lines) { line in
+                    ForEach(decoratedLines) { item in
+                        if item.showsSeparatorBefore {
+                            CodexTranscriptSeparator()
+                        }
                         TerminalLineView(
-                            line: line,
-                            streamingStream: activeAssistantStream?.lineID == line.id
+                            line: item.line,
+                            streamingStream: activeAssistantStream?.lineID == item.line.id
                                 ? activeAssistantStream
                                 : nil,
                             isCacheStatsVisible: isCacheStatsVisible,
-                            isSearchMatch: searchMatchLineIDs.contains(line.id),
-                            isSelectedSearchMatch: selectedSearchLineID == line.id
+                            isSearchMatch: searchMatchLineIDs.contains(item.line.id),
+                            isSelectedSearchMatch: selectedSearchLineID == item.line.id
                         )
                             .equatable()
-                            .id(line.id)
+                            .id(item.line.id)
+                        if item.showsSeparatorAfter {
+                            CodexTranscriptSeparator()
+                        }
                     }
                     Color.clear
                         .frame(height: 1)
@@ -50,10 +56,103 @@ struct TranscriptView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private var decoratedLines: [TranscriptDecoratedLine] {
+        let startupBlockLastIndex = Self.startupBlockLastIndex(in: lines)
+        return lines.indices.map { index in
+            TranscriptDecoratedLine(
+                line: lines[index],
+                showsSeparatorBefore: Self.showsToolResponseSeparator(
+                    before: index,
+                    in: lines
+                ),
+                showsSeparatorAfter: startupBlockLastIndex == index
+                    && index + 1 < lines.count
+            )
+        }
+    }
+
+    private static func showsToolResponseSeparator(
+        before index: Int,
+        in lines: [TranscriptLine]
+    ) -> Bool {
+        guard index > 0, lines.indices.contains(index) else { return false }
+        return lines[index].kind == .assistant
+            && lines[index - 1].kind == .tool
+    }
+
+    private static func startupBlockLastIndex(in lines: [TranscriptLine]) -> Int? {
+        guard let first = lines.first,
+              first.kind == .status,
+              first.text == "starting server..." else {
+            return nil
+        }
+
+        var index = 0
+        var sawReady = false
+        while index + 1 < lines.count {
+            let next = lines[index + 1]
+            if isStartupProgressLine(next) {
+                index += 1
+            } else if isStartupReadyLine(next) {
+                index += 1
+                sawReady = true
+            } else if sawReady, isStartupAuthStatusLine(next) {
+                index += 1
+            } else if next.kind == .error {
+                index += 1
+                break
+            } else {
+                break
+            }
+        }
+
+        return index
+    }
+
+    private static func isStartupProgressLine(_ line: TranscriptLine) -> Bool {
+        guard line.kind == .status else { return false }
+        return line.text == "creating session..."
+            || line.text == "connecting session events..."
+    }
+
+    private static func isStartupReadyLine(_ line: TranscriptLine) -> Bool {
+        line.kind == .status && line.text.hasPrefix("ready. session ")
+    }
+
+    private static func isStartupAuthStatusLine(_ line: TranscriptLine) -> Bool {
+        line.kind == .status
+            && line.text == "not logged in. type /login to authorize rust-agent"
+    }
 }
 
 private enum TranscriptScrollID {
     static let bottom = "transcript-bottom"
+}
+
+private struct TranscriptDecoratedLine: Identifiable {
+    let line: TranscriptLine
+    let showsSeparatorBefore: Bool
+    let showsSeparatorAfter: Bool
+
+    var id: UUID {
+        line.id
+    }
+}
+
+private struct CodexTranscriptSeparator: View {
+    private static let rule = String(repeating: "─", count: 240)
+
+    var body: some View {
+        Text(Self.rule)
+            .font(TerminalTypography.chat)
+            .foregroundStyle(TerminalPalette.dimText.opacity(0.72))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+            .accessibilityHidden(true)
+    }
 }
 
 private struct TerminalLineView: View, Equatable {

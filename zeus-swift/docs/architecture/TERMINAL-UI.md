@@ -30,6 +30,14 @@ Assistant text is parsed by `TerminalMarkdownParser` and rendered by
 actions, names, and compact argument targets. Cache stats render below assistant
 messages only when enabled.
 
+Transcript block separators are render-only UI chrome. `TranscriptView` draws a
+Codex-style dim horizontal rule between tool/work rows and the following
+assistant response, and after the initial startup status block. These separators
+are not persisted, restored, searched, or exposed through the backend contract.
+Zeus does not yet render Codex's `Worked for ...` duration label because the
+current server contract does not expose turn duration or runtime metrics. Login
+output is also not grouped into its own block yet.
+
 ## Current Scope
 
 The UI is optimized for a single active transcript per window. There is no
