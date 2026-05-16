@@ -104,7 +104,7 @@ impl SessionHandle {
         let mut active_turn = self
             .active_turn
             .lock()
-            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("active turn lock was poisoned: {error}"))?;
         *active_turn = Some(cancellation.clone());
         Ok(cancellation)
     }
@@ -113,7 +113,7 @@ impl SessionHandle {
         let mut active_turn = self
             .active_turn
             .lock()
-            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("active turn lock was poisoned: {error}"))?;
         *active_turn = None;
         Ok(())
     }
@@ -122,7 +122,7 @@ impl SessionHandle {
         let active_turn = self
             .active_turn
             .lock()
-            .map_err(|_| anyhow::anyhow!("active turn lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("active turn lock was poisoned: {error}"))?;
         let Some(cancellation) = active_turn.as_ref() else {
             return Ok(false);
         };
@@ -165,7 +165,7 @@ where
         }
     }
 
-    /// Enables SQLite-backed session storage.
+    /// Enables `SQLite`-backed session storage.
     pub(crate) fn with_database(mut self, database: SessionDatabase) -> Self {
         self.database = Some(database);
         self
@@ -197,7 +197,7 @@ where
         Ok(())
     }
 
-    /// Restores a durable SQLite session into the active in-memory session map.
+    /// Restores a durable `SQLite` session into the active in-memory session map.
     ///
     /// # Errors
     /// Returns an error when no database is configured, the session map is full, or storage fails.
@@ -251,8 +251,7 @@ where
         let tool_policy = session
             .agent
             .try_lock()
-            .map(|agent| agent.tool_policy())
-            .unwrap_or_else(|_| self.default_tool_policy());
+            .map_or_else(|_| self.default_tool_policy(), |agent| agent.tool_policy());
 
         Ok(Some(SessionSnapshot {
             session_id,
@@ -363,11 +362,6 @@ where
     /// Returns the canonical allowed reasoning effort matching a requested value.
     pub(crate) fn allowed_reasoning_effort(&self, effort: &str) -> Result<&str> {
         self.model_config.allowed_reasoning_effort(effort)
-    }
-
-    /// Returns the available tool permission policies.
-    pub(crate) fn tool_policies(&self) -> &'static [ToolPolicy] {
-        ToolPolicy::all()
     }
 
     /// Returns the default tool permission policy for new sessions.
@@ -587,12 +581,8 @@ where
         config: SessionConfig,
         tools: ToolRegistry,
     ) -> Result<SharedSession> {
-        {
-            let sessions = self.lock_sessions()?;
-            if let Some(session) = sessions.get(&session_id) {
-                return Ok(Arc::clone(session));
-            }
-            self.ensure_can_insert_session(&sessions)?;
+        if let Some(session) = self.existing_session_or_check_capacity(session_id)? {
+            return Ok(session);
         }
 
         let session = self.build_session(session_id, config, tools).await?;
@@ -603,6 +593,18 @@ where
         self.ensure_can_insert_session(&sessions)?;
         sessions.insert(session_id, Arc::clone(&session));
         Ok(session)
+    }
+
+    fn existing_session_or_check_capacity(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SharedSession>> {
+        let sessions = self.lock_sessions()?;
+        if let Some(session) = sessions.get(&session_id) {
+            return Ok(Some(Arc::clone(session)));
+        }
+        self.ensure_can_insert_session(&sessions)?;
+        Ok(None)
     }
 
     async fn build_session(
@@ -618,41 +620,38 @@ where
                     move || database.load_session(session_id)
                 })
                 .await?;
-                match stored {
-                    Some(mut stored) => {
-                        if stored.status == SessionStatus::Running {
-                            run_blocking("session status reset task failed", {
-                                let database = database.clone();
-                                move || database.set_session_status(session_id, SessionStatus::Idle)
-                            })
-                            .await?;
-                            stored.status = SessionStatus::Idle;
-                        }
-                        AgentLoop::from_stored_session(
-                            session_id,
-                            stored,
-                            self.context_window,
-                            self.compaction,
-                            tools,
-                            Some(database),
-                        )
-                    }
-                    None => {
-                        let model = config.model().to_string();
-                        run_blocking("session creation task failed", {
+                if let Some(mut stored) = stored {
+                    if stored.status == SessionStatus::Running {
+                        run_blocking("session status reset task failed", {
                             let database = database.clone();
-                            move || database.ensure_session(session_id, &model)
+                            move || database.set_session_status(session_id, SessionStatus::Idle)
                         })
                         .await?;
-                        AgentLoop::from_empty_session(
-                            session_id,
-                            config,
-                            self.context_window,
-                            self.compaction,
-                            tools,
-                            Some(database),
-                        )
+                        stored.status = SessionStatus::Idle;
                     }
+                    AgentLoop::from_stored_session(
+                        session_id,
+                        stored,
+                        self.context_window,
+                        self.compaction,
+                        tools,
+                        Some(database),
+                    )
+                } else {
+                    let model = config.model().to_string();
+                    run_blocking("session creation task failed", {
+                        let database = database.clone();
+                        move || database.ensure_session(session_id, &model)
+                    })
+                    .await?;
+                    AgentLoop::from_empty_session(
+                        session_id,
+                        config,
+                        self.context_window,
+                        self.compaction,
+                        tools,
+                        Some(database),
+                    )
                 }
             }
             None => AgentLoop::from_empty_session(
@@ -672,7 +671,7 @@ where
     ) -> Result<std::sync::MutexGuard<'_, HashMap<SessionId, SharedSession>>> {
         self.sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("session map lock was poisoned"))
+            .map_err(|error| anyhow::anyhow!("session map lock was poisoned: {error}"))
             .context("failed to lock session map")
     }
 
@@ -842,7 +841,7 @@ mod tests {
             .set_session_model(SessionId::new(1), "test-fast")
             .await
             .unwrap()
-            .to_string();
+            .clone();
         service
             .submit_user_message(SessionId::new(1), "again", |_| Ok(()))
             .await

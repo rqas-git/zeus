@@ -1,4 +1,4 @@
-//! SQLite-backed session storage.
+//! `SQLite`-backed session storage.
 
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -33,7 +33,7 @@ const BUSY_TIMEOUT_MS: i32 = 5_000;
 const SQLITE_CACHE_SIZE_KIB: i32 = 64_000;
 // Session lists show a compact preview only; longer text belongs in the detail
 // endpoint and would make list responses noisy.
-const MAX_SESSION_PREVIEW_CHARS: i64 = 240;
+const MAX_SESSION_PREVIEW_CHARS: usize = 240;
 
 /// Durable state for one loaded session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub(crate) struct StoredSessionLastMessage {
     pub(crate) created_at_ms: i64,
 }
 
-/// SQLite-first storage for sessions and messages.
+/// `SQLite`-first storage for sessions and messages.
 #[derive(Clone, Debug)]
 pub(crate) struct SessionDatabase {
     inner: Arc<Mutex<Connection>>,
@@ -90,7 +90,7 @@ impl SessionDatabase {
     /// Opens a session database at `path`, creating the schema when needed.
     ///
     /// # Errors
-    /// Returns an error when SQLite cannot open or initialize the database.
+    /// Returns an error when `SQLite` cannot open or initialize the database.
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path
@@ -210,7 +210,10 @@ impl SessionDatabase {
             )?;
             statement.bind_i64(1, usize_to_i64(limit, "session metadata limit")?)?;
             statement.bind_i64(2, usize_to_i64(offset, "session metadata offset")?)?;
-            statement.bind_i64(3, MAX_SESSION_PREVIEW_CHARS)?;
+            statement.bind_i64(
+                3,
+                usize_to_i64(MAX_SESSION_PREVIEW_CHARS, "session preview length")?,
+            )?;
             load_session_metadata_rows(&mut statement)
         })
     }
@@ -253,7 +256,10 @@ impl SessionDatabase {
                   WHERE s.id = ?1",
             )?;
             statement.bind_i64(1, session_id_i64(session_id)?)?;
-            statement.bind_i64(2, MAX_SESSION_PREVIEW_CHARS)?;
+            statement.bind_i64(
+                2,
+                usize_to_i64(MAX_SESSION_PREVIEW_CHARS, "session preview length")?,
+            )?;
             match statement.step()? {
                 StepResult::Done => Ok(None),
                 StepResult::Row => decode_session_metadata_row(&statement).map(Some),
@@ -402,7 +408,7 @@ impl SessionDatabase {
         let mut connection = self
             .inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("session database lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("session database lock was poisoned: {error}"))?;
         action(&mut connection)
     }
 }
@@ -438,7 +444,7 @@ fn decode_session_metadata_row(statement: &Statement<'_>) -> Result<StoredSessio
 fn decode_session_last_message(
     statement: &Statement<'_>,
 ) -> Result<Option<StoredSessionLastMessage>> {
-    let Some(message_id) = statement.column_optional_i64(6)? else {
+    let Some(message_id) = statement.column_optional_i64(6) else {
         return Ok(None);
     };
     let role = statement
@@ -447,9 +453,9 @@ fn decode_session_last_message(
         .and_then(MessageRole::from_str)
         .context("stored last message row has invalid role")?;
     let preview = statement.column_optional_text(8)?.unwrap_or_default();
-    let truncated = statement.column_optional_i64(9)?.unwrap_or(0) != 0;
+    let truncated = statement.column_optional_i64(9).unwrap_or(0) != 0;
     let created_at_ms = statement
-        .column_optional_i64(10)?
+        .column_optional_i64(10)
         .context("stored last message row is missing created_at_ms")?;
 
     Ok(Some(StoredSessionLastMessage {
@@ -478,14 +484,14 @@ fn load_session_header(
             let status = parse_session_status(&statement.column_text(1)?)?;
             let last_cache_observation = match (
                 statement.column_optional_text(2)?,
-                statement.column_optional_i64(3)?,
+                statement.column_optional_i64(3),
             ) {
                 (Some(prompt_cache_key), Some(stable_prefix_hash)) => Some(CacheObservation {
                     prompt_cache_key,
                     stable_prefix_hash: cache_hash_from_i64(stable_prefix_hash),
-                    request_input_hash: statement.column_optional_i64(4)?.map(cache_hash_from_i64),
+                    request_input_hash: statement.column_optional_i64(4).map(cache_hash_from_i64),
                     request_input_message_count: statement
-                        .column_optional_i64(5)?
+                        .column_optional_i64(5)
                         .map(|count| {
                             i64_to_u64(count, "request input message count").and_then(|count| {
                                 count
@@ -550,14 +556,14 @@ fn decode_message_row(statement: &Statement<'_>) -> Result<AgentMessage> {
         "function_output" => AgentItem::FunctionOutput {
             call_id: required_text(statement, 5, "function output call id")?,
             output: statement.column_optional_text(8)?.unwrap_or_default(),
-            success: statement.column_optional_i64(9)?.unwrap_or(0) != 0,
+            success: statement.column_optional_i64(9).unwrap_or(0) != 0,
         },
         "compaction" => {
             let first_kept = statement
-                .column_optional_i64(10)?
+                .column_optional_i64(10)
                 .context("stored compaction row is missing first_kept_message_id")?;
             let tokens_before = statement
-                .column_optional_i64(11)?
+                .column_optional_i64(11)
                 .context("stored compaction row is missing tokens_before")?;
             let details = match statement.column_optional_text(12)? {
                 Some(json) => {
@@ -636,6 +642,10 @@ struct MessageInsert<'a> {
 }
 
 impl<'a> MessageInsert<'a> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "message encoding keeps every persisted transcript variant in one place"
+    )]
     fn new(session_id: SessionId, message: &'a AgentMessage, created_at_ms: i64) -> Result<Self> {
         let (
             kind,
@@ -786,7 +796,9 @@ impl Connection {
             ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE | ffi::SQLITE_OPEN_FULLMUTEX;
         // SAFETY: `path` is a NUL-terminated CString that lives for the call, and
         // `raw` is a valid out pointer initialized by SQLite.
-        let result = unsafe { ffi::sqlite3_open_v2(path.as_ptr(), &mut raw, flags, ptr::null()) };
+        let result = unsafe {
+            ffi::sqlite3_open_v2(path.as_ptr(), ptr::addr_of_mut!(raw), flags, ptr::null())
+        };
         if result != ffi::SQLITE_OK {
             let message = if raw.is_null() {
                 sqlite_error_string(result)
@@ -808,8 +820,8 @@ impl Connection {
         // open above; both calls only mutate connection-local settings.
         unsafe {
             ffi::sqlite3_extended_result_codes(connection.raw, 1);
-            ffi::sqlite3_busy_timeout(connection.raw, BUSY_TIMEOUT_MS);
-        }
+            ffi::sqlite3_busy_timeout(connection.raw, BUSY_TIMEOUT_MS)
+        };
         Ok(connection)
     }
 
@@ -912,8 +924,15 @@ impl Connection {
         let mut error = ptr::null_mut();
         // SAFETY: `self.raw` is a live connection, `sql` is a NUL-terminated
         // string that lives for the call, and `error` is a valid out pointer.
-        let result =
-            unsafe { ffi::sqlite3_exec(self.raw, sql.as_ptr(), None, ptr::null_mut(), &mut error) };
+        let result = unsafe {
+            ffi::sqlite3_exec(
+                self.raw,
+                sql.as_ptr(),
+                None,
+                ptr::null_mut(),
+                ptr::addr_of_mut!(error),
+            )
+        };
         if result == ffi::SQLITE_OK {
             return Ok(());
         }
@@ -925,9 +944,7 @@ impl Connection {
             // message allocated by SQLite until it is freed below.
             let message = unsafe { CStr::from_ptr(error).to_string_lossy().into_owned() };
             // SAFETY: `error` was allocated by SQLite for `sqlite3_exec`.
-            unsafe {
-                ffi::sqlite3_free(error.cast());
-            }
+            unsafe { ffi::sqlite3_free(error.cast()) };
             message
         };
         anyhow::bail!("SQLite exec failed: {message}");
@@ -939,7 +956,13 @@ impl Connection {
         // SAFETY: `self.raw` is a live connection, `sql` is a NUL-terminated
         // statement string, and `statement` is a valid out pointer.
         let result = unsafe {
-            ffi::sqlite3_prepare_v2(self.raw, sql.as_ptr(), -1, &mut statement, ptr::null_mut())
+            ffi::sqlite3_prepare_v2(
+                self.raw,
+                sql.as_ptr(),
+                -1,
+                ptr::addr_of_mut!(statement),
+                ptr::null_mut(),
+            )
         };
         if result != ffi::SQLITE_OK {
             anyhow::bail!("SQLite prepare failed: {}", self.error_message());
@@ -1083,11 +1106,11 @@ impl Statement<'_> {
         unsafe { ffi::sqlite3_column_int64(self.raw, index) }
     }
 
-    fn column_optional_i64(&self, index: i32) -> Result<Option<i64>> {
+    fn column_optional_i64(&self, index: i32) -> Option<i64> {
         if self.column_type(index) == ffi::SQLITE_NULL {
-            Ok(None)
+            None
         } else {
-            Ok(Some(self.column_i64(index)))
+            Some(self.column_i64(index))
         }
     }
 
@@ -1236,7 +1259,7 @@ fn ensure_database_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Returns the default SQLite database path.
+/// Returns the default `SQLite` database path.
 ///
 /// # Errors
 /// Returns an error when neither `RUST_AGENT_HOME` nor `HOME` is available.
@@ -1253,6 +1276,7 @@ mod tests {
     use std::fs;
     use std::time::Instant;
 
+    use crate::bench_support::u64_per_second;
     use crate::bench_support::DurationSummary;
 
     use super::*;
@@ -1500,7 +1524,7 @@ mod tests {
                     MessageId::new(2),
                     AgentItem::Message {
                         role: MessageRole::Assistant,
-                        text: "x".repeat(MAX_SESSION_PREVIEW_CHARS as usize + 8),
+                        text: "x".repeat(MAX_SESSION_PREVIEW_CHARS + 8),
                     },
                 ),
             )
@@ -1516,10 +1540,7 @@ mod tests {
         let last_message = sessions[0].last_message.as_ref().unwrap();
         assert_eq!(last_message.message_id, MessageId::new(2));
         assert_eq!(last_message.role, MessageRole::Assistant);
-        assert_eq!(
-            last_message.preview.len(),
-            MAX_SESSION_PREVIEW_CHARS as usize
-        );
+        assert_eq!(last_message.preview.len(), MAX_SESSION_PREVIEW_CHARS);
         assert!(last_message.truncated);
 
         let paged = database.list_session_metadata(1, 1).unwrap();
@@ -1652,7 +1673,7 @@ mod tests {
         println!(
             "sqlite_session_database_large_history messages={MESSAGES} loaded_messages={loaded_messages} load_samples={LOAD_SAMPLES} write_ms={:.3} write_messages_per_sec={:.0} load_min_ms={:.3} load_median_ms={:.3} load_max_ms={:.3}",
             crate::bench_support::duration_ms(write_elapsed),
-            MESSAGES as f64 / write_elapsed.as_secs_f64(),
+            u64_per_second(MESSAGES, write_elapsed),
             load.min_ms(),
             load.median_ms(),
             load.max_ms(),
