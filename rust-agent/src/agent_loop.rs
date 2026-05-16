@@ -1262,6 +1262,7 @@ impl AgentLoop {
         database: Option<SessionDatabase>,
     ) -> Self {
         let mut store = InMemorySessionStore::from_stored(session_id, stored);
+        restore_external_read_grants(&tools, store.messages());
         store.prune_history_with_compaction(context_window, compaction);
         Self {
             store,
@@ -1386,7 +1387,9 @@ impl AgentLoop {
         cancellation.ensure_not_cancelled()?;
 
         let user_text = text.into();
-        let user_id = self.store.append_message(MessageRole::User, user_text);
+        let user_id = self
+            .store
+            .append_message(MessageRole::User, user_text.clone());
         self.persist_message(user_id).await?;
         if let Err(error) = emit(AgentEvent::MessageCompleted {
             session_id: self.session_id(),
@@ -1419,6 +1422,9 @@ impl AgentLoop {
             )
             .await;
         }
+        self.tools
+            .grant_external_read_refs_from_text(&user_text)
+            .context("failed to apply external file references")?;
         self.store
             .prune_history_with_compaction(self.context_window, self.compaction);
         let result = async {
@@ -2047,6 +2053,18 @@ async fn rollback_persisted_message<T>(
         .await?;
     }
     Err(error)
+}
+
+fn restore_external_read_grants(tools: &ToolRegistry, messages: &[AgentMessage]) {
+    let user_texts = messages.iter().filter_map(|message| match message.item() {
+        AgentItem::Message {
+            role: MessageRole::User,
+            text,
+        } => Some(text.as_str()),
+        _ => None,
+    });
+    // Ignore unreadable restored references; they will fail only if the model uses them.
+    let _ = tools.replace_external_read_refs(user_texts);
 }
 
 #[cfg(test)]

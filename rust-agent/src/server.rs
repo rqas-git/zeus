@@ -61,6 +61,9 @@ use crate::service::AgentService;
 use crate::service::SessionLastMessage;
 use crate::service::SessionMetadata;
 use crate::service::SessionSnapshot;
+use crate::tools::PathCompletionKind;
+use crate::tools::PathCompletionQuery as ToolPathCompletionQuery;
+use crate::tools::PathCompletionSuggestion as ToolPathCompletionSuggestion;
 use crate::tools::ToolPolicy;
 
 // Server identity and content types are part of the Zeus API contract.
@@ -95,6 +98,7 @@ const SERVER_TRANSPORTS: &[&str] = &["http/1.1", "http/2", "http/3"];
 const SERVER_FEATURES: &[&str] = &[
     "workspace",
     "branch_switching",
+    "path_completion",
     "sessions",
     "session_restore",
     "turn_streaming",
@@ -209,6 +213,10 @@ where
         .route("/permissions", get(permissions::<M>))
         .route("/workspace", get(workspace::<M>))
         .route("/workspace/branch", post(switch_workspace_branch::<M>))
+        .route(
+            "/workspace/paths:complete",
+            post(complete_workspace_paths::<M>),
+        )
         .route("/sessions:restore", post(restore_session::<M>))
         .route(
             "/sessions",
@@ -897,6 +905,40 @@ where
     }
 }
 
+async fn complete_workspace_paths<M>(
+    State(state): State<ServerState<M>>,
+    Json(request): Json<PathCompletionRequest>,
+) -> impl IntoResponse
+where
+    M: ModelStreamer + Send + Sync + 'static,
+{
+    let kind = match request.kind.as_str() {
+        "file_reference" => PathCompletionKind::FileReference,
+        "path" => PathCompletionKind::Path,
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("unsupported path completion kind {}", request.kind),
+            )
+        }
+    };
+    let query = ToolPathCompletionQuery {
+        prefix: request.prefix,
+        kind,
+        limit: request.limit,
+    };
+    match state.service.complete_paths(query).await {
+        Ok(suggestions) => Json(PathCompletionResponse {
+            suggestions: suggestions
+                .into_iter()
+                .map(PathCompletionSuggestionResponse::from_suggestion)
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error),
+    }
+}
+
 async fn create_session<M>(State(state): State<ServerState<M>>) -> impl IntoResponse
 where
     M: ModelStreamer + Send + Sync + 'static,
@@ -1580,6 +1622,11 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
             "switch_workspace_branch": SwitchWorkspaceBranchRequest {
                 branch: "feature".to_string(),
             },
+            "path_completion": PathCompletionRequest {
+                prefix: "@src/ma".to_string(),
+                kind: "file_reference".to_string(),
+                limit: Some(20),
+            },
             "set_session_model": SetModelRequest {
                 model: "gpt-5.5".to_string(),
             },
@@ -1659,6 +1706,24 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                     branches: vec!["main".to_string(), "feature".to_string()],
                     git: true,
                 },
+            },
+            "path_completion": PathCompletionResponse {
+                suggestions: vec![
+                    PathCompletionSuggestionResponse {
+                        value: "@src/main.rs".to_string(),
+                        label: "main.rs".to_string(),
+                        detail: "src/main.rs".to_string(),
+                        is_directory: false,
+                        is_external: false,
+                    },
+                    PathCompletionSuggestionResponse {
+                        value: "@src/models/".to_string(),
+                        label: "models/".to_string(),
+                        detail: "src/models/".to_string(),
+                        is_directory: true,
+                        is_external: false,
+                    },
+                ],
             },
             "create_session": CreateSessionResponse {
                 session_id: 42,
@@ -2167,6 +2232,39 @@ impl SwitchWorkspaceBranchResponse {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+struct PathCompletionRequest {
+    prefix: String,
+    kind: String,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct PathCompletionResponse {
+    suggestions: Vec<PathCompletionSuggestionResponse>,
+}
+
+#[derive(Serialize)]
+struct PathCompletionSuggestionResponse {
+    value: String,
+    label: String,
+    detail: String,
+    is_directory: bool,
+    is_external: bool,
+}
+
+impl PathCompletionSuggestionResponse {
+    fn from_suggestion(suggestion: ToolPathCompletionSuggestion) -> Self {
+        Self {
+            value: suggestion.value,
+            label: suggestion.label,
+            detail: suggestion.detail,
+            is_directory: suggestion.is_directory,
+            is_external: suggestion.is_external,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CreateSessionResponse {
     session_id: u64,
@@ -2605,6 +2703,32 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&"feature".into()));
+
+        let completed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/workspace/paths:complete")
+                    .header(header::AUTHORIZATION, TEST_AUTHORIZATION)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"prefix":"@READ","kind":"file_reference","limit":10}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.status(), StatusCode::OK);
+        let body = to_bytes(completed.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|suggestion| {
+                suggestion["value"] == "@README.md" && suggestion["is_directory"] == false
+            }));
 
         let switched = app
             .oneshot(

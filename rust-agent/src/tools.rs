@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -109,6 +110,8 @@ pub(crate) const DEFAULT_FFF_SEARCH_CONCURRENCY: usize = 1;
 pub(crate) const MAX_FFF_SEARCH_CONCURRENCY: usize = 16;
 const DEFAULT_TEXT_SEARCH_TIMEOUT_MS: u64 = 250;
 const MAX_TEXT_CONTEXT_LINES: usize = 3;
+const DEFAULT_PATH_COMPLETION_RESULTS: usize = 20;
+const MAX_PATH_COMPLETION_RESULTS: usize = 50;
 // Warmup polling follows FFF index latency; lowering it creates mostly empty
 // wakeups while raising it makes first search feedback feel stalled.
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -118,6 +121,48 @@ fn max_command_timeout_ms_usize() -> usize {
 }
 
 static COMMAND_OUTPUT_ARTIFACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Completion mode for user-facing path suggestions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathCompletionKind {
+    FileReference,
+    Path,
+}
+
+/// User-facing path-completion request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PathCompletionQuery {
+    pub(crate) prefix: String,
+    pub(crate) kind: PathCompletionKind,
+    pub(crate) limit: Option<usize>,
+}
+
+/// User-facing path-completion suggestion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PathCompletionSuggestion {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) is_directory: bool,
+    pub(crate) is_external: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PathCompletionEntry {
+    path: String,
+    is_directory: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExternalReadGrants {
+    grants: Arc<Mutex<Vec<ExternalReadGrant>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExternalReadGrant {
+    path: PathBuf,
+    is_directory: bool,
+}
 
 const READ_FILE_TOOL_SPEC: ToolSpec = ToolSpec {
     name: READ_FILE_TOOL,
@@ -687,6 +732,7 @@ pub(crate) struct ToolRegistry {
     root: Arc<PathBuf>,
     search: FffSearchIndex,
     search_permits: Arc<Semaphore>,
+    external_read_grants: ExternalReadGrants,
 }
 
 impl Default for ToolRegistry {
@@ -726,6 +772,7 @@ impl ToolRegistry {
             search: FffSearchIndex::new(root.clone()),
             search_permits: Arc::new(Semaphore::new(search_concurrency)),
             root: Arc::new(root),
+            external_read_grants: ExternalReadGrants::default(),
         }
     }
 
@@ -747,6 +794,19 @@ impl ToolRegistry {
             root: Arc::clone(&self.root),
             search: self.search.clone(),
             search_permits: Arc::clone(&self.search_permits),
+            external_read_grants: self.external_read_grants.clone(),
+        }
+    }
+
+    /// Returns a registry for a new session with shared search state and empty read grants.
+    pub(crate) fn for_new_session(&self) -> Self {
+        Self {
+            policy: self.policy,
+            specs: self.specs.clone(),
+            root: Arc::clone(&self.root),
+            search: self.search.clone(),
+            search_permits: Arc::clone(&self.search_permits),
+            external_read_grants: ExternalReadGrants::default(),
         }
     }
 
@@ -759,6 +819,66 @@ impl ToolRegistry {
     /// Drops the current search state so the next search scans the current workspace tree.
     pub(crate) fn reset_search_index(&self) -> Result<()> {
         self.search.reset()
+    }
+
+    /// Adds external read grants found in a submitted user message.
+    pub(crate) fn grant_external_read_refs_from_text(&self, text: &str) -> Result<()> {
+        self.external_read_grants.add_refs_from_text(text)
+    }
+
+    /// Replaces external read grants from restored user messages.
+    pub(crate) fn replace_external_read_refs<'a>(
+        &self,
+        texts: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        self.external_read_grants.replace_from_texts(texts)
+    }
+
+    /// Completes a user-facing file reference or path token.
+    pub(crate) async fn complete_paths(
+        &self,
+        query: PathCompletionQuery,
+    ) -> Result<Vec<PathCompletionSuggestion>> {
+        let limit = bounded_limit(
+            query.limit,
+            DEFAULT_PATH_COMPLETION_RESULTS,
+            MAX_PATH_COMPLETION_RESULTS,
+        );
+        let parsed = ParsedPathPrefix::parse(&query.prefix);
+        if query.kind == PathCompletionKind::FileReference
+            && !is_external_display_path(&parsed.raw_prefix)
+        {
+            let search = self.search.clone();
+            let search_permits = Arc::clone(&self.search_permits);
+            let raw_prefix = parsed.raw_prefix.clone();
+            return execute_blocking_search(
+                search_permits,
+                move || {
+                    let entries = search.complete_workspace_files(&raw_prefix, limit)?;
+                    Ok(entries
+                        .into_iter()
+                        .map(|entry| {
+                            path_completion_suggestion(
+                                entry,
+                                parsed.is_at_prefix,
+                                parsed.is_quoted_prefix,
+                                false,
+                            )
+                        })
+                        .collect())
+                },
+                "path completion task failed",
+            )
+            .await;
+        }
+
+        let root = Arc::clone(&self.root);
+        tokio::task::spawn_blocking(move || {
+            complete_path_prefix(&root, &parsed, limit)
+                .map_err(|error| anyhow::anyhow!("path completion task failed: {error}"))
+        })
+        .await
+        .context("path completion task panicked")?
     }
 
     /// Returns the stable model-visible tool specs.
@@ -810,9 +930,15 @@ impl ToolRegistry {
         }
 
         let result = match call.name.as_str() {
-            READ_FILE_TOOL => read_file(&self.root, &call.arguments).await,
-            READ_FILE_RANGE_TOOL => read_file_range(&self.root, &call.arguments).await,
-            LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
+            READ_FILE_TOOL => {
+                read_file(&self.root, &self.external_read_grants, &call.arguments).await
+            }
+            READ_FILE_RANGE_TOOL => {
+                read_file_range(&self.root, &self.external_read_grants, &call.arguments).await
+            }
+            LIST_DIR_TOOL => {
+                list_dir(&self.root, &self.external_read_grants, &call.arguments).await
+            }
             SEARCH_FILES_TOOL => {
                 let search = self.search.clone();
                 let search_permits = Arc::clone(&self.search_permits);
@@ -870,13 +996,14 @@ fn tool_execution(call: &ModelToolCall, output: String, success: bool) -> ToolEx
     }
 }
 
-async fn execute_blocking_search<F>(
+async fn execute_blocking_search<F, T>(
     search_permits: Arc<Semaphore>,
     search: F,
     task_context: &'static str,
-) -> Result<String>
+) -> Result<T>
 where
-    F: FnOnce() -> Result<String> + Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
 {
     let _permit = search_permits
         .acquire_owned()
@@ -1020,6 +1147,51 @@ impl FffSearchIndex {
         Ok(format_file_search_results(picker, &results, offset, limit))
     }
 
+    fn complete_workspace_files(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<PathCompletionEntry>> {
+        let state = self.ready_state()?;
+        let picker_guard = state.picker.read()?;
+        let picker = picker_guard
+            .as_ref()
+            .context("search index is not initialized")?;
+        let tracker_guard = state.query_tracker.read()?;
+        let parser = QueryParser::default();
+        let query = parser.parse(query.trim());
+        let results = picker.fuzzy_search_mixed(
+            &query,
+            tracker_guard.as_ref(),
+            FuzzySearchOptions {
+                max_threads: 0,
+                current_file: None,
+                project_path: Some(&self.root),
+                pagination: PaginationArgs { offset: 0, limit },
+                ..Default::default()
+            },
+        );
+
+        let mut entries = Vec::with_capacity(results.items.len());
+        for item in results.items {
+            match item {
+                MixedItemRef::File(file) => {
+                    entries.push(PathCompletionEntry {
+                        path: normalize_display_path(&file.relative_path(picker)),
+                        is_directory: false,
+                    });
+                }
+                MixedItemRef::Dir(dir) => {
+                    entries.push(PathCompletionEntry {
+                        path: normalize_display_path(&dir.relative_path(picker)),
+                        is_directory: true,
+                    });
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     fn search_text(&self, arguments: &str) -> Result<String> {
         let args = parse_search_text_arguments(arguments)?;
         let query = trimmed_required("query", &args.query)?;
@@ -1103,13 +1275,17 @@ impl FffSearchState {
     }
 }
 
-async fn read_file(root: &Path, arguments: &str) -> Result<String> {
+async fn read_file(
+    root: &Path,
+    external_read_grants: &ExternalReadGrants,
+    arguments: &str,
+) -> Result<String> {
     let args = parse_read_file_arguments(arguments)?;
     if args.offset.is_some() || args.limit.is_some() {
-        return read_file_lines(root, &args).await;
+        return read_file_lines(root, external_read_grants, &args).await;
     }
 
-    let path = resolve_workspace_path(root, &args.path)?;
+    let path = resolve_readable_path(root, external_read_grants, &args.path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
@@ -1140,8 +1316,12 @@ async fn read_file(root: &Path, arguments: &str) -> Result<String> {
     Ok(text)
 }
 
-async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String> {
-    let path = resolve_workspace_path(root, &args.path)?;
+async fn read_file_lines(
+    root: &Path,
+    external_read_grants: &ExternalReadGrants,
+    args: &ReadFileArguments,
+) -> Result<String> {
+    let path = resolve_readable_path(root, external_read_grants, &args.path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
@@ -1219,9 +1399,13 @@ async fn read_file_lines(root: &Path, args: &ReadFileArguments) -> Result<String
     ))
 }
 
-async fn read_file_range(root: &Path, arguments: &str) -> Result<String> {
+async fn read_file_range(
+    root: &Path,
+    external_read_grants: &ExternalReadGrants,
+    arguments: &str,
+) -> Result<String> {
     let args = parse_read_file_range_arguments(arguments)?;
-    let path = resolve_workspace_path(root, &args.path)?;
+    let path = resolve_readable_path(root, external_read_grants, &args.path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
@@ -1262,9 +1446,13 @@ async fn read_file_range(root: &Path, arguments: &str) -> Result<String> {
     Ok(text)
 }
 
-async fn list_dir(root: &Path, arguments: &str) -> Result<String> {
+async fn list_dir(
+    root: &Path,
+    external_read_grants: &ExternalReadGrants,
+    arguments: &str,
+) -> Result<String> {
     let args = parse_list_dir_arguments(arguments)?;
-    let path = resolve_workspace_path(root, &args.path)?;
+    let path = resolve_readable_path(root, external_read_grants, &args.path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("failed to inspect {}", display_path(root, &path)))?;
@@ -2908,8 +3096,170 @@ fn resolve_new_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
     Ok(full_path)
 }
 
+impl ExternalReadGrants {
+    fn add_refs_from_text(&self, text: &str) -> Result<()> {
+        let refs = external_read_refs_from_text(text);
+        if refs.is_empty() {
+            return Ok(());
+        }
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|error| anyhow::anyhow!("external read grant lock was poisoned: {error}"))?;
+        for raw in refs {
+            if let Some(grant) = external_read_grant(raw) {
+                if !grants.iter().any(|existing| existing == &grant) {
+                    grants.push(grant);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_from_texts<'a>(&self, texts: impl IntoIterator<Item = &'a str>) -> Result<()> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|error| anyhow::anyhow!("external read grant lock was poisoned: {error}"))?;
+        grants.clear();
+        for text in texts {
+            for raw in external_read_refs_from_text(text) {
+                if let Some(grant) = external_read_grant(raw) {
+                    if !grants.iter().any(|existing| existing == &grant) {
+                        grants.push(grant);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn allows(&self, path: &Path) -> Result<bool> {
+        let grants = self
+            .grants
+            .lock()
+            .map_err(|error| anyhow::anyhow!("external read grant lock was poisoned: {error}"))?;
+        Ok(grants.iter().any(|grant| {
+            path == grant.path || (grant.is_directory && path.starts_with(&grant.path))
+        }))
+    }
+}
+
+fn external_read_grant(raw: String) -> Option<ExternalReadGrant> {
+    let path = expand_external_display_path(&raw)?;
+    let canonical = path.canonicalize().ok()?;
+    let metadata = std::fs::metadata(&canonical).ok()?;
+    Some(ExternalReadGrant {
+        path: canonical,
+        is_directory: metadata.is_dir(),
+    })
+}
+
+fn external_read_refs_from_text(text: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut index = 0usize;
+    while let Some(relative) = text[index..].find('@') {
+        let at = index + relative;
+        if !is_reference_start(text, at) {
+            index = at + 1;
+            continue;
+        }
+
+        let after_at = at + 1;
+        if text[after_at..].starts_with('"') {
+            let start = after_at + 1;
+            if let Some(end_relative) = text[start..].find('"') {
+                let raw = &text[start..start + end_relative];
+                if is_external_display_path(raw) {
+                    refs.push(raw.to_string());
+                }
+                index = start + end_relative + 1;
+            } else {
+                let raw = &text[start..];
+                if is_external_display_path(raw) {
+                    refs.push(raw.to_string());
+                }
+                break;
+            }
+            continue;
+        }
+
+        let end = text[after_at..]
+            .find(is_path_reference_delimiter)
+            .map_or(text.len(), |offset| after_at + offset);
+        let raw = &text[after_at..end];
+        if is_external_display_path(raw) {
+            refs.push(raw.to_string());
+        }
+        index = end;
+    }
+    refs
+}
+
+fn is_reference_start(text: &str, at: usize) -> bool {
+    if at == 0 {
+        return true;
+    }
+    text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(is_path_reference_delimiter)
+}
+
+fn is_path_reference_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '"' | '\'' | '=')
+}
+
+fn normalize_tool_path_argument(path: &str) -> String {
+    let mut trimmed = path.trim();
+    if let Some(stripped) = trimmed.strip_prefix('@') {
+        trimmed = stripped;
+    }
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn expand_external_display_path(path: &str) -> Option<PathBuf> {
+    if path == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from);
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    let requested = Path::new(path);
+    requested.is_absolute().then(|| requested.to_path_buf())
+}
+
+fn is_external_display_path(path: &str) -> bool {
+    path == "~" || path.starts_with("~/") || Path::new(path).is_absolute()
+}
+
+fn resolve_readable_path(
+    root: &Path,
+    external_read_grants: &ExternalReadGrants,
+    path: &str,
+) -> Result<PathBuf> {
+    let normalized = normalize_tool_path_argument(path);
+    if let Some(external) = expand_external_display_path(&normalized) {
+        let canonical = external
+            .canonicalize()
+            .with_context(|| format!("failed to resolve path {normalized}"))?;
+        anyhow::ensure!(
+            external_read_grants.allows(&canonical)?,
+            "external path is not granted for this session: {normalized}"
+        );
+        return Ok(canonical);
+    }
+
+    resolve_workspace_path(root, &normalized)
+}
+
 fn clean_workspace_relative_path(path: &str) -> Result<PathBuf> {
-    let trimmed = path.trim();
+    let normalized = normalize_tool_path_argument(path);
+    let trimmed = normalized.trim();
     anyhow::ensure!(!trimmed.is_empty(), "path cannot be empty");
     let requested = Path::new(trimmed);
     anyhow::ensure!(
@@ -2920,8 +3270,8 @@ fn clean_workspace_relative_path(path: &str) -> Result<PathBuf> {
     let mut clean = PathBuf::new();
     for component in requested.components() {
         match component {
-            std::path::Component::Normal(part) => clean.push(part),
-            std::path::Component::CurDir => {}
+            Component::Normal(part) => clean.push(part),
+            Component::CurDir => {}
             _ => anyhow::bail!("path escapes workspace: {trimmed}"),
         }
     }
@@ -2930,7 +3280,8 @@ fn clean_workspace_relative_path(path: &str) -> Result<PathBuf> {
 }
 
 fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
-    let trimmed = path.trim();
+    let normalized = normalize_tool_path_argument(path);
+    let trimmed = normalized.trim();
     anyhow::ensure!(!trimmed.is_empty(), "path cannot be empty");
     let requested = Path::new(trimmed);
     anyhow::ensure!(
@@ -2947,6 +3298,207 @@ fn resolve_workspace_path(root: &Path, path: &str) -> Result<PathBuf> {
         "path escapes workspace: {trimmed}"
     );
     Ok(canonical)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedPathPrefix {
+    raw_prefix: String,
+    is_at_prefix: bool,
+    is_quoted_prefix: bool,
+}
+
+impl ParsedPathPrefix {
+    fn parse(prefix: &str) -> Self {
+        if let Some(raw) = prefix.strip_prefix("@\"") {
+            return Self {
+                raw_prefix: raw.to_string(),
+                is_at_prefix: true,
+                is_quoted_prefix: true,
+            };
+        }
+        if let Some(raw) = prefix.strip_prefix('"') {
+            return Self {
+                raw_prefix: raw.to_string(),
+                is_at_prefix: false,
+                is_quoted_prefix: true,
+            };
+        }
+        if let Some(raw) = prefix.strip_prefix('@') {
+            return Self {
+                raw_prefix: raw.to_string(),
+                is_at_prefix: true,
+                is_quoted_prefix: false,
+            };
+        }
+        Self {
+            raw_prefix: prefix.to_string(),
+            is_at_prefix: false,
+            is_quoted_prefix: false,
+        }
+    }
+}
+
+fn complete_path_prefix(
+    root: &Path,
+    parsed: &ParsedPathPrefix,
+    limit: usize,
+) -> Result<Vec<PathCompletionSuggestion>> {
+    let Some(scope) = PathCompletionScope::resolve(root, &parsed.raw_prefix) else {
+        return Ok(Vec::new());
+    };
+    let mut suggestions = Vec::new();
+    let name_prefix_lowercase = scope.name_prefix.to_ascii_lowercase();
+    for entry in std::fs::read_dir(&scope.search_dir)
+        .with_context(|| format!("failed to list {}", scope.search_dir.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git"
+            || !name
+                .to_ascii_lowercase()
+                .starts_with(&name_prefix_lowercase)
+        {
+            continue;
+        }
+        let is_directory = entry
+            .metadata()
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        let path = scope.display_path(&name, is_directory);
+        suggestions.push(PathCompletionSuggestion {
+            value: build_completion_value(&path, parsed.is_at_prefix, parsed.is_quoted_prefix),
+            label: format!("{}{}", name, if is_directory { "/" } else { "" }),
+            detail: path,
+            is_directory,
+            is_external: scope.is_external,
+        });
+    }
+
+    suggestions.sort_unstable_by(|left, right| {
+        right
+            .is_directory
+            .cmp(&left.is_directory)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    suggestions.truncate(limit);
+    Ok(suggestions)
+}
+
+#[derive(Debug)]
+struct PathCompletionScope {
+    search_dir: PathBuf,
+    display_base: String,
+    name_prefix: String,
+    is_external: bool,
+}
+
+impl PathCompletionScope {
+    fn resolve(root: &Path, raw_prefix: &str) -> Option<Self> {
+        let external = expand_external_display_path(raw_prefix);
+        let is_external = external.is_some();
+        let expanded = external.unwrap_or_else(|| root.join(raw_prefix));
+        let (search_dir, display_base, name_prefix) = split_completion_scope(raw_prefix, expanded);
+        if !is_external {
+            let canonical_parent = search_dir.canonicalize().ok()?;
+            if !canonical_parent.starts_with(root) {
+                return None;
+            }
+        }
+        if !search_dir.is_dir() {
+            return None;
+        }
+        Some(Self {
+            search_dir,
+            display_base,
+            name_prefix,
+            is_external,
+        })
+    }
+
+    fn display_path(&self, name: &str, is_directory: bool) -> String {
+        let mut path = if self.display_base.is_empty() {
+            name.to_string()
+        } else if self.display_base == "/" {
+            format!("/{name}")
+        } else {
+            format!("{}{name}", self.display_base)
+        };
+        path = normalize_display_path(&path);
+        if is_directory && !path.ends_with('/') {
+            path.push('/');
+        }
+        path
+    }
+}
+
+fn split_completion_scope(raw_prefix: &str, expanded: PathBuf) -> (PathBuf, String, String) {
+    if raw_prefix.is_empty() || raw_prefix == "./" || raw_prefix == "../" {
+        return (expanded, raw_prefix.to_string(), String::new());
+    }
+    if raw_prefix == "~" || raw_prefix == "~/" || raw_prefix == "/" || raw_prefix.ends_with('/') {
+        return (expanded, ensure_display_base(raw_prefix), String::new());
+    }
+
+    let display = normalize_display_path(raw_prefix);
+    let slash = display.rfind('/');
+    let display_base = slash.map_or(String::new(), |index| display[..=index].to_string());
+    let name_prefix = slash.map_or(display.clone(), |index| display[index + 1..].to_string());
+    let search_dir = expanded
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    (search_dir, display_base, name_prefix)
+}
+
+fn ensure_display_base(raw_prefix: &str) -> String {
+    if raw_prefix == "~" {
+        "~/".to_string()
+    } else {
+        normalize_display_path(raw_prefix)
+    }
+}
+
+fn path_completion_suggestion(
+    entry: PathCompletionEntry,
+    is_at_prefix: bool,
+    is_quoted_prefix: bool,
+    is_external: bool,
+) -> PathCompletionSuggestion {
+    let mut detail = normalize_display_path(&entry.path);
+    if entry.is_directory && !detail.ends_with('/') {
+        detail.push('/');
+    }
+    let label = completion_label(&detail, entry.is_directory);
+    PathCompletionSuggestion {
+        value: build_completion_value(&detail, is_at_prefix, is_quoted_prefix),
+        label,
+        detail,
+        is_directory: entry.is_directory,
+        is_external,
+    }
+}
+
+fn completion_label(path: &str, is_directory: bool) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let label = trimmed
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(trimmed);
+    format!("{}{}", label, if is_directory { "/" } else { "" })
+}
+
+fn build_completion_value(path: &str, is_at_prefix: bool, is_quoted_prefix: bool) -> String {
+    let needs_quotes = is_quoted_prefix || path.contains(' ');
+    let prefix = if is_at_prefix { "@" } else { "" };
+    if needs_quotes {
+        format!("{prefix}\"{path}\"")
+    } else {
+        format!("{prefix}{path}")
+    }
+}
+
+fn normalize_display_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn display_path(root: &Path, path: &Path) -> String {
@@ -4102,6 +4654,140 @@ mod tests {
 
         drop(registry);
         fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completes_workspace_and_external_paths() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-complete-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let external = std::env::temp_dir().join(format!(
+            "rust-agent-tools-complete-external-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        let _ = fs::remove_dir_all(&external);
+        fs::create_dir_all(temp.join("src")).unwrap();
+        fs::create_dir_all(external.join("notes dir")).unwrap();
+        fs::write(temp.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(external.join("notes dir").join("plan.md"), "# Plan\n").unwrap();
+
+        let registry = ToolRegistry::for_root(&temp);
+        registry
+            .spawn_search_index_warmup()
+            .await
+            .expect("index initialization task should not panic")
+            .expect("index initialization should finish");
+
+        let workspace = registry
+            .complete_paths(PathCompletionQuery {
+                prefix: "@main".to_string(),
+                kind: PathCompletionKind::FileReference,
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        assert!(workspace
+            .iter()
+            .any(|suggestion| { suggestion.value == "@src/main.rs" && !suggestion.is_external }));
+
+        let external_prefix = format!("@{}/notes", external.display());
+        let external_suggestions = registry
+            .complete_paths(PathCompletionQuery {
+                prefix: external_prefix,
+                kind: PathCompletionKind::FileReference,
+                limit: Some(10),
+            })
+            .await
+            .unwrap();
+        assert!(external_suggestions.iter().any(|suggestion| {
+            suggestion.value.contains("\"")
+                && suggestion.value.ends_with("notes dir/\"")
+                && suggestion.is_directory
+                && suggestion.is_external
+        }));
+
+        drop(registry);
+        fs::remove_dir_all(&temp).unwrap();
+        fs::remove_dir_all(&external).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_read_refs_grant_read_only_access() {
+        let temp = std::env::temp_dir().join(format!(
+            "rust-agent-tools-grants-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let external = std::env::temp_dir().join(format!(
+            "rust-agent-tools-grants-external-{}-{}",
+            std::process::id(),
+            unique_nanos()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        let _ = fs::remove_dir_all(&external);
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        let external_file = external.join("outside.txt");
+        fs::write(&external_file, "external text\n").unwrap();
+
+        let registry = ToolRegistry::for_root_with_policy(&temp, ToolPolicy::WorkspaceWrite);
+        let denied = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_denied".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: format!(r#"{{"path":"{}"}}"#, external_file.display()),
+            })
+            .await;
+        assert!(!denied.success, "{}", denied.output);
+        assert!(denied.output.contains("not granted"), "{}", denied.output);
+
+        registry
+            .grant_external_read_refs_from_text(&format!("read @{}", external_file.display()))
+            .unwrap();
+        let granted = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_granted".to_string(),
+                name: READ_FILE_TOOL.to_string(),
+                arguments: format!(r#"{{"path":"{}"}}"#, external_file.display()),
+            })
+            .await;
+        assert!(granted.success, "{}", granted.output);
+        assert!(
+            granted.output.contains("external text"),
+            "{}",
+            granted.output
+        );
+
+        let patch = registry
+            .execute(ModelToolCall {
+                item_id: None,
+                call_id: "call_patch".to_string(),
+                name: APPLY_PATCH_TOOL.to_string(),
+                arguments: serde_json::json!({
+                    "patch": format!(
+                        "*** Begin Patch\n*** Update File: {}\n@@\n-external text\n+changed\n*** End Patch\n",
+                        external_file.display()
+                    )
+                })
+                .to_string(),
+            })
+            .await;
+        assert!(!patch.success, "{}", patch.output);
+        assert!(
+            patch.output.contains("absolute paths are not allowed"),
+            "{}",
+            patch.output
+        );
+
+        drop(registry);
+        fs::remove_dir_all(&temp).unwrap();
+        fs::remove_dir_all(&external).unwrap();
     }
 
     #[tokio::test]

@@ -121,6 +121,11 @@
       "limit": 50,
       "offset": 0
     },
+    "path_completion": {
+      "kind": "file_reference",
+      "limit": 20,
+      "prefix": "@src/ma"
+    },
     "restore_session": {
       "session_id": 42
     },
@@ -149,6 +154,7 @@
       "features": [
         "workspace",
         "branch_switching",
+        "path_completion",
         "sessions",
         "session_restore",
         "turn_streaming",
@@ -169,7 +175,7 @@
         "compaction",
         "events"
       ],
-      "schema_hash": "15ed59605b918edc",
+      "schema_hash": "b137cf408018b1a7",
       "transports": [
         "http/1.1",
         "http/2",
@@ -208,6 +214,24 @@
         "low",
         "medium",
         "high"
+      ]
+    },
+    "path_completion": {
+      "suggestions": [
+        {
+          "detail": "src/main.rs",
+          "is_directory": false,
+          "is_external": false,
+          "label": "main.rs",
+          "value": "@src/main.rs"
+        },
+        {
+          "detail": "src/models/",
+          "is_directory": true,
+          "is_external": false,
+          "label": "models/",
+          "value": "@src/models/"
+        }
       ]
     },
     "permissions": {

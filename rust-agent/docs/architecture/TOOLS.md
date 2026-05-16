@@ -29,6 +29,25 @@ of running Git directly in the UI process. A successful backend branch switch
 drops the shared FFF search state and starts a fresh warmup so later
 `search_files` and `search_text` calls reflect the new tree.
 
+## Path Completion and References
+
+`POST /workspace/paths:complete` exposes the registry's path completion logic to
+Zeus. File-reference completion keeps ordinary `@src/foo` prompts fuzzy and
+workspace-scoped through FFF, while explicit `@~/` and `@/` prefixes use
+directory-prefix completion. Plain path completion, used by terminal
+passthrough, also uses directory-prefix completion and does not enter
+file-reference mode.
+
+User messages may contain textual file references such as `@src/main.rs`,
+`@"src/My File.md"`, `@~/notes/todo.md`, or `@/tmp/example/`. Workspace
+references remain ordinary text for the model, but tool path arguments may also
+include a leading `@` and optional quotes. Explicit absolute and home
+references create session-local read grants before the turn runs. File grants
+allow `read_file` and `read_file_range`; directory grants allow `list_dir` and
+reads under that directory. Restored sessions rebuild those grants from prior
+user messages. Grants are read-only and never apply to `apply_patch` or
+`exec_command`.
+
 ## Patch Tool
 
 `apply_patch` accepts one JSON argument, `patch`, using this patch shape:
@@ -56,26 +75,30 @@ search. Add and delete operations are path-based.
 
 ## Read and List Tools
 
-`read_file` accepts a required workspace-relative `path`. When `offset` or
+`read_file` accepts a required workspace-relative `path`, or a previously
+referenced absolute/home path covered by a session read grant. When `offset` or
 `limit` is provided, it reads line-oriented pages with 1-indexed line numbers,
 matching the large-file continuation style used by OpenCode and Pi. Paginated
 reads default to 2,000 lines, cap individual returned lines at 2,000 bytes, and
 cap the whole returned page at 64 KiB. They stop after the requested page, and
 they skip or truncate long lines before converting bytes into returned text.
 
-`read_file_range` accepts a required workspace-relative `path`, an optional
+`read_file_range` accepts the same path forms as `read_file`, an optional
 0-indexed byte `offset`, and an optional `max_bytes`. It reads a byte range from
 that offset, caps the returned text at 64 KiB, and appends a truncation marker
 when more bytes are available after the requested range.
 
-`list_dir` accepts a required workspace-relative `path` plus optional `offset`,
-`limit`, and `depth`. Offsets are 1-indexed. Depth defaults to 1 and is capped at
-4. The default list remains capped at 200 entries for compatibility, while
-explicit `limit` values may request up to 500 entries.
+`list_dir` accepts a required workspace-relative path, or a previously
+referenced granted directory path, plus optional `offset`, `limit`, and `depth`.
+Offsets are 1-indexed. Depth defaults to 1 and is capped at 4. The default list
+remains capped at 200 entries for compatibility, while explicit `limit` values
+may request up to 500 entries.
 
 ## Safety
 
-- Absolute paths and paths escaping the workspace are rejected.
+- Absolute paths and paths escaping the workspace are rejected for write and
+  exec behavior. Read/list tools accept absolute or home paths only after the
+  user has granted them through a textual `@` reference in the session.
 - Add-file targets must not already exist.
 - Update and delete targets must be existing UTF-8 files.
 - A patch is parsed and all file changes are planned before any write starts, so

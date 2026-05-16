@@ -26,6 +26,8 @@ use crate::storage::run_blocking;
 use crate::storage::SessionDatabase;
 use crate::storage::StoredSessionLastMessage;
 use crate::storage::StoredSessionMetadata;
+use crate::tools::PathCompletionQuery;
+use crate::tools::PathCompletionSuggestion;
 use crate::tools::ToolPolicy;
 use crate::tools::ToolRegistry;
 use crate::workspace::BranchSwitchResult;
@@ -191,7 +193,7 @@ where
         self.session_or_insert_with(
             session_id,
             SessionConfig::new(self.model_config.default_model()),
-            self.tools.clone(),
+            self.tools.for_new_session(),
         )
         .await?;
         Ok(())
@@ -240,7 +242,7 @@ where
                     stored,
                     self.context_window,
                     self.compaction,
-                    self.tools.clone(),
+                    self.tools.for_new_session(),
                     Some(database.clone()),
                 );
                 let session = Arc::new(SessionHandle::new(agent));
@@ -379,6 +381,18 @@ where
         crate::workspace::snapshot(self.tools.root())
     }
 
+    /// Returns user-facing path-completion suggestions for the active workspace.
+    ///
+    /// # Errors
+    /// Returns an error when the search index or filesystem cannot be queried.
+    pub(crate) async fn complete_paths(
+        &self,
+        query: PathCompletionQuery,
+    ) -> Result<Vec<PathCompletionSuggestion>> {
+        let _workspace_guard = self.workspace_lock.read().await;
+        self.tools.complete_paths(query).await
+    }
+
     /// Switches the configured workspace to a local branch and refreshes search state.
     pub(crate) fn switch_workspace_branch(&self, branch: &str) -> Result<BranchSwitchResult> {
         let Ok(_workspace_guard) = self.workspace_lock.try_write() else {
@@ -405,7 +419,7 @@ where
             .session_or_insert_with(
                 session_id,
                 SessionConfig::new(model.clone()),
-                self.tools.clone(),
+                self.tools.for_new_session(),
             )
             .await?;
 
@@ -438,7 +452,7 @@ where
             .session_or_insert_with(
                 session_id,
                 SessionConfig::new(self.model_config.default_model()),
-                self.tools.with_policy(policy),
+                self.tools.for_new_session().with_policy(policy),
             )
             .await?;
 
@@ -570,7 +584,7 @@ where
         self.session_or_insert_with(
             session_id,
             SessionConfig::new(self.model_config.default_model()),
-            self.tools.clone(),
+            self.tools.for_new_session(),
         )
         .await
     }

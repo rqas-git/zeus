@@ -23,15 +23,17 @@ router through both HTTP compatibility and native HTTP/3 transports.
    port.
 9. Clients can read workspace Git metadata and request branch switches through
    the backend so tool indexes and UI state stay aligned.
-10. Clients can list durable SQLite session metadata for recent-session UIs.
-11. Clients create random server-issued sessions before using turn routes.
-12. Clients can fetch metadata for one durable SQLite session by id.
-13. Clients can restore an existing durable SQLite session by id before using
+10. Clients can request backend-served workspace or explicit absolute/home path
+   completions for prompt UI.
+11. Clients can list durable SQLite session metadata for recent-session UIs.
+12. Clients create random server-issued sessions before using turn routes.
+13. Clients can fetch metadata for one durable SQLite session by id.
+14. Clients can restore an existing durable SQLite session by id before using
    session routes.
-14. Clients can explicitly delete server sessions when they no longer need the
+15. Clients can explicitly delete server sessions when they no longer need the
    state.
-15. Turn requests submit work to `AgentService` and stream named SSE frames.
-16. Compaction requests summarize the active session and publish session events
+16. Turn requests submit work to `AgentService` and stream named SSE frames.
+17. Compaction requests summarize the active session and publish session events
    for passive subscribers.
 
 ## Routes
@@ -46,6 +48,10 @@ router through both HTTP compatibility and native HTTP/3 transports.
 - `GET /permissions` returns the default tool policy and allowed tool policies.
 - `GET /workspace` returns the canonical workspace root plus Git branch
   metadata when the workspace is a Git repository.
+- `POST /workspace/paths:complete` returns path suggestions for prompt
+  autocomplete. `kind=file_reference` performs fuzzy workspace file matching for
+  ordinary `@` refs and prefix directory matching for explicit absolute or home
+  prefixes; `kind=path` uses prefix directory matching for terminal/path mode.
 - `POST /workspace/branch` switches the workspace to a local branch, auto-stashes
   dirty changes, and refreshes backend search state. The switch is rejected
   while a turn or terminal command is using the workspace.
@@ -218,7 +224,10 @@ deployments because any bearer-token holder can ask the model to edit workspace
 files or run local commands. User-initiated terminal commands run through a
 separate route and require the current session policy to be `workspace-exec`;
 the route itself does not grant or revoke `workspace-exec` for future model
-turns.
+turns. User messages may include `@/absolute` or `@~/home` file references;
+those references create session-local read/list grants for the referenced file
+or directory only, and never expand `apply_patch` or `exec_command` beyond the
+workspace.
 WebSocket endpoints are not implemented because SSE matches the current
 server-to-client event flow with less protocol overhead. Set
 `RUST_AGENT_PARENT_PID` only when another local supervisor process should

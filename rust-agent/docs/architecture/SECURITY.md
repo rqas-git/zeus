@@ -1,5 +1,15 @@
 # Security Notes
 
+## External File References
+
+Workspace tools remain workspace-confined by default. A user can explicitly
+grant read-only access to an absolute or home-relative path by sending a textual
+file reference such as `@/tmp/log.txt` or `@~/notes/`. The grant is scoped to
+the active session and restored from prior user messages when a session is
+restored. File grants allow file reads; directory grants allow reads and lists
+under that directory. These grants do not apply to `apply_patch`,
+`exec_command`, or terminal passthrough.
+
 ## Cargo Audit Exceptions
 
 `cargo audit` reads `.cargo/audit.toml` from the repository root.
