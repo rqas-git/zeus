@@ -35,7 +35,7 @@ struct HeaderBar: View {
                     onClearContext()
                 } label: {
                     Text("new session")
-                        .font(TerminalTypography.chatSmall)
+                        .font(TerminalTypography.chatSmallBold)
                         .foregroundStyle(
                             canClearContext
                                 ? TerminalPalette.dimText
