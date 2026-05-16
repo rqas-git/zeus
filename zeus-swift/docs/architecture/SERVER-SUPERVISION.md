@@ -16,7 +16,8 @@ process before the UI creates a session.
    token, and the expected canonical workspace.
 7. Zeus polls `/healthz`, then validates `/` and `/capabilities`.
 8. Startup succeeds only when required features are present:
-   `turn_streaming`, `session_events`, and `terminal_command`.
+   `turn_streaming`, `session_events`, `terminal_command`, `path_completion`,
+   and `session_compaction`.
 
 ## Environment
 

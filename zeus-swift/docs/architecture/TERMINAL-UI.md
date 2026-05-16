@@ -1,11 +1,12 @@
 # Terminal UI Architecture
 
 `ChatWindow` renders a terminal-style SwiftUI interface and maps keyboard input
-to `ChatViewModel` actions.
+and header actions to `ChatViewModel` operations.
 
 ## Layout
 
-- `HeaderBar` shows app chrome, clear-context, and settings controls.
+- `HeaderBar` shows app chrome, manual compaction, clear-context, and settings
+  controls.
 - `TranscriptView` renders transcript lines, assistant markdown, tool rows, and
   search highlights.
 - `InputPrompt` renders the prompt marker, text field, and path-completion

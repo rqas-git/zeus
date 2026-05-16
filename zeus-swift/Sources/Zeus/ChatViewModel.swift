@@ -48,17 +48,18 @@ final class ChatViewModel {
     private(set) var isSwitchingBranch = false
     private(set) var isRunningTerminalCommand = false
     private(set) var isClearingContext = false
+    private(set) var isCompactingContext = false
 
     var canChangeModel: Bool {
-        isReady && !isLoggingIn && !isClearingContext
+        isReady && !isLoggingIn && !isClearingContext && !isCompactingContext
     }
 
     var canChangeEffort: Bool {
-        isReady && !isLoggingIn && !isClearingContext
+        isReady && !isLoggingIn && !isClearingContext && !isCompactingContext
     }
 
     var canChangePermissions: Bool {
-        isReady && !isLoggingIn && !isClearingContext
+        isReady && !isLoggingIn && !isClearingContext && !isCompactingContext
     }
 
     var canChangeBranch: Bool {
@@ -70,6 +71,7 @@ final class ChatViewModel {
             && !isSwitchingBranch
             && !isRunningTerminalCommand
             && !isClearingContext
+            && !isCompactingContext
     }
 
     var canClearContext: Bool {
@@ -79,6 +81,20 @@ final class ChatViewModel {
             && !isSwitchingBranch
             && !isRunningTerminalCommand
             && !isClearingContext
+            && !isCompactingContext
+            && client != nil
+            && sessionID != nil
+    }
+
+    var canCompactContext: Bool {
+        isReady
+            && !isSending
+            && !isLoggingIn
+            && !isSelectingModel
+            && !isSwitchingBranch
+            && !isRunningTerminalCommand
+            && !isClearingContext
+            && !isCompactingContext
             && client != nil
             && sessionID != nil
     }
@@ -116,6 +132,7 @@ final class ChatViewModel {
     @ObservationIgnored private var branchSwitchTask: Task<Void, Never>?
     @ObservationIgnored private var terminalTask: Task<Void, Never>?
     @ObservationIgnored private var contextClearTask: Task<Void, Never>?
+    @ObservationIgnored private var contextCompactTask: Task<Void, Never>?
     @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var pathCompletionTask: Task<Void, Never>?
     @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
@@ -155,6 +172,7 @@ final class ChatViewModel {
         branchSwitchTask?.cancel()
         terminalTask?.cancel()
         contextClearTask?.cancel()
+        contextCompactTask?.cancel()
         searchRefreshTask?.cancel()
         pathCompletionTask?.cancel()
         markdownRenderTask?.cancel()
@@ -208,6 +226,10 @@ final class ChatViewModel {
         guard !message.isEmpty else { return }
         guard !isClearingContext else {
             append(kind: .status, text: "context clear already running")
+            return
+        }
+        guard !isCompactingContext else {
+            append(kind: .status, text: "context compaction already running")
             return
         }
 
@@ -328,6 +350,8 @@ final class ChatViewModel {
         terminalTask = nil
         contextClearTask?.cancel()
         contextClearTask = nil
+        contextCompactTask?.cancel()
+        contextCompactTask = nil
         searchRefreshTask?.cancel()
         searchRefreshTask = nil
         pathCompletionTask?.cancel()
@@ -486,6 +510,38 @@ final class ChatViewModel {
                 refreshSearchMatches(debounce: false)
                 requestScrollToLastLine()
                 try await startSessionEventStream(sessionID: session.sessionID, client: client)
+            } catch {
+                if !Self.isCancellation(error) {
+                    append(kind: .error, text: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func compactContext() {
+        cancelPathCompletion()
+        guard canCompactContext else { return }
+        guard let client, let sessionID else {
+            append(kind: .error, text: "No rust-agent session is available.")
+            return
+        }
+
+        isCompactingContext = true
+        append(kind: .status, text: "compacting context...")
+        contextCompactTask = Task {
+            defer {
+                isCompactingContext = false
+                contextCompactTask = nil
+            }
+            do {
+                try await applySelectedModelForNextTurn(client: client, sessionID: sessionID)
+                let response = try await client.compactSession(
+                    sessionID: sessionID,
+                    instructions: nil,
+                    reasoningEffort: effort
+                )
+                guard self.sessionID == sessionID else { return }
+                append(kind: .status, text: compactionStatus(response))
             } catch {
                 if !Self.isCancellation(error) {
                     append(kind: .error, text: error.localizedDescription)
@@ -678,6 +734,10 @@ final class ChatViewModel {
             append(kind: .status, text: "context clear already running")
             return
         }
+        guard !isCompactingContext else {
+            append(kind: .status, text: "context compaction already running")
+            return
+        }
         guard !isRunningTerminalCommand else {
             append(kind: .status, text: "terminal command already running")
             return
@@ -723,6 +783,10 @@ final class ChatViewModel {
     private func restoreSession(_ targetSessionID: UInt64) {
         guard !isClearingContext else {
             append(kind: .status, text: "context clear already running")
+            return
+        }
+        guard !isCompactingContext else {
+            append(kind: .status, text: "context compaction already running")
             return
         }
         guard !isSending else {
@@ -771,6 +835,10 @@ final class ChatViewModel {
     }
 
     func startLogin() {
+        guard !isCompactingContext else {
+            append(kind: .status, text: "context compaction already running")
+            return
+        }
         guard !isLoggingIn else {
             append(kind: .status, text: "login already running")
             return
@@ -1839,6 +1907,10 @@ final class ChatViewModel {
             return String(format: "%.1fk", rounded)
         }
         return "\(value)"
+    }
+
+    private func compactionStatus(_ response: CompactSessionResponse) -> String {
+        "compaction complete. \(compactNumber(response.tokensBefore)) tokens before compaction"
     }
 
     private func recordSubmittedMessage(_ message: String) {

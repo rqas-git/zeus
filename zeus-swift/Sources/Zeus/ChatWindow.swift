@@ -48,7 +48,9 @@ private struct HeaderSection: View {
         HeaderBar(
             isLoggedIn: viewModel.isLoggedIn,
             canClearContext: viewModel.canClearContext,
+            canCompactContext: viewModel.canCompactContext,
             onClearContext: viewModel.clearContext,
+            onCompactContext: viewModel.compactContext,
             onLogin: viewModel.startLogin,
             onLoginStatus: viewModel.showLoginStatus
         )

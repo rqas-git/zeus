@@ -86,6 +86,22 @@ struct AgentAPIClient: AgentClientProtocol {
         return try decode(CreateSessionResponse.self, from: data)
     }
 
+    func compactSession(
+        sessionID: UInt64,
+        instructions: String?,
+        reasoningEffort: String?
+    ) async throws -> CompactSessionResponse {
+        var request = authenticatedRequest(path: "sessions/\(sessionID)/compact")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try encode(CompactSessionRequest(
+            instructions: instructions,
+            reasoningEffort: reasoningEffort
+        ))
+        let data = try await data(for: request)
+        return try decode(CompactSessionResponse.self, from: data)
+    }
+
     func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse {
         var request = authenticatedRequest(path: "sessions:restore")
         request.httpMethod = "POST"

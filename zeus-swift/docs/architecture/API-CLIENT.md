@@ -30,6 +30,7 @@ uses typed `ZeusCore` request and response models.
 - `POST /sessions:restore`
 - `PUT /sessions/{session_id}/model`
 - `PUT /sessions/{session_id}/permissions`
+- `POST /sessions/{session_id}/compact`
 - `POST /sessions/{session_id}/turns:stream`
 - `GET /sessions/{session_id}/events`
 - `POST /sessions/{session_id}/turns:cancel`

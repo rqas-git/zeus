@@ -13,6 +13,11 @@ protocol AgentClientProtocol {
     ) async throws -> PathCompletionResponse
     func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse
     func createSession() async throws -> CreateSessionResponse
+    func compactSession(
+        sessionID: UInt64,
+        instructions: String?,
+        reasoningEffort: String?
+    ) async throws -> CompactSessionResponse
     func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse
     func setSessionModel(sessionID: UInt64, model: String) async throws -> SessionModelResponse
     func setSessionPermissions(

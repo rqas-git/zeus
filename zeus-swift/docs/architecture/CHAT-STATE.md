@@ -33,12 +33,14 @@ tasks are marked `@ObservationIgnored`.
 8. The clear-context header action creates a fresh backend session, preserves
    the previous SQLite-backed session, and replaces the visible transcript with
    the previous session id needed for `/restore`.
-9. Transcript search refreshes are debounced and scan line snapshots off the
+9. The compact header action manually calls the backend compaction route for the
+   active session, after applying the selected model if needed.
+10. Transcript search refreshes are debounced and scan line snapshots off the
    main actor.
-10. Path and `@` file-reference completion requests are debounced, served by
+11. Path and `@` file-reference completion requests are debounced, served by
    `POST /workspace/paths:complete`, and dropped if the draft changes before
    results return.
-11. Terminal passthrough applies the selected permission policy, sends commands
+12. Terminal passthrough applies the selected permission policy, sends commands
    to `terminal:run`, and appends bounded command output to the transcript.
 
 ## Responsibilities
@@ -63,6 +65,7 @@ tasks are marked `@ObservationIgnored`.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
 - `contextClearTask` owns fresh-session creation for the clear-context action.
+- `contextCompactTask` owns manual active-session context compaction.
 - `pathCompletionTask` owns the active autocomplete request and is cancelled on
   draft changes, submission, mode switches, and newer completion requests.
 - Assistant text display buffering is synchronous within the active model turn,

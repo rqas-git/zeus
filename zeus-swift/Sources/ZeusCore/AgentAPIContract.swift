@@ -316,10 +316,10 @@ public struct TerminalCommandRequest: Codable, Equatable {
 }
 
 public struct CompactSessionRequest: Codable, Equatable {
-    public let instructions: String
-    public let reasoningEffort: String
+    public let instructions: String?
+    public let reasoningEffort: String?
 
-    public init(instructions: String, reasoningEffort: String) {
+    public init(instructions: String? = nil, reasoningEffort: String? = nil) {
         self.instructions = instructions
         self.reasoningEffort = reasoningEffort
     }

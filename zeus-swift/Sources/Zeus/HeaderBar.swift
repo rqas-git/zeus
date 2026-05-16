@@ -14,7 +14,9 @@ struct TerminalBackground: View {
 struct HeaderBar: View {
     let isLoggedIn: Bool
     let canClearContext: Bool
+    let canCompactContext: Bool
     let onClearContext: () -> Void
+    let onCompactContext: () -> Void
     let onLogin: () -> Void
     let onLoginStatus: () -> Void
     @State private var isShowingSettings = false
@@ -30,38 +32,23 @@ struct HeaderBar: View {
             Spacer()
 
             HStack(spacing: 6) {
-                Button {
+                HeaderActionButton(
+                    title: "compact",
+                    isEnabled: canCompactContext,
+                    help: "Compact Context"
+                ) {
+                    isShowingSettings = false
+                    onCompactContext()
+                }
+
+                HeaderActionButton(
+                    title: "new session",
+                    isEnabled: canClearContext,
+                    help: "New Session"
+                ) {
                     isShowingSettings = false
                     onClearContext()
-                } label: {
-                    Text("new session")
-                        .font(TerminalTypography.chatSmallBold)
-                        .foregroundStyle(
-                            canClearContext
-                                ? TerminalPalette.dimText
-                                : TerminalPalette.dimText.opacity(0.35)
-                        )
-                        .padding(.horizontal, 6)
-                        .frame(height: 16)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(TerminalPalette.backgroundLow)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(
-                                    canClearContext
-                                        ? TerminalPalette.border.opacity(0.55)
-                                        : TerminalPalette.border.opacity(0.25),
-                                    lineWidth: 1
-                                )
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .buttonStyle(.plain)
-                .disabled(!canClearContext)
-                .help("New Session")
-                .accessibilityLabel("New Session")
 
                 Button {
                     isShowingSettings.toggle()
@@ -94,6 +81,45 @@ struct HeaderBar: View {
             }
         }
         .zIndex(20)
+    }
+}
+
+private struct HeaderActionButton: View {
+    let title: String
+    let isEnabled: Bool
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(TerminalTypography.chatSmallBold)
+                .foregroundStyle(
+                    isEnabled
+                        ? TerminalPalette.dimText
+                        : TerminalPalette.dimText.opacity(0.35)
+                )
+                .padding(.horizontal, 6)
+                .frame(height: 16)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(TerminalPalette.backgroundLow)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            isEnabled
+                                ? TerminalPalette.border.opacity(0.55)
+                                : TerminalPalette.border.opacity(0.25),
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 

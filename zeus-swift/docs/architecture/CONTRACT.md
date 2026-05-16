@@ -23,8 +23,9 @@ transcript record, or SSE event changes:
 
 - The frontend must not infer undocumented server behavior.
 - Required startup features are validated in `RustAgentServer`.
-- `path_completion` is a required feature because prompt autocomplete depends on
-  the backend route and its workspace/external path policy.
+- `path_completion` and `session_compaction` are required features because the
+  UI depends on backend routes for prompt autocomplete and manual context
+  compaction.
 - Unknown SSE events decode as `.unknown` so newer servers do not crash older
   clients.
 - New UI-visible capabilities should be explicit backend feature flags or route
