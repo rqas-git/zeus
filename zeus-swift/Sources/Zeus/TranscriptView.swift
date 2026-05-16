@@ -300,9 +300,13 @@ private struct TerminalLineView: View, Equatable {
 
     private var toolPrefix: some View {
         Circle()
-            .fill(TerminalPalette.green)
+            .fill(toolPrefixColor)
             .frame(width: Self.messageMarkerSize, height: Self.messageMarkerSize)
             .frame(width: TerminalLayout.markerWidth, alignment: .center)
+    }
+
+    private var toolPrefixColor: Color {
+        line.toolCall?.status == .failed ? TerminalPalette.red : TerminalPalette.green
     }
 
     private func marker(color: Color) -> some View {
