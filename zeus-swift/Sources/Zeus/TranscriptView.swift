@@ -196,7 +196,13 @@ private struct TerminalLineView: View, Equatable {
 
     var body: some View {
         Group {
-            if line.kind == .tool {
+            if isSessionStatusLine {
+                HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
+                    Color.clear
+                        .frame(width: TerminalLayout.markerWidth)
+                    sessionStatusBadge
+                }
+            } else if line.kind == .tool {
                 HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
                     toolPrefix
                         .frame(width: TerminalLayout.markerWidth, alignment: .leading)
@@ -212,6 +218,26 @@ private struct TerminalLineView: View, Equatable {
         }
         .padding(.vertical, isSearchMatch ? 2 : 0)
         .background(searchBackground)
+    }
+
+    private var isSessionStatusLine: Bool {
+        line.kind == .status && line.text.hasPrefix("Session ID: ")
+    }
+
+    private var sessionStatusBadge: some View {
+        Text(line.text)
+            .font(TerminalTypography.chatSmallBold)
+            .foregroundStyle(TerminalPalette.dimText)
+            .padding(.horizontal, 6)
+            .frame(height: 16)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(TerminalPalette.backgroundLow)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(TerminalPalette.border.opacity(0.55), lineWidth: 1)
+            )
     }
 
     @ViewBuilder

@@ -10,7 +10,7 @@ tasks are marked `@ObservationIgnored`.
 
 1. Startup shows progress in the input placeholder, creates the backend client,
    loads models/permissions/workspace, creates a session, and appends the final
-   `Session ID: ...` line to the transcript.
+   `Session ID: ...` line that renders as a bordered transcript label.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
 3. Assistant text deltas are display-buffered on a short cadence, preserving
