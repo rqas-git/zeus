@@ -8,8 +8,9 @@ tasks are marked `@ObservationIgnored`.
 
 ## Flow
 
-1. Startup creates the backend client, loads models/permissions/workspace, and
-   creates a session.
+1. Startup shows progress in the input placeholder, creates the backend client,
+   loads models/permissions/workspace, creates a session, and appends the final
+   `Session ID: ...` line to the transcript.
 2. User prompts are recorded in prompt history, appended to the transcript, and
    sent through the turn stream.
 3. Assistant text deltas are display-buffered on a short cadence, preserving

@@ -7,9 +7,9 @@ window and talks to it over the local HTTP compatibility API.
 
 1. `ZeusApp` creates a `ChatWindowScene`.
 2. The scene owns an Observation-backed `ChatViewModel` in SwiftUI `@State`.
-3. `ChatViewModel.start()` appends startup status, asks `RustAgentServer` to
-   launch the backend for the selected workspace, and receives an
-   `AgentAPIClient`.
+3. `ChatViewModel.start()` shows startup progress in the input placeholder,
+   asks `RustAgentServer` to launch the backend for the selected workspace, and
+   receives an `AgentAPIClient`.
 4. The view model loads models, tool permissions, and workspace metadata.
 5. The view model creates a backend session and starts the passive session event
    stream.

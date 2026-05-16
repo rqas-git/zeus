@@ -38,6 +38,7 @@ final class ChatViewModel {
     ]
     private(set) var showCacheStats = false
     private(set) var tokenUsage = "0 / 272k tokens"
+    private(set) var startupInputPlaceholder: String?
     private(set) var isReady = false
     private(set) var isSending = false
     private(set) var canCancelTurn = false
@@ -104,6 +105,9 @@ final class ChatViewModel {
     }
 
     var inputPlaceholder: String {
+        if let startupInputPlaceholder {
+            return startupInputPlaceholder
+        }
         guard !lines.contains(where: { $0.kind == .user }) else { return "" }
         return isTerminalPassthroughEnabled ? "bash command..." : "type a command or ask anything..."
     }
@@ -185,12 +189,12 @@ final class ChatViewModel {
         guard !started else { return }
         started = true
 
-        append(kind: .status, text: "starting server...")
+        startupInputPlaceholder = "starting server..."
 
         do {
             let client = try await server.start(workspaceURL: workspace.url)
             self.client = client
-            append(kind: .status, text: "creating session...")
+            startupInputPlaceholder = "creating session..."
 
             if let models = try? await client.models() {
                 applyModels(models)
@@ -204,14 +208,16 @@ final class ChatViewModel {
             sessionID = session.sessionID
             applySessionModel(session.model)
             applySessionPermissions(session.toolPolicy ?? selectedPermission)
-            append(kind: .status, text: "connecting session events...")
+            startupInputPlaceholder = "connecting session events..."
             try await startSessionEventStream(sessionID: session.sessionID, client: client)
             isReady = true
-            append(kind: .status, text: "ready. session \(session.sessionID)")
+            startupInputPlaceholder = nil
+            append(kind: .status, text: "Session ID: \(session.sessionID)")
             await refreshAuthStatus()
         } catch {
             started = false
             isReady = false
+            startupInputPlaceholder = nil
             append(kind: .error, text: error.localizedDescription)
         }
     }
@@ -1737,7 +1743,7 @@ final class ChatViewModel {
         applySessionPermissions(session.toolPolicy ?? selectedPermission)
         replaceSubmittedMessages(with: [])
         try await startSessionEventStream(sessionID: session.sessionID, client: client)
-        append(kind: .status, text: "new session ready. session \(session.sessionID)")
+        append(kind: .status, text: "Session ID: \(session.sessionID)")
     }
 
     private func applyModels(_ models: ModelsResponse) {

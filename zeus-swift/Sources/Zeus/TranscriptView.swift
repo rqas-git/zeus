@@ -102,20 +102,14 @@ struct TranscriptView: View {
     private static func startupBlockLastIndex(in lines: [TranscriptLine]) -> Int? {
         guard let first = lines.first,
               first.kind == .status,
-              first.text == "starting server..." else {
+              first.text.hasPrefix("Session ID: ") else {
             return nil
         }
 
         var index = 0
-        var sawReady = false
         while index + 1 < lines.count {
             let next = lines[index + 1]
-            if isStartupProgressLine(next) {
-                index += 1
-            } else if isStartupReadyLine(next) {
-                index += 1
-                sawReady = true
-            } else if sawReady, isStartupAuthStatusLine(next) {
+            if isStartupAuthStatusLine(next) {
                 index += 1
             } else if next.kind == .error {
                 index += 1
@@ -126,16 +120,6 @@ struct TranscriptView: View {
         }
 
         return index
-    }
-
-    private static func isStartupProgressLine(_ line: TranscriptLine) -> Bool {
-        guard line.kind == .status else { return false }
-        return line.text == "creating session..."
-            || line.text == "connecting session events..."
-    }
-
-    private static func isStartupReadyLine(_ line: TranscriptLine) -> Bool {
-        line.kind == .status && line.text.hasPrefix("ready. session ")
     }
 
     private static func isStartupAuthStatusLine(_ line: TranscriptLine) -> Bool {

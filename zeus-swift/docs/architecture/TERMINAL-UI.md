@@ -9,8 +9,8 @@ and header actions to `ChatViewModel` operations.
   controls.
 - `TranscriptView` renders transcript lines, assistant markdown, tool rows, and
   search highlights.
-- `InputPrompt` renders the prompt marker, text field, and path-completion
-  dropdown.
+- `InputPrompt` renders the prompt marker, text field, startup placeholder
+  progress, and path-completion dropdown.
 - `FooterBar` exposes branch, model, effort, permission, and shortcut controls.
 - Dropdowns are rendered by footer menu components with keyboard-highlighted
   options.
@@ -41,7 +41,7 @@ messages only when enabled.
 
 Transcript block separators are render-only UI chrome. `TranscriptView` draws a
 Codex-style dim horizontal rule between tool/work rows and the following
-assistant response, after the initial startup status block, and after the final
+assistant response, after the initial session status block, and after the final
 assistant response for completed turns that displayed tool work. The final
 separator includes the backend-provided `Worked for ...` duration. These
 separators are not persisted, restored, searched, or exposed as transcript
