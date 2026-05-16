@@ -44,7 +44,7 @@ struct HeaderBar: View {
                         .padding(.horizontal, 6)
                         .frame(height: 16)
                         .overlay(
-                            Rectangle()
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .stroke(
                                     canClearContext
                                         ? TerminalPalette.border.opacity(0.55)
@@ -52,7 +52,7 @@ struct HeaderBar: View {
                                     lineWidth: 1
                                 )
                         )
-                        .contentShape(Rectangle())
+                        .contentShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(!canClearContext)
