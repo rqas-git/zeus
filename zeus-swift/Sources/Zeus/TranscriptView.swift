@@ -202,6 +202,8 @@ private struct CodexTranscriptSeparator: View {
 }
 
 private struct TerminalLineView: View, Equatable {
+    private static let messageMarkerSize: CGFloat = 5
+
     let line: TranscriptLine
     let streamingStream: ActiveAssistantStream?
     let isCacheStatsVisible: Bool
@@ -299,13 +301,15 @@ private struct TerminalLineView: View, Equatable {
     private var toolPrefix: some View {
         Circle()
             .fill(TerminalPalette.green)
-            .frame(width: 7, height: 7)
+            .frame(width: Self.messageMarkerSize, height: Self.messageMarkerSize)
+            .frame(width: TerminalLayout.markerWidth, alignment: .center)
     }
 
     private func marker(color: Color) -> some View {
         Circle()
             .fill(color)
-            .frame(width: 7, height: 7)
+            .frame(width: Self.messageMarkerSize, height: Self.messageMarkerSize)
+            .frame(width: TerminalLayout.markerWidth, alignment: .center)
             .alignmentGuide(.firstTextBaseline) { d in d[VerticalAlignment.center] + 5 }
     }
 
