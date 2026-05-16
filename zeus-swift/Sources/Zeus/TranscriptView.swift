@@ -197,11 +197,7 @@ private struct TerminalLineView: View, Equatable {
     var body: some View {
         Group {
             if isSessionStatusLine {
-                HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
-                    Color.clear
-                        .frame(width: TerminalLayout.markerWidth)
-                    sessionStatusBadge
-                }
+                sessionStatusBadge
             } else if line.kind == .tool {
                 HStack(alignment: .center, spacing: TerminalLayout.markerTextSpacing) {
                     toolPrefix
