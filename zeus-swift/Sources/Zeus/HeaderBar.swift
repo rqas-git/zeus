@@ -43,6 +43,10 @@ struct HeaderBar: View {
                         )
                         .padding(.horizontal, 6)
                         .frame(height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(TerminalPalette.backgroundLow)
+                        )
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(
