@@ -9,6 +9,7 @@ Features
 **Complete Keyboard Navigability**
 * The application can entirely be navigated without a mouse.
 * Intuitive keyboard shortcuts for ease-of-use.
+* Use ```↑```, ```↓```, ```→```, ```←```, and ```⏎```to navigate.
 
 **Easy Configuration View**
 * Relevant configurations in easy view with dropdown menus for quick changes.
@@ -37,7 +38,7 @@ Features
 <sup> read tools </sup>
 * ```search_files```, ```search_text```\
 <sup> search tools, fff-backed </sup>
-* ```apply_patch```\
+* apply_patch```\
 <sup> edit tool </sup>
 * ```exec_command```\
 <sup> bash tool </sup>
