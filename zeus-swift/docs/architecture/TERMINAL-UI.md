@@ -7,7 +7,7 @@ and header actions to `ChatViewModel` operations.
 
 - `HeaderBar` shows app chrome, manual compaction, clear-context, and settings
   controls.
-- `TranscriptView` renders transcript lines, the bordered session id label,
+- `TranscriptView` renders transcript lines, the marker-free session id label,
   assistant markdown, tool rows, and search highlights.
 - `InputPrompt` renders the prompt marker, text field, startup placeholder
   progress, and path-completion dropdown.

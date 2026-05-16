@@ -224,16 +224,6 @@ private struct TerminalLineView: View, Equatable {
         Text(line.text)
             .font(TerminalTypography.chatSmallBold)
             .foregroundStyle(TerminalPalette.dimText)
-            .padding(.horizontal, 6)
-            .frame(height: 16)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(TerminalPalette.backgroundLow)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(TerminalPalette.border.opacity(0.55), lineWidth: 1)
-            )
     }
 
     @ViewBuilder
