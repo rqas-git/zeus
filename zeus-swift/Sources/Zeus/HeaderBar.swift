@@ -34,19 +34,20 @@ struct HeaderBar: View {
                     isShowingSettings = false
                     onClearContext()
                 } label: {
-                    Image(systemName: "eraser")
-                        .font(.system(size: 10, weight: .regular))
+                    Text("new session")
+                        .font(TerminalTypography.chatSmall)
                         .foregroundStyle(
                             canClearContext
                                 ? TerminalPalette.dimText
                                 : TerminalPalette.dimText.opacity(0.35)
                         )
-                        .frame(width: 18, height: 16)
+                        .frame(height: 16)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!canClearContext)
-                .help("Clear Context")
+                .help("New Session")
+                .accessibilityLabel("New Session")
 
                 Button {
                     isShowingSettings.toggle()
