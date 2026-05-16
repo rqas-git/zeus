@@ -71,6 +71,7 @@ async fn run_agent(message: Option<String>) -> Result<()> {
 
     match message {
         Some(message) => {
+            let _search_index_warmup = tools.spawn_search_index_warmup();
             let auth = AuthManager::new_default()?;
             let client = ChatGptClient::new(auth, client_config)?;
             let database = SessionDatabase::open(storage.database_path())?;

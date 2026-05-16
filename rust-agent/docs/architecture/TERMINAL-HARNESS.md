@@ -9,9 +9,8 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 2. `login`, `login status`, and `logout` run directly against `AuthManager`.
 3. Chat and server commands load config and auth, then create one
    `AgentService<ChatGptClient>`.
-4. One-shot mode submits the CLI prompt to session `1` with the configured tool
-   policy and leaves FFF indexing lazy unless the model actually calls a search
-   tool.
+4. One-shot mode initializes the FFF scanner in the background, then submits the
+   CLI prompt to session `1` with the configured tool policy.
 5. Interactive mode initializes the FFF scanner in the background, then reuses
    session `1` until the user enters a blank line.
 6. `/model` shows or changes the session model through `AgentService`.
@@ -39,11 +38,9 @@ dispatches server mode, while terminal formatting stays local to the CLI path.
 
 - Terminal flushing is byte and interval bounded.
 - The interactive prompt keeps one warm service and session.
-- Interactive startup initializes FFF on a blocking worker without waiting
-  before showing the prompt. A search tool call is the only path that waits for
-  scanning if it is still running.
-- One-shot prompt mode does not prewarm FFF, so prompts that do not need search
-  avoid the index initialization cost.
+- One-shot and interactive startup initialize FFF on a blocking worker without
+  waiting before submitting the prompt or showing the next prompt. A search tool
+  call is the only path that waits for scanning if it is still running.
 - Shell command execution is opt-in through `workspace-exec`; `exec_command`
   currently permits any bash command string. Command-level restrictions are
   intentionally deferred, so this mode is for trusted local sessions only.
