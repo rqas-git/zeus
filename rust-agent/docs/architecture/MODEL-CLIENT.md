@@ -9,8 +9,9 @@ specific backend provider.
 1. `ChatGptClient::new` builds one reusable async `reqwest::Client`.
 2. `stream_conversation` receives a borrowed prompt window, model-visible tool
    specs, `SessionId`, and selected model.
-3. `AuthManager` returns fresh ChatGPT credentials, refreshing stored tokens
-   when the access token is expired, near expiry, or due for rotation.
+3. `AuthManager` returns cached ChatGPT credentials when they are still usable,
+   refreshing stored tokens when the access token is expired, near expiry, or
+   due for rotation.
 4. The request is serialized from typed borrowed structs, including prior
    `function_call` and `function_call_output` items.
 5. If the backend returns `401 Unauthorized`, the client refreshes credentials
@@ -51,8 +52,9 @@ specific backend provider.
 - Async HTTP avoids blocking backend request workers.
 - The long-lived model HTTP client is reused; auth has a separate long-lived
   HTTP client so token requests do not rebuild transport state.
-- Access tokens are read fresh per request, while refresh is serialized by a
-  small async mutex to avoid concurrent token file rewrites.
+- Usable access credentials are cached in memory between requests. Cache misses
+  and refreshes still read the auth file, and refresh is serialized by a small
+  async mutex to avoid concurrent token file rewrites.
 - Typed request serialization avoids constructing a generic JSON tree first.
 - Tool specs and structured transcript items serialize directly from typed
   borrowed data.

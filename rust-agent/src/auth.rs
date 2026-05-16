@@ -126,6 +126,14 @@ pub(crate) struct AuthManager {
     http: Client,
     issuer: String,
     refresh_lock: Mutex<()>,
+    credential_cache: Mutex<Option<CachedCredentials>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedCredentials {
+    credentials: AuthCredentials,
+    access_expires_at_unix: u64,
+    last_refresh_unix: Option<u64>,
 }
 
 impl AuthManager {
@@ -151,6 +159,7 @@ impl AuthManager {
             http,
             issuer: issuer.into().trim_end_matches('/').to_string(),
             refresh_lock: Mutex::new(()),
+            credential_cache: Mutex::new(None),
         })
     }
 
@@ -164,11 +173,16 @@ impl AuthManager {
     /// # Errors
     /// Returns an error when no login exists, token parsing fails, or refresh fails.
     pub(crate) async fn credentials(&self) -> Result<AuthCredentials> {
+        let now = now_unix();
+        if let Some(credentials) = self.cached_credentials(now).await {
+            return Ok(credentials);
+        }
+
         let auth_file = self.load_required().await?;
-        if auth_file.needs_refresh(now_unix()) {
+        if auth_file.needs_refresh(now) {
             return self.refresh_locked(false).await;
         }
-        auth_file.credentials()
+        self.cache_auth_file(&auth_file).await
     }
 
     /// Refreshes credentials even if the stored access token appears usable.
@@ -237,6 +251,7 @@ impl AuthManager {
         ensure_access_token_is_usable(&auth_file.tokens.access_token)?;
         let credentials = auth_file.credentials()?;
         self.storage.save(&auth_file).await?;
+        self.cache_auth_file(&auth_file).await?;
         Ok(credentials)
     }
 
@@ -271,6 +286,7 @@ impl AuthManager {
             Ok(auth_file) => auth_file,
             Err(error) => {
                 let removed = self.storage.remove().await?;
+                self.clear_credential_cache().await;
                 return Ok(LogoutResult::new(
                     removed,
                     Some(format!("could not read stored auth for revoke: {error}")),
@@ -284,14 +300,22 @@ impl AuthManager {
             }
         }
         let removed = self.storage.remove().await?;
+        self.clear_credential_cache().await;
         Ok(LogoutResult::new(removed, revoke_error))
     }
 
     async fn refresh_locked(&self, force: bool) -> Result<AuthCredentials> {
         let _guard = self.refresh_lock.lock().await;
+        let now = now_unix();
+        if !force {
+            if let Some(credentials) = self.cached_credentials(now).await {
+                return Ok(credentials);
+            }
+        }
+
         let mut auth_file = self.load_required().await?;
-        if !force && !auth_file.needs_refresh(now_unix()) {
-            return auth_file.credentials();
+        if !force && !auth_file.needs_refresh(now) {
+            return self.cache_auth_file(&auth_file).await;
         }
 
         anyhow::ensure!(
@@ -340,6 +364,7 @@ impl AuthManager {
 
         let credentials = auth_file.credentials()?;
         self.storage.save(&auth_file).await?;
+        self.cache_auth_file(&auth_file).await?;
         Ok(credentials)
     }
 
@@ -467,6 +492,43 @@ impl AuthManager {
             .load()
             .await?
             .context("not logged in; run `rust-agent login --device-code`")
+    }
+
+    async fn cached_credentials(&self, now_unix: u64) -> Option<AuthCredentials> {
+        self.credential_cache
+            .lock()
+            .await
+            .as_ref()
+            .filter(|credentials| !credentials.needs_refresh(now_unix))
+            .map(|credentials| credentials.credentials.clone())
+    }
+
+    async fn cache_auth_file(&self, auth_file: &AuthFile) -> Result<AuthCredentials> {
+        let cached = CachedCredentials::from_auth_file(auth_file)?;
+        let credentials = cached.credentials.clone();
+        *self.credential_cache.lock().await = Some(cached);
+        Ok(credentials)
+    }
+
+    async fn clear_credential_cache(&self) {
+        *self.credential_cache.lock().await = None;
+    }
+}
+
+impl CachedCredentials {
+    fn from_auth_file(auth_file: &AuthFile) -> Result<Self> {
+        Ok(Self {
+            credentials: auth_file.credentials()?,
+            access_expires_at_unix: access_token_expiration(&auth_file.tokens.access_token)?,
+            last_refresh_unix: auth_file.last_refresh_unix,
+        })
+    }
+
+    fn needs_refresh(&self, now_unix: u64) -> bool {
+        self.access_expires_at_unix <= now_unix.saturating_add(ACCESS_TOKEN_REFRESH_BUFFER_SECONDS)
+            || self.last_refresh_unix.is_none_or(|last_refresh| {
+                now_unix.saturating_sub(last_refresh) > MAX_REFRESH_AGE_SECONDS
+            })
     }
 }
 
@@ -1024,6 +1086,56 @@ mod tests {
         assert!(requests[0]
             .body
             .contains(r#""refresh_token":"refresh-old""#));
+
+        remove_parent(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn credentials_reuse_in_memory_cache() {
+        let auth_path = temp_auth_file("cache");
+        let storage = AuthStorage::new(auth_path.clone());
+        storage
+            .save(&AuthFile::new(tokens_with_exp(
+                "account-a",
+                now_unix() + 600,
+                "refresh-a",
+            )))
+            .await
+            .unwrap();
+        let auth =
+            AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:9".to_string()).unwrap();
+
+        let first = auth.credentials().await.unwrap();
+        std::fs::write(&auth_path, b"not-json").unwrap();
+        let second = auth.credentials().await.unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(second.account_id(), "account-a");
+
+        remove_parent(&auth_path);
+    }
+
+    #[tokio::test]
+    async fn logout_clears_cached_credentials() {
+        let auth_path = temp_auth_file("logout-cache");
+        let storage = AuthStorage::new(auth_path.clone());
+        storage
+            .save(&AuthFile::new(tokens_with_exp(
+                "account-a",
+                now_unix() + 600,
+                "refresh-a",
+            )))
+            .await
+            .unwrap();
+        let server = TestServer::new(vec![TestResponse::json(200, "{}")]);
+        let auth = AuthManager::for_test(auth_path.clone(), server.url()).unwrap();
+
+        assert_eq!(auth.credentials().await.unwrap().account_id(), "account-a");
+        let result = auth.logout().await.unwrap();
+        let error = auth.credentials().await.unwrap_err().to_string();
+
+        assert!(result.removed());
+        assert!(error.contains("not logged in"));
 
         remove_parent(&auth_path);
     }
