@@ -2,6 +2,12 @@
 name = "rust-agent"
 version = "0.1.0"
 edition = "2021"
+description = "Rust backend for the Zeus macOS agent UI"
+license = "MIT"
+repository = "https://www.github.com/rqas-git/zeus"
+readme = "../README.md"
+keywords = ["agent", "chatgpt", "codex", "backend"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
@@ -62,6 +68,7 @@ redundant_type_annotations = "warn"
 renamed_function_params = "warn"
 semicolon_outside_block = "warn"
 implicit_clone = "warn"
+multiple_crate_versions = "allow" # Transitive dependency graph, tracked through Cargo.lock updates.
 undocumented_unsafe_blocks = "warn"
 unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
