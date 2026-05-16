@@ -8,7 +8,7 @@ extension ZeusCoreChecks {
 
         let ready = try fixture.decodeResponse("server_ready", as: ServerReadyMessage.self)
         try contractRequire(ready.name == "rust-agent", "unexpected readiness name")
-        try contractRequire(ready.protocolVersion == 1, "unexpected readiness protocol")
+        try contractRequire(ready.protocolVersion == 2, "unexpected readiness protocol")
         try contractRequire(ready.token == "contract-token", "unexpected readiness token")
 
         let root = try fixture.decodeResponse("root", as: ServerIdentityResponse.self)
@@ -20,7 +20,7 @@ extension ZeusCoreChecks {
             as: ServerCapabilitiesResponse.self
         )
         try contractRequire(capabilities.name == "rust-agent", "unexpected capabilities identity")
-        try contractRequire(capabilities.protocolVersion == 1, "unexpected capabilities protocol")
+        try contractRequire(capabilities.protocolVersion == 2, "unexpected capabilities protocol")
         try contractRequire(!capabilities.schemaHash.isEmpty, "missing contract schema hash")
         try contractRequire(
             capabilities.features.contains("turn_streaming"),
@@ -182,7 +182,7 @@ extension ZeusCoreChecks {
                 success: true
             ),
             "session.error": .error(sessionID: 42, message: "not logged in"),
-            "turn.completed": .turnCompleted(sessionID: 42),
+            "turn.completed": .turnCompleted(sessionID: 42, durationMS: 123_000),
             "turn.cancelled": .turnCancelled(sessionID: 42),
             "compaction.started": .compactionStarted(sessionID: 42, reason: "manual"),
             "compaction.completed": .compactionCompleted(

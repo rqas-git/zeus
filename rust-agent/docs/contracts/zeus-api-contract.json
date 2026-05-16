@@ -96,6 +96,7 @@
       "type": "turn_cancelled"
     },
     "turn.completed": {
+      "duration_ms": 123000,
       "session_id": 42,
       "type": "turn_completed"
     },
@@ -156,7 +157,7 @@
         "session_compaction"
       ],
       "name": "rust-agent",
-      "protocol_version": 1,
+      "protocol_version": 2,
       "route_groups": [
         "identity",
         "models",
@@ -168,7 +169,7 @@
         "compaction",
         "events"
       ],
-      "schema_hash": "053e6f3a9cc3bf2d",
+      "schema_hash": "15ed59605b918edc",
       "transports": [
         "http/1.1",
         "http/2",
@@ -275,7 +276,7 @@
       "http_addr": "127.0.0.1:4096",
       "name": "rust-agent",
       "pid": 1234,
-      "protocol_version": 1,
+      "protocol_version": 2,
       "token": "contract-token",
       "workspace_root": "/workspace"
     },

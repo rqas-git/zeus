@@ -32,7 +32,7 @@ public enum AgentServerEvent: Decodable, Equatable {
         details: CompactionDetails?
     )
     case error(sessionID: UInt64?, message: String?)
-    case turnCompleted(sessionID: UInt64?)
+    case turnCompleted(sessionID: UInt64?, durationMS: UInt64)
     case turnCancelled(sessionID: UInt64?)
     case unknown(type: String, sessionID: UInt64?)
 
@@ -50,7 +50,7 @@ public enum AgentServerEvent: Decodable, Equatable {
              let .compactionStarted(sessionID, _),
              let .compactionCompleted(sessionID, _, _, _, _, _),
              let .error(sessionID, _),
-             let .turnCompleted(sessionID),
+             let .turnCompleted(sessionID, _),
              let .turnCancelled(sessionID),
              let .unknown(_, sessionID):
             return sessionID
@@ -123,7 +123,10 @@ public enum AgentServerEvent: Decodable, Equatable {
         case "error":
             self = .error(sessionID: payload.sessionID, message: payload.message)
         case "turn_completed":
-            self = .turnCompleted(sessionID: payload.sessionID)
+            self = .turnCompleted(
+                sessionID: payload.sessionID,
+                durationMS: try payload.requiredDurationMS()
+            )
         case "turn_cancelled":
             self = .turnCancelled(sessionID: payload.sessionID)
         default:
@@ -236,6 +239,7 @@ private struct AgentServerEventPayload: Decodable {
     let firstKeptMessageID: UInt64?
     let tokensBefore: UInt64?
     let details: CompactionDetails?
+    let durationMS: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case type
@@ -258,6 +262,7 @@ private struct AgentServerEventPayload: Decodable {
         case firstKeptMessageID = "first_kept_message_id"
         case tokensBefore = "tokens_before"
         case details
+        case durationMS = "duration_ms"
     }
 
     init(from decoder: Decoder) throws {
@@ -282,5 +287,19 @@ private struct AgentServerEventPayload: Decodable {
         firstKeptMessageID = try container.decodeIfPresent(UInt64.self, forKey: .firstKeptMessageID)
         tokensBefore = try container.decodeIfPresent(UInt64.self, forKey: .tokensBefore)
         details = try container.decodeIfPresent(CompactionDetails.self, forKey: .details)
+        durationMS = try container.decodeIfPresent(UInt64.self, forKey: .durationMS)
+    }
+
+    func requiredDurationMS() throws -> UInt64 {
+        guard let durationMS else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.durationMS,
+                DecodingError.Context(
+                    codingPath: [],
+                    debugDescription: "turn_completed event requires duration_ms"
+                )
+            )
+        }
+        return durationMS
     }
 }

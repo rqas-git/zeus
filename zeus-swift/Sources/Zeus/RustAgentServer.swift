@@ -4,7 +4,7 @@ import Security
 import ZeusCore
 
 final class RustAgentServer: AgentServerProtocol {
-    private let requiredProtocolVersion = 1
+    private let requiredProtocolVersion = 2
     private let requiredFeatures = [
         "turn_streaming",
         "session_events",

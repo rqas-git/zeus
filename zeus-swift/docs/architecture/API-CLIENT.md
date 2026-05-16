@@ -41,7 +41,9 @@ message. The passive session event stream keeps the UI aware of session events
 outside the direct turn path, including terminal command and compaction events.
 Both streams use long request timeouts because reasoning and tool execution can
 legitimately keep a turn open without producing assistant text for several
-minutes.
+minutes. Direct `turn.completed` events include `duration_ms`, which the UI uses
+to render Codex-style response timing for completed turns that displayed tool
+work. Cancelled and errored turns do not currently carry timing data.
 
 ## Current Scope
 

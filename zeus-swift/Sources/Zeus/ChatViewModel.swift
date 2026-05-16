@@ -101,6 +101,8 @@ final class ChatViewModel {
     @ObservationIgnored private var started = false
     @ObservationIgnored private var currentAssistantLineID: UUID?
     @ObservationIgnored private var assistantPlaceholderLineID: UUID?
+    @ObservationIgnored private var currentTurnFinalAssistantLineID: UUID?
+    @ObservationIgnored private var currentTurnHadToolActivity = false
     @ObservationIgnored private var toolLineIDsByCallID: [String: UUID] = [:]
     @ObservationIgnored private var toolDisplaysByCallID: [String: ToolCallTranscript] = [:]
     @ObservationIgnored private var lastAssistantScrollRequest = Date.distantPast
@@ -247,6 +249,8 @@ final class ChatViewModel {
         canCancelTurn = true
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         activeAssistantStream = nil
         resetAssistantStreamBuffers()
         lastAssistantScrollRequest = .distantPast
@@ -628,8 +632,10 @@ final class ChatViewModel {
             guard role == "assistant" else { return }
             replaceAssistantText(text ?? "")
             attachPendingCacheStats()
+            currentTurnFinalAssistantLineID = currentAssistantLineID
             currentAssistantLineID = nil
         case let .toolCallStarted(_, toolCallID, toolName, toolArguments):
+            markCurrentTurnToolActivity()
             upsertToolLine(
                 callID: toolCallID,
                 display: toolDisplay(
@@ -639,6 +645,7 @@ final class ChatViewModel {
                 )
             )
         case let .toolCallCompleted(_, toolCallID, toolName, toolArguments, success):
+            markCurrentTurnToolActivity()
             let callID = toolCallID ?? ""
             var display = toolDisplaysByCallID[callID]
                 ?? toolDisplay(
@@ -669,8 +676,8 @@ final class ChatViewModel {
             if isSending {
                 finishErroredTurn()
             }
-        case .turnCompleted:
-            finishTurn()
+        case let .turnCompleted(_, durationMS):
+            finishTurn(durationMS: durationMS)
         case .turnCancelled:
             finishCancelledTurn()
         case .unknown:
@@ -678,14 +685,17 @@ final class ChatViewModel {
         }
     }
 
-    private func finishTurn() {
+    private func finishTurn(durationMS: UInt64? = nil) {
         flushPendingAssistantDelta()
         markCurrentAssistantLineStreaming(false)
+        attachResponseDuration(durationMS)
         isSending = false
         canCancelTurn = false
         streamTask = nil
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         pendingCacheStats.removeAll(keepingCapacity: true)
     }
 
@@ -699,6 +709,8 @@ final class ChatViewModel {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         pendingCacheStats.removeAll(keepingCapacity: true)
         if wasCancellable {
             append(kind: .status, text: "turn cancelled")
@@ -714,6 +726,8 @@ final class ChatViewModel {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         pendingCacheStats.removeAll(keepingCapacity: true)
     }
 
@@ -726,6 +740,8 @@ final class ChatViewModel {
         removeAssistantPlaceholder()
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         pendingCacheStats.removeAll(keepingCapacity: true)
         append(kind: .error, text: error.localizedDescription)
     }
@@ -870,6 +886,23 @@ final class ChatViewModel {
         }
         lines[index].cacheStats.append(contentsOf: pendingCacheStats)
         pendingCacheStats.removeAll(keepingCapacity: true)
+    }
+
+    private func markCurrentTurnToolActivity() {
+        guard isSending else { return }
+        currentTurnHadToolActivity = true
+    }
+
+    private func attachResponseDuration(_ durationMS: UInt64?) {
+        guard currentTurnHadToolActivity,
+              let durationMS,
+              let currentTurnFinalAssistantLineID,
+              let index = lineIndex(for: currentTurnFinalAssistantLineID),
+              lines[index].kind == .assistant else {
+            return
+        }
+        lines[index].responseDurationMS = durationMS
+        requestScrollTo(currentTurnFinalAssistantLineID)
     }
 
     private func showAssistantPlaceholder(_ text: String) {
@@ -1099,6 +1132,8 @@ final class ChatViewModel {
     private func resetActiveTranscriptState() {
         currentAssistantLineID = nil
         assistantPlaceholderLineID = nil
+        currentTurnFinalAssistantLineID = nil
+        currentTurnHadToolActivity = false
         activeAssistantStream = nil
         resetAssistantStreamBuffers()
         pendingCacheStats.removeAll(keepingCapacity: true)

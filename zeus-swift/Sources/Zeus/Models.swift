@@ -81,6 +81,7 @@ struct TranscriptLine: Identifiable, Equatable {
     var cacheStats: [ResponseCacheStats]
     var isStreaming: Bool
     var renderedMarkdown: RenderedTerminalMarkdown?
+    var responseDurationMS: UInt64?
 
     init(
         id: UUID = UUID(),
@@ -89,7 +90,8 @@ struct TranscriptLine: Identifiable, Equatable {
         toolCall: ToolCallTranscript? = nil,
         cacheStats: [ResponseCacheStats] = [],
         isStreaming: Bool = false,
-        renderedMarkdown: RenderedTerminalMarkdown? = nil
+        renderedMarkdown: RenderedTerminalMarkdown? = nil,
+        responseDurationMS: UInt64? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -98,6 +100,7 @@ struct TranscriptLine: Identifiable, Equatable {
         self.cacheStats = cacheStats
         self.isStreaming = isStreaming
         self.renderedMarkdown = renderedMarkdown
+        self.responseDurationMS = responseDurationMS
     }
 
     static func == (lhs: TranscriptLine, rhs: TranscriptLine) -> Bool {
@@ -108,6 +111,7 @@ struct TranscriptLine: Identifiable, Equatable {
             && lhs.cacheStats == rhs.cacheStats
             && lhs.isStreaming == rhs.isStreaming
             && lhs.renderedMarkdown == rhs.renderedMarkdown
+            && lhs.responseDurationMS == rhs.responseDurationMS
     }
 }
 

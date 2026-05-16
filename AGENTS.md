@@ -164,7 +164,7 @@ Zeus launches the backend as an owned child process:
 - It sets `RUST_AGENT_WORKSPACE` to the selected workspace and verifies the
   backend reports the same canonical path.
 - It sets `RUST_AGENT_PARENT_PID` so the backend can exit with the supervisor.
-- It expects protocol version `1` and required features including
+- It expects protocol version `2` and required features including
   `turn_streaming`, `session_events`, and `terminal_command`.
 
 The Swift client currently uses the HTTP compatibility endpoint and SSE. Keep

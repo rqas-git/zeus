@@ -12,7 +12,7 @@ process before the UI creates a session.
    `cargo run --manifest-path rust-agent/Cargo.toml -- serve`.
 4. Zeus launches the backend with loopback port `0` for HTTP and HTTP/3.
 5. stdout and stderr are scanned for the `server_ready` JSON line.
-6. Readiness must report `rust-agent`, protocol version `1`, the generated
+6. Readiness must report `rust-agent`, protocol version `2`, the generated
    token, and the expected canonical workspace.
 7. Zeus polls `/healthz`, then validates `/` and `/capabilities`.
 8. Startup succeeds only when required features are present:

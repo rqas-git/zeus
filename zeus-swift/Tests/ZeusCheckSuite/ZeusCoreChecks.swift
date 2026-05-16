@@ -216,6 +216,13 @@ public enum ZeusCoreChecks {
             turnCancelled == .turnCancelled(sessionID: 7),
             "unexpected turn cancelled event"
         )
+        let turnCompleted = try decodeEvent(
+            #"{"type":"turn_completed","session_id":7,"duration_ms":125000}"#
+        )
+        try require(
+            turnCompleted == .turnCompleted(sessionID: 7, durationMS: 125_000),
+            "unexpected turn completed event"
+        )
 
         let cacheHealth = try decodeEvent(
             #"{"type":"cache_health","session_id":1,"cache":{"model":"gpt-5.5","response_id":"resp_1","cache_status":"reused_prefix","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":3,"reasoning_output_tokens":2,"total_tokens":13}}}"#

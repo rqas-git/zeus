@@ -147,6 +147,9 @@ responses in the completed turn.
 clients can render the requested tool invocation before the tool result arrives.
 The short `args` field is intentional and follows pi-mono's tool execution start
 event shape.
+`turn.completed` includes `duration_ms`, measured from the start of backend turn
+execution through successful completion. Cancelled and errored turns do not
+include duration data.
 Terminal command requests emit the same user-message, session-status, and
 tool-call lifecycle events as model-initiated tool calls. They require the
 session's current tool policy to expose `exec_command`, but the route returns a

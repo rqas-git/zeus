@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct TranscriptView: View {
@@ -13,8 +14,8 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(decoratedLines) { item in
-                        if item.showsSeparatorBefore {
-                            CodexTranscriptSeparator()
+                        if let separator = item.separatorBefore {
+                            CodexTranscriptSeparator(separator: separator)
                         }
                         TerminalLineView(
                             line: item.line,
@@ -27,8 +28,8 @@ struct TranscriptView: View {
                         )
                             .equatable()
                             .id(item.line.id)
-                        if item.showsSeparatorAfter {
-                            CodexTranscriptSeparator()
+                        if let separator = item.separatorAfter {
+                            CodexTranscriptSeparator(separator: separator)
                         }
                     }
                     Color.clear
@@ -62,14 +63,31 @@ struct TranscriptView: View {
         return lines.indices.map { index in
             TranscriptDecoratedLine(
                 line: lines[index],
-                showsSeparatorBefore: Self.showsToolResponseSeparator(
+                separatorBefore: Self.showsToolResponseSeparator(
                     before: index,
                     in: lines
-                ),
-                showsSeparatorAfter: startupBlockLastIndex == index
-                    && index + 1 < lines.count
+                ) ? .plain : nil,
+                separatorAfter: Self.separatorAfter(
+                    index: index,
+                    startupBlockLastIndex: startupBlockLastIndex,
+                    in: lines
+                )
             )
         }
+    }
+
+    private static func separatorAfter(
+        index: Int,
+        startupBlockLastIndex: Int?,
+        in lines: [TranscriptLine]
+    ) -> TranscriptSeparator? {
+        if let durationMS = lines[index].responseDurationMS {
+            return .workedFor(durationMS: durationMS)
+        }
+        if startupBlockLastIndex == index, index + 1 < lines.count {
+            return .plain
+        }
+        return nil
     }
 
     private static func showsToolResponseSeparator(
@@ -132,19 +150,25 @@ private enum TranscriptScrollID {
 
 private struct TranscriptDecoratedLine: Identifiable {
     let line: TranscriptLine
-    let showsSeparatorBefore: Bool
-    let showsSeparatorAfter: Bool
+    let separatorBefore: TranscriptSeparator?
+    let separatorAfter: TranscriptSeparator?
 
     var id: UUID {
         line.id
     }
 }
 
+private enum TranscriptSeparator: Equatable {
+    case plain
+    case workedFor(durationMS: UInt64)
+}
+
 private struct CodexTranscriptSeparator: View {
     private static let rule = String(repeating: "─", count: 240)
+    let separator: TranscriptSeparator
 
     var body: some View {
-        Text(Self.rule)
+        Text(text)
             .font(TerminalTypography.chat)
             .foregroundStyle(TerminalPalette.dimText.opacity(0.72))
             .lineLimit(1)
@@ -152,6 +176,28 @@ private struct CodexTranscriptSeparator: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
             .accessibilityHidden(true)
+    }
+
+    private var text: String {
+        switch separator {
+        case .plain:
+            return Self.rule
+        case let .workedFor(durationMS):
+            return "─ Worked for \(Self.formatElapsed(milliseconds: durationMS)) " + Self.rule
+        }
+    }
+
+    private static func formatElapsed(milliseconds: UInt64) -> String {
+        let seconds = milliseconds / 1_000
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        if seconds < 3_600 {
+            return "\(seconds / 60)m \(String(format: "%02d", Int(seconds % 60)))s"
+        }
+        return "\(seconds / 3_600)h "
+            + "\(String(format: "%02d", Int((seconds % 3_600) / 60)))m "
+            + "\(String(format: "%02d", Int(seconds % 60)))s"
     }
 }
 

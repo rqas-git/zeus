@@ -87,7 +87,7 @@ const MAX_JSON_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
 const DEFAULT_SESSION_LIST_LIMIT: usize = 50;
 const MAX_SESSION_LIST_LIMIT: usize = 200;
 // Bump this only when changing the externally visible HTTP contract.
-const SERVER_PROTOCOL_VERSION: u32 = 1;
+const SERVER_PROTOCOL_VERSION: u32 = 2;
 const CONTRACT_SCHEMA_HASH_PLACEHOLDER: &str = "contract-schema-hash";
 // These arrays are emitted by `/capabilities`; changing them affects Swift
 // feature negotiation and contract fixtures.
@@ -1178,6 +1178,7 @@ where
     let cancellation = TurnCancellation::new();
     let stream_cancellation = cancellation.clone();
     tokio::spawn(async move {
+        let turn_started_at = Instant::now();
         let mut error_forwarded = false;
         let event_tx = tx.clone();
         let mut event_buffer = TurnEventBuffer::new(&event_tx);
@@ -1203,6 +1204,7 @@ where
             Ok(()) => {
                 let event = ServerEvent::TurnCompleted {
                     session_id: session_id.get(),
+                    duration_ms: duration_ms_u64(turn_started_at.elapsed()),
                 };
                 let _ = event_buffer.send(event);
             }
@@ -1818,7 +1820,10 @@ fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
                     modified_files: vec!["src/main.rs".to_string()],
                 },
             },
-            "turn.completed": ServerEvent::TurnCompleted { session_id: 42 },
+            "turn.completed": ServerEvent::TurnCompleted {
+                session_id: 42,
+                duration_ms: 123_000,
+            },
             "turn.cancelled": ServerEvent::TurnCancelled { session_id: 42 },
         },
     })
@@ -1888,6 +1893,7 @@ enum ServerEvent {
     },
     TurnCompleted {
         session_id: u64,
+        duration_ms: u64,
     },
     TurnCancelled {
         session_id: u64,
@@ -1989,7 +1995,7 @@ impl ServerEvent {
             | Self::ToolCallStarted { session_id, .. }
             | Self::ToolCallCompleted { session_id, .. }
             | Self::Error { session_id, .. }
-            | Self::TurnCompleted { session_id }
+            | Self::TurnCompleted { session_id, .. }
             | Self::TurnCancelled { session_id } => SessionId::new(*session_id),
         }
     }
@@ -2013,6 +2019,10 @@ impl ServerEvent {
             Self::TurnCancelled { .. } => "turn.cancelled",
         }
     }
+}
+
+fn duration_ms_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3248,7 +3258,7 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("event: message.text_delta\ndata: {\"type\":\"text_delta\",\"session_id\":7,\"delta\":\"hel\"}\n\n"));
         assert!(body.contains(
-            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7,\"duration_ms\":"
         ));
     }
 
@@ -3321,7 +3331,7 @@ mod tests {
         assert!(text_delta_count < DELTAS, "{body}");
         assert!(body.contains(&format!(r#""text":"{}""#, "x".repeat(DELTAS))));
         assert!(body.contains(
-            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7,\"duration_ms\":"
         ));
     }
 
@@ -3486,7 +3496,7 @@ mod tests {
             "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"after drop\"}\n\n"
         ));
         assert!(body.contains(
-            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7,\"duration_ms\":"
         ));
         assert_eq!(turn.load(Ordering::SeqCst), 2);
     }
@@ -3554,7 +3564,7 @@ mod tests {
             "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"second\"}\n\n"
         ));
         assert!(body.contains(
-            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7,\"duration_ms\":"
         ));
         assert!(!body.contains("event: turn.cancelled\n"));
         assert_eq!(turn.load(Ordering::SeqCst), 2);
@@ -3833,7 +3843,7 @@ mod tests {
             "event: message.completed\ndata: {\"type\":\"message_completed\",\"session_id\":7,\"role\":\"assistant\",\"text\":\"ok\"}\n\n"
         ));
         assert!(body.contains(
-            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7}\n\n"
+            "event: turn.completed\ndata: {\"type\":\"turn_completed\",\"session_id\":7,\"duration_ms\":"
         ));
         assert_eq!(turn.load(Ordering::SeqCst), 3);
         drop(first_response);

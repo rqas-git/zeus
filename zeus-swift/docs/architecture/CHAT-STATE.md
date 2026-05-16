@@ -24,7 +24,10 @@ tasks are marked `@ObservationIgnored`.
    Cache-health events are also collected for the active assistant response and
    shown only when `/show-cache` is enabled.
 6. Completion, cancellation, and error paths clear turn-local state and update
-   readiness flags.
+   readiness flags. Successful direct turns attach the backend-provided
+   `duration_ms` to the final assistant transcript line when the turn displayed
+   tool work, so the transcript can render a Codex-style `Worked for ...`
+   separator without persisting that UI chrome.
 7. `/restore <session id>` replaces transcript and prompt history from backend
    durable records.
 8. The clear-context header action creates a fresh backend session, preserves
