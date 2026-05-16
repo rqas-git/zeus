@@ -39,7 +39,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    match parse_cli_command(std::env::args().skip(1).collect())? {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    match parse_cli_command(&args)? {
         CliCommand::Interactive => run_agent(None).await,
         CliCommand::Prompt(message) => run_agent(Some(message)).await,
         CliCommand::Serve => run_server().await,
@@ -69,27 +70,18 @@ async fn run_agent(message: Option<String>) -> Result<()> {
         tool_config.search_concurrency(),
     );
 
-    match message {
-        Some(message) => {
-            let _search_index_warmup = tools.spawn_search_index_warmup();
-            let auth = AuthManager::new_default()?;
-            let client = ChatGptClient::new(auth, client_config)?;
-            let database = SessionDatabase::open(storage.database_path())?;
-            let service = AgentService::with_tools(client, context, models, tools)
-                .with_database(database)
-                .with_compaction(compaction);
-            print_agent_response(&service, session_id, output, telemetry, message).await
-        }
-        None => {
-            let _search_index_warmup = tools.spawn_search_index_warmup();
-            let auth = AuthManager::new_default()?;
-            let client = ChatGptClient::new(auth, client_config)?;
-            let database = SessionDatabase::open(storage.database_path())?;
-            let service = AgentService::with_tools(client, context, models, tools)
-                .with_database(database)
-                .with_compaction(compaction);
-            run_interactive_loop(&service, session_id, output, telemetry).await
-        }
+    let _search_index_warmup = tools.spawn_search_index_warmup();
+    let auth = AuthManager::new_default()?;
+    let client = ChatGptClient::new(auth, client_config)?;
+    let database = SessionDatabase::open(storage.database_path())?;
+    let service = AgentService::with_tools(client, context, models, tools)
+        .with_database(database)
+        .with_compaction(compaction);
+
+    if let Some(message) = message {
+        print_agent_response(&service, session_id, output, telemetry, message).await
+    } else {
+        run_interactive_loop(&service, session_id, output, telemetry).await
     }
 }
 
@@ -178,7 +170,7 @@ enum CliCommand {
     Logout,
 }
 
-fn parse_cli_command(args: Vec<String>) -> Result<CliCommand> {
+fn parse_cli_command(args: &[String]) -> Result<CliCommand> {
     let Some(first) = args.first() else {
         return Ok(CliCommand::Interactive);
     };
@@ -309,8 +301,7 @@ async fn print_agent_response(
 fn log_cache_health(cache_health: &CacheHealth) {
     let usage = cache_health
         .usage
-        .map(token_usage_log_fields)
-        .unwrap_or(serde_json::Value::Null);
+        .map_or(serde_json::Value::Null, token_usage_log_fields);
     let entry = serde_json::json!({
         "event": "cache.health.observed",
         "message": "cache health observed for {model.name}",
@@ -448,11 +439,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::bench_support::mib_per_second;
+    use crate::bench_support::usize_per_second;
     use crate::bench_support::DurationSummary;
 
     #[test]
     fn delta_writer_batches_until_threshold_or_finish() {
-        let output = config::OutputConfig::new(Duration::from_secs(60), 8);
+        let output = config::OutputConfig::new(Duration::from_mins(1), 8);
         let mut writer = DeltaWriter::new(Vec::new(), output);
 
         writer.write_delta("hello").unwrap();
@@ -476,7 +469,7 @@ mod tests {
         const DELTAS: usize = 200_000;
         const SAMPLES: usize = 15;
 
-        let output = config::OutputConfig::new(Duration::from_secs(60), 4096);
+        let output = config::OutputConfig::new(Duration::from_mins(1), 4096);
         let mut samples = Vec::with_capacity(SAMPLES);
         let mut output_bytes = 0usize;
 
@@ -496,8 +489,8 @@ mod tests {
         }
 
         let summary = DurationSummary::from_samples(&mut samples);
-        let deltas_per_s = DELTAS as f64 / summary.median.as_secs_f64();
-        let throughput_mib_s = output_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        let deltas_per_s = usize_per_second(DELTAS, summary.median);
+        let throughput_mib_s = mib_per_second(output_bytes, summary.median);
         println!(
             "delta_writer_many_small_deltas deltas={DELTAS} bytes={output_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} deltas_per_s={:.0} throughput_mib_s={:.1}",
             summary.min_ms(),
@@ -531,36 +524,36 @@ mod tests {
 
     #[test]
     fn parses_cli_commands() {
-        assert_eq!(parse_cli_command(vec![]).unwrap(), CliCommand::Interactive);
+        assert_eq!(parse_cli_command(&[]).unwrap(), CliCommand::Interactive);
         assert_eq!(
-            parse_cli_command(vec!["hello".to_string(), "world".to_string()]).unwrap(),
+            parse_cli_command(&["hello".to_string(), "world".to_string()]).unwrap(),
             CliCommand::Prompt("hello world".to_string())
         );
         assert_eq!(
-            parse_cli_command(vec!["login".to_string()]).unwrap(),
+            parse_cli_command(&["login".to_string()]).unwrap(),
             CliCommand::LoginDeviceCode
         );
         assert_eq!(
-            parse_cli_command(vec!["login".to_string(), "--device-code".to_string()]).unwrap(),
+            parse_cli_command(&["login".to_string(), "--device-code".to_string()]).unwrap(),
             CliCommand::LoginDeviceCode
         );
         assert_eq!(
-            parse_cli_command(vec!["login".to_string(), "status".to_string()]).unwrap(),
+            parse_cli_command(&["login".to_string(), "status".to_string()]).unwrap(),
             CliCommand::LoginStatus
         );
         assert_eq!(
-            parse_cli_command(vec!["login".to_string(), "--status".to_string()]).unwrap(),
+            parse_cli_command(&["login".to_string(), "--status".to_string()]).unwrap(),
             CliCommand::LoginStatus
         );
         assert_eq!(
-            parse_cli_command(vec!["contract".to_string()]).unwrap(),
+            parse_cli_command(&["contract".to_string()]).unwrap(),
             CliCommand::Contract
         );
         assert_eq!(
-            parse_cli_command(vec!["logout".to_string()]).unwrap(),
+            parse_cli_command(&["logout".to_string()]).unwrap(),
             CliCommand::Logout
         );
-        assert!(parse_cli_command(vec!["logout".to_string(), "now".to_string()]).is_err());
-        assert!(parse_cli_command(vec!["login".to_string(), "bad".to_string()]).is_err());
+        parse_cli_command(&["logout".to_string(), "now".to_string()]).unwrap_err();
+        parse_cli_command(&["login".to_string(), "bad".to_string()]).unwrap_err();
     }
 }

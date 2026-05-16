@@ -1,4 +1,4 @@
-//! Minimal ChatGPT Codex Responses client.
+//! Minimal `ChatGPT` Codex Responses client.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -125,7 +125,7 @@ pub(crate) enum ConversationRole {
     Assistant,
 }
 
-/// Async client for ChatGPT requests through rust-agent auth.
+/// Async client for `ChatGPT` requests through rust-agent auth.
 pub(crate) struct ChatGptClient {
     auth: AuthManager,
     config: ClientConfig,
@@ -279,6 +279,10 @@ impl ModelStreamer for ChatGptClient {
 }
 
 impl ChatGptClient {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "central request builder keeps model streaming inputs explicit"
+    )]
     async fn stream_conversation_inner<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
@@ -490,7 +494,7 @@ fn update_request_input_hash(hash: &mut Fnv1a64, message: &ConversationMessage<'
 }
 
 fn conversation_input_bytes(messages: &[ConversationMessage<'_>]) -> usize {
-    messages.iter().map(|message| message.input_bytes()).sum()
+    messages.iter().map(ConversationMessage::input_bytes).sum()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -561,14 +565,14 @@ impl Serialize for ResponsesInput<'_> {
 }
 
 impl ConversationRole {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
         }
     }
 
-    fn content_type(&self) -> &'static str {
+    fn content_type(self) -> &'static str {
         match self {
             Self::User => "input_text",
             Self::Assistant => "output_text",
@@ -616,9 +620,7 @@ impl Serialize for ResponsesMessage<'_> {
                 state.end()
             }
             ConversationMessage::FunctionOutput {
-                call_id,
-                output,
-                success: _,
+                call_id, output, ..
             } => {
                 let mut state = serializer.serialize_struct("ResponsesFunctionOutput", 3)?;
                 state.serialize_field("type", "function_call_output")?;
@@ -1030,6 +1032,7 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
+    use crate::bench_support::mib_per_second;
     use crate::bench_support::DurationSummary;
     use crate::test_http::TestResponse;
     use crate::test_http::TestServer;
@@ -1605,7 +1608,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         }
 
         let summary = DurationSummary::from_samples(&mut samples);
-        let throughput_mib_s = stream.len() as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        let throughput_mib_s = mib_per_second(stream.len(), summary.median);
 
         println!(
             "sse_parser_large_stream events={EVENTS} bytes={} samples={SAMPLES} chunk_bytes={CHUNK_BYTES} min_ms={:.3} median_ms={:.3} max_ms={:.3} throughput_mib_s={:.1}",
@@ -1658,8 +1661,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tok
         }
 
         let summary = DurationSummary::from_samples(&mut samples);
-        let throughput_mib_s =
-            serialized_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        let throughput_mib_s = mib_per_second(serialized_bytes, summary.median);
 
         println!(
             "responses_request_serialization_large_history groups={GROUPS} messages={} bytes={serialized_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} throughput_mib_s={:.1}",

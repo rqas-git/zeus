@@ -96,8 +96,8 @@ impl Default for TurnCancellation {
 struct TurnCancelled;
 
 impl fmt::Display for TurnCancelled {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("turn cancelled")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("turn cancelled")
     }
 }
 
@@ -405,6 +405,10 @@ impl CompactionReason {
 
 /// Provider token usage reported for one completed model response.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "provider usage fields intentionally mirror token counter names"
+)]
 pub(crate) struct TokenUsage {
     pub(crate) input_tokens: Option<u64>,
     pub(crate) cached_input_tokens: Option<u64>,
@@ -432,6 +436,10 @@ impl TokenUsage {
     }
 
     /// Returns the ratio of cached input tokens to all input tokens.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "cache hit ratio is approximate telemetry"
+    )]
     pub(crate) fn cache_hit_ratio(self) -> Option<f64> {
         let input_tokens = self.input_tokens?;
         if input_tokens == 0 {
@@ -608,6 +616,10 @@ pub(crate) trait ModelStreamer: Sync {
     ) -> impl Future<Output = Result<ModelResponse>> + Send + 'a;
 
     /// Sends the prompt window with an optional reasoning effort override.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "streaming API keeps turn request fields explicit at the service boundary"
+    )]
     fn stream_conversation_with_reasoning<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
@@ -633,6 +645,10 @@ pub(crate) trait ModelStreamer: Sync {
     }
 
     /// Sends the prompt window with routing state scoped to the current turn.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "streaming API keeps turn request fields explicit at the service boundary"
+    )]
     fn stream_conversation_with_turn_state<'a>(
         &'a self,
         messages: &'a [ConversationMessage<'a>],
@@ -1059,6 +1075,7 @@ pub(crate) struct AgentLoop {
 }
 
 /// Chainable construction for an agent loop session.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct AgentLoopBuilder {
     session_id: SessionId,
@@ -1069,6 +1086,7 @@ pub(crate) struct AgentLoopBuilder {
     database: Option<SessionDatabase>,
 }
 
+#[cfg(test)]
 impl AgentLoopBuilder {
     /// Sets context-window bounds.
     pub(crate) const fn context_window(mut self, context_window: ContextWindowConfig) -> Self {
@@ -1088,7 +1106,7 @@ impl AgentLoopBuilder {
         self
     }
 
-    /// Enables durable SQLite-backed storage.
+    /// Enables durable `SQLite`-backed storage.
     pub(crate) fn database(mut self, database: SessionDatabase) -> Self {
         self.database = Some(database);
         self
@@ -1115,6 +1133,7 @@ impl AgentLoopBuilder {
 
 impl AgentLoop {
     /// Starts an agent-loop builder for one session.
+    #[cfg(test)]
     pub(crate) fn builder(session_id: SessionId, config: SessionConfig) -> AgentLoopBuilder {
         AgentLoopBuilder {
             session_id,
@@ -1177,7 +1196,7 @@ impl AgentLoop {
             .expect("in-memory agent loop construction should not fail")
     }
 
-    /// Creates an agent loop backed by durable SQLite session storage.
+    /// Creates an agent loop backed by durable `SQLite` session storage.
     ///
     /// # Errors
     /// Returns an error when the session cannot be loaded or initialized.
@@ -1196,6 +1215,7 @@ impl AgentLoop {
             .build()
     }
 
+    #[cfg(test)]
     fn from_database(builder: AgentLoopBuilder, database: SessionDatabase) -> Result<Self> {
         let AgentLoopBuilder {
             session_id,
@@ -1205,26 +1225,23 @@ impl AgentLoop {
             tools,
             ..
         } = builder;
-        let store = match database.load_session(session_id)? {
-            Some(stored) => {
-                let was_running = stored.status == SessionStatus::Running;
-                let agent = Self::from_stored_session(
-                    session_id,
-                    stored,
-                    context_window,
-                    compaction,
-                    tools,
-                    Some(database.clone()),
-                );
-                if was_running {
-                    database.set_session_status(session_id, SessionStatus::Idle)?;
-                }
-                return Ok(agent);
+        let store = if let Some(stored) = database.load_session(session_id)? {
+            let was_running = stored.status == SessionStatus::Running;
+            let agent = Self::from_stored_session(
+                session_id,
+                stored,
+                context_window,
+                compaction,
+                tools,
+                Some(database.clone()),
+            );
+            if was_running {
+                database.set_session_status(session_id, SessionStatus::Idle)?;
             }
-            None => {
-                database.ensure_session(session_id, config.model())?;
-                InMemorySessionStore::new(session_id, config)
-            }
+            return Ok(agent);
+        } else {
+            database.ensure_session(session_id, config.model())?;
+            InMemorySessionStore::new(session_id, config)
         };
         Ok(Self {
             store,
@@ -1690,7 +1707,7 @@ impl AgentLoop {
         let mut on_delta = |delta: &str| emit(AgentEvent::TextDelta { session_id, delta });
         let mut model_response = tokio::select! {
             biased;
-            _ = cancellation.cancelled() => return Err(TurnCancelled.into()),
+            () = cancellation.cancelled() => return Err(TurnCancelled.into()),
             response = model.stream_conversation_with_turn_state(
                 &history,
                 self.tools.specs(),

@@ -1,4 +1,4 @@
-//! Owned ChatGPT OAuth storage and refresh handling.
+//! Owned `ChatGPT` OAuth storage and refresh handling.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -32,7 +32,7 @@ const ACCESS_TOKEN_REFRESH_BUFFER_SECONDS: u64 = 60;
 const MAX_REFRESH_AGE_SECONDS: u64 = 8 * 24 * 60 * 60;
 // Device login should wait long enough for a human browser round trip but still
 // return control to the terminal on abandoned attempts.
-const DEVICE_CODE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEVICE_CODE_TIMEOUT: Duration = Duration::from_mins(15);
 // Temporary auth files include random suffixes; sixteen attempts covers rare
 // collisions without spinning forever on permission problems.
 const AUTH_TEMP_ATTEMPTS: u8 = 16;
@@ -52,12 +52,12 @@ impl AuthCredentials {
         }
     }
 
-    /// Returns the bearer token for the ChatGPT backend request.
+    /// Returns the bearer token for the `ChatGPT` backend request.
     pub(crate) fn access_token(&self) -> &str {
         &self.access_token
     }
 
-    /// Returns the selected ChatGPT account/workspace id.
+    /// Returns the selected `ChatGPT` account/workspace id.
     pub(crate) fn account_id(&self) -> &str {
         &self.account_id
     }
@@ -151,7 +151,7 @@ impl AuthManager {
 
     fn with_issuer(storage: AuthStorage, issuer: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .build()
             .context("failed to build auth HTTP client")?;
         Ok(Self {
@@ -250,7 +250,7 @@ impl AuthManager {
         });
         ensure_access_token_is_usable(&auth_file.tokens.access_token)?;
         let credentials = auth_file.credentials()?;
-        self.storage.save(&auth_file).await?;
+        self.storage.save(&auth_file)?;
         self.cache_auth_file(&auth_file).await?;
         Ok(credentials)
     }
@@ -363,7 +363,7 @@ impl AuthManager {
         ensure_access_token_is_usable(&auth_file.tokens.access_token)?;
 
         let credentials = auth_file.credentials()?;
-        self.storage.save(&auth_file).await?;
+        self.storage.save(&auth_file)?;
         self.cache_auth_file(&auth_file).await?;
         Ok(credentials)
     }
@@ -575,6 +575,10 @@ struct RefreshRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "OAuth refresh responses use token-suffixed JSON field names"
+)]
 struct RefreshResponse {
     id_token: Option<String>,
     access_token: Option<String>,
@@ -590,6 +594,10 @@ struct RevokeRequest<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "OAuth token responses use token-suffixed JSON field names"
+)]
 struct TokenExchangeResponse {
     id_token: String,
     access_token: String,
@@ -667,7 +675,7 @@ impl AuthStorage {
         }
     }
 
-    async fn save(&self, auth_file: &AuthFile) -> Result<()> {
+    fn save(&self, auth_file: &AuthFile) -> Result<()> {
         let parent = self
             .path
             .parent()
@@ -749,7 +757,7 @@ fn create_private_temp_file(path: &Path, parent: &Path) -> Result<(PathBuf, std:
         let temp_path = temp_auth_path(path, parent, attempt)?;
         match open_private_new_file(&temp_path) {
             Ok(file) => return Ok((temp_path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(error).with_context(|| {
                     format!("failed to create auth file {}", temp_path.display())
@@ -781,24 +789,33 @@ fn temp_auth_path(path: &Path, parent: &Path, attempt: u8) -> Result<PathBuf> {
 fn open_private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600);
-    }
+    configure_private_new_file_options(&mut options);
 
     let file = options.open(path)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-
+    ensure_private_new_file_permissions(&file)?;
     Ok(file)
+}
+
+#[cfg(unix)]
+fn configure_private_new_file_options(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn configure_private_new_file_options(_options: &mut std::fs::OpenOptions) {}
+
+#[cfg(unix)]
+fn ensure_private_new_file_permissions(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn ensure_private_new_file_permissions(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn write_private_file_contents(file: &mut std::fs::File, bytes: &[u8]) -> Result<()> {
@@ -997,7 +1014,7 @@ mod tests {
         let storage = AuthStorage::new(auth_path.clone());
         let auth_file = AuthFile::new(tokens_with_exp("account-a", now_unix() + 600, "refresh"));
 
-        storage.save(&auth_file).await.unwrap();
+        storage.save(&auth_file).unwrap();
 
         #[cfg(unix)]
         assert_eq!(
@@ -1019,32 +1036,31 @@ mod tests {
         let stale_temp = auth_path.with_extension("json.tmp");
         std::fs::write(&stale_temp, b"stale").unwrap();
         #[cfg(unix)]
-        {
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o777)).unwrap();
-            std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o777)).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&stale_temp, std::fs::Permissions::from_mode(0o644)).unwrap();
         let storage = AuthStorage::new(auth_path.clone());
         let auth_file = AuthFile::new(tokens_with_exp("account-a", now_unix() + 600, "refresh"));
 
-        storage.save(&auth_file).await.unwrap();
+        storage.save(&auth_file).unwrap();
 
         assert_eq!(storage.load().await.unwrap(), Some(auth_file));
         assert_eq!(std::fs::read_to_string(&stale_temp).unwrap(), "stale");
         #[cfg(unix)]
-        {
-            assert_eq!(
-                std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-            assert_eq!(
-                std::fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-            assert_eq!(
-                std::fs::metadata(&stale_temp).unwrap().permissions().mode() & 0o777,
-                0o644
-            );
-        }
+        assert_eq!(
+            std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&stale_temp).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
 
         remove_parent(&auth_path);
     }
@@ -1058,7 +1074,6 @@ mod tests {
                 tokens: tokens_with_exp("account-old", now_unix() - 60, "refresh-old"),
                 last_refresh_unix: Some(now_unix()),
             })
-            .await
             .unwrap();
         let refreshed_access = access_token(now_unix() + 600);
         let refreshed_id = id_token("account-new");
@@ -1100,7 +1115,6 @@ mod tests {
                 now_unix() + 600,
                 "refresh-a",
             )))
-            .await
             .unwrap();
         let auth =
             AuthManager::for_test(auth_path.clone(), "http://127.0.0.1:9".to_string()).unwrap();
@@ -1125,7 +1139,6 @@ mod tests {
                 now_unix() + 600,
                 "refresh-a",
             )))
-            .await
             .unwrap();
         let server = TestServer::new(vec![TestResponse::json(200, "{}")]);
         let auth = AuthManager::for_test(auth_path.clone(), server.url()).unwrap();
@@ -1202,7 +1215,6 @@ mod tests {
                 now_unix() + 600,
                 "refresh-a",
             )))
-            .await
             .unwrap();
         let server = TestServer::new(vec![TestResponse::json(500, r#"{"error":"nope"}"#)]);
         let auth = AuthManager::for_test(auth_path.clone(), server.url()).unwrap();

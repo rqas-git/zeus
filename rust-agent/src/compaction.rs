@@ -93,7 +93,7 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages."#;
 
-const TURN_PREFIX_SUMMARY_PROMPT: &str = r#"This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+const TURN_PREFIX_SUMMARY_PROMPT: &str = r"This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
 
 Summarize the prefix to provide context for the retained suffix:
 
@@ -106,7 +106,7 @@ Summarize the prefix to provide context for the retained suffix:
 ## Context for Suffix
 - [Information needed to understand the retained recent work]
 
-Be concise. Focus on what's needed to understand the kept suffix."#;
+Be concise. Focus on what's needed to understand the kept suffix.";
 
 /// File operation details persisted with compaction entries.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -390,8 +390,8 @@ fn find_cut_point(
 
 fn valid_cut_points(messages: &[AgentMessage], start: usize, end: usize) -> Vec<usize> {
     let mut cut_points = Vec::new();
-    for index in start..end {
-        match messages[index].item() {
+    for (index, message) in messages.iter().enumerate().take(end).skip(start) {
+        match message.item() {
             AgentItem::Message { .. } | AgentItem::FunctionCall { .. } => cut_points.push(index),
             AgentItem::FunctionOutput { .. } | AgentItem::Compaction { .. } => {}
         }
@@ -541,10 +541,10 @@ fn extract_patch_paths(patch: &str, modified: &mut BTreeSet<String>) {
             "*** Delete File: ",
             "*** Move to: ",
         ] {
-            if let Some(path) = line.strip_prefix(prefix) {
-                let path = path.trim();
-                if !path.is_empty() {
-                    modified.insert(path.to_string());
+            if let Some(patch_path) = line.strip_prefix(prefix) {
+                let patch_path = patch_path.trim();
+                if !patch_path.is_empty() {
+                    modified.insert(patch_path.to_string());
                 }
             }
         }

@@ -36,3 +36,17 @@ impl DurationSummary {
 pub(crate) fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
+
+pub(crate) fn usize_per_second(count: usize, duration: Duration) -> f64 {
+    f64::from(u32::try_from(count).expect("benchmark count should fit in u32"))
+        / duration.as_secs_f64()
+}
+
+pub(crate) fn u64_per_second(count: u64, duration: Duration) -> f64 {
+    f64::from(u32::try_from(count).expect("benchmark count should fit in u32"))
+        / duration.as_secs_f64()
+}
+
+pub(crate) fn mib_per_second(bytes: usize, duration: Duration) -> f64 {
+    usize_per_second(bytes, duration) / 1024.0 / 1024.0
+}

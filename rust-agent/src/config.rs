@@ -101,7 +101,7 @@ impl AppConfig {
     }
 }
 
-/// Configuration for ChatGPT Codex backend requests.
+/// Configuration for `ChatGPT` Codex backend requests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClientConfig {
     instructions: String,
@@ -155,7 +155,7 @@ impl ClientConfig {
         &self.instructions
     }
 
-    /// Returns the ChatGPT Codex Responses endpoint.
+    /// Returns the `ChatGPT` Codex Responses endpoint.
     pub(crate) fn responses_url(&self) -> &str {
         &self.responses_url
     }
@@ -210,23 +210,19 @@ impl ModelConfig {
     /// Returns an error if no allowed models are configured or the default is not allowed.
     pub(crate) fn from_env() -> Result<Self> {
         let default_model = normalized_model(env_string("RUST_AGENT_MODEL", DEFAULT_MODEL))?;
-        let allowed_models = match env_model_list("RUST_AGENT_ALLOWED_MODELS") {
-            Some(models) => {
-                let models = normalized_model_list(models)?;
-                anyhow::ensure!(
-                    models.iter().any(|model| model == &default_model),
-                    "RUST_AGENT_MODEL={default_model:?} is not in RUST_AGENT_ALLOWED_MODELS"
-                );
-                models
+        let allowed_models = if let Some(models) = env_model_list("RUST_AGENT_ALLOWED_MODELS") {
+            let models = normalized_model_list(models)?;
+            anyhow::ensure!(
+                models.iter().any(|model| model == &default_model),
+                "RUST_AGENT_MODEL={default_model:?} is not in RUST_AGENT_ALLOWED_MODELS"
+            );
+            models
+        } else {
+            let mut models = load_codex_model_allowlist().unwrap_or_else(default_allowed_models);
+            if !models.iter().any(|model| model == &default_model) {
+                models.push(default_model.clone());
             }
-            None => {
-                let mut models =
-                    load_codex_model_allowlist().unwrap_or_else(default_allowed_models);
-                if !models.iter().any(|model| model == &default_model) {
-                    models.push(default_model.clone());
-                }
-                models
-            }
+            models
         };
         let (default_reasoning_effort, reasoning_efforts) =
             load_codex_reasoning_config(&allowed_models, &default_model)
@@ -749,12 +745,11 @@ impl StorageConfig {
     pub(crate) fn from_env() -> Result<Self> {
         Ok(Self {
             database_path: env_optional_path("RUST_AGENT_STATE_DB")
-                .map(Ok)
-                .unwrap_or_else(default_database_path)?,
+                .map_or_else(default_database_path, Ok)?,
         })
     }
 
-    /// Returns the SQLite session database path.
+    /// Returns the `SQLite` session database path.
     pub(crate) fn database_path(&self) -> &std::path::Path {
         &self.database_path
     }
@@ -871,14 +866,14 @@ fn workspace_root_from_env() -> Result<PathBuf> {
         Some(path) => path,
         None => std::env::current_dir().context("failed to read current workspace directory")?,
     };
-    canonical_workspace_root(root)
+    canonical_workspace_root(&root)
 }
 
 fn default_workspace_root() -> PathBuf {
     workspace_root_from_env().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn canonical_workspace_root(root: PathBuf) -> Result<PathBuf> {
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to resolve RUST_AGENT_WORKSPACE={}", root.display()))?;
@@ -1114,8 +1109,7 @@ fn env_parse_u64(name: &str, default: u64) -> Result<u64> {
 fn env_parse_stream_idle_timeout_secs() -> Result<u64> {
     if std::env::var("RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS")
         .ok()
-        .filter(|value| !value.is_empty())
-        .is_some()
+        .is_some_and(|value| !value.is_empty())
     {
         return env_parse_u64(
             "RUST_AGENT_STREAM_IDLE_TIMEOUT_SECS",
@@ -1195,7 +1189,7 @@ mod tests {
             parse_tool_policy("bash").unwrap(),
             ToolPolicy::WorkspaceExec
         );
-        assert!(parse_tool_policy("network").is_err());
+        parse_tool_policy("network").unwrap_err();
     }
 
     #[test]
@@ -1205,8 +1199,8 @@ mod tests {
             validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY).unwrap(),
             MAX_FFF_SEARCH_CONCURRENCY
         );
-        assert!(validate_tool_search_concurrency(0).is_err());
-        assert!(validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).is_err());
+        validate_tool_search_concurrency(0).unwrap_err();
+        validate_tool_search_concurrency(MAX_FFF_SEARCH_CONCURRENCY + 1).unwrap_err();
     }
 
     #[test]
@@ -1218,28 +1212,28 @@ mod tests {
     fn default_stream_idle_timeout_matches_codex_stream_budget() {
         assert_eq!(
             ClientConfig::default().stream_idle_timeout(),
-            Duration::from_secs(300)
+            Duration::from_mins(5)
         );
     }
 
     #[test]
     fn resolves_canonical_workspace_roots() {
         let current = std::env::current_dir().unwrap();
-        assert_eq!(canonical_workspace_root(current.clone()).unwrap(), current);
+        assert_eq!(canonical_workspace_root(&current).unwrap(), current);
 
         let missing = std::env::temp_dir().join(format!(
             "rust-agent-missing-workspace-{}",
             std::process::id()
         ));
-        assert!(canonical_workspace_root(missing).is_err());
+        canonical_workspace_root(&missing).unwrap_err();
     }
 
     #[test]
     fn validates_parent_pid() {
         assert_eq!(parse_parent_pid("RUST_AGENT_PARENT_PID", "2").unwrap(), 2);
-        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "1").is_err());
-        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "0").is_err());
-        assert!(parse_parent_pid("RUST_AGENT_PARENT_PID", "not-a-pid").is_err());
+        parse_parent_pid("RUST_AGENT_PARENT_PID", "1").unwrap_err();
+        parse_parent_pid("RUST_AGENT_PARENT_PID", "0").unwrap_err();
+        parse_parent_pid("RUST_AGENT_PARENT_PID", "not-a-pid").unwrap_err();
     }
 
     #[test]
@@ -1250,7 +1244,7 @@ mod tests {
 
         assert_eq!(validate_http_addr(loopback_v4, false).unwrap(), loopback_v4);
         assert_eq!(validate_http_addr(loopback_v6, false).unwrap(), loopback_v6);
-        assert!(validate_http_addr(remote, false).is_err());
+        validate_http_addr(remote, false).unwrap_err();
         assert_eq!(validate_http_addr(remote, true).unwrap(), remote);
     }
 
