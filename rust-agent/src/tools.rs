@@ -3,6 +3,7 @@
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
 use std::path::Path;
@@ -111,6 +112,10 @@ const MAX_TEXT_CONTEXT_LINES: usize = 3;
 // Warmup polling follows FFF index latency; lowering it creates mostly empty
 // wakeups while raising it makes first search feedback feel stalled.
 const FFF_SCAN_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+fn max_command_timeout_ms_usize() -> usize {
+    usize::try_from(MAX_COMMAND_TIMEOUT_MS).expect("command timeout limit should fit in usize")
+}
 
 static COMMAND_OUTPUT_ARTIFACT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -659,7 +664,7 @@ impl Serialize for ExecCommandProperties {
             &IntegerProperty {
                 description: "Maximum command runtime in milliseconds.",
                 minimum: 1,
-                maximum: MAX_COMMAND_TIMEOUT_MS as usize,
+                maximum: max_command_timeout_ms_usize(),
             },
         )?;
         map.serialize_entry(
@@ -797,16 +802,11 @@ impl ToolRegistry {
             };
         }
 
-        match call.name.as_str() {
-            EXEC_COMMAND_TOOL => {
-                return exec_command(&self.root, &call.arguments, cancellation)
-                    .await
-                    .map(|output| tool_execution(call, output.output, output.success))
-                    .unwrap_or_else(|error| {
-                        tool_execution(call, format!("Tool error: {error}"), false)
-                    });
-            }
-            _ => {}
+        if call.name == EXEC_COMMAND_TOOL {
+            return match exec_command(&self.root, &call.arguments, cancellation).await {
+                Ok(output) => tool_execution(call, output.output, output.success),
+                Err(error) => tool_execution(call, format!("Tool error: {error}"), false),
+            };
         }
 
         let result = match call.name.as_str() {
@@ -815,7 +815,7 @@ impl ToolRegistry {
             LIST_DIR_TOOL => list_dir(&self.root, &call.arguments).await,
             SEARCH_FILES_TOOL => {
                 let search = self.search.clone();
-                let search_permits = self.search_permits.clone();
+                let search_permits = Arc::clone(&self.search_permits);
                 let arguments = call.arguments.clone();
                 execute_blocking_search(
                     search_permits,
@@ -826,7 +826,7 @@ impl ToolRegistry {
             }
             SEARCH_TEXT_TOOL => {
                 let search = self.search.clone();
-                let search_permits = self.search_permits.clone();
+                let search_permits = Arc::clone(&self.search_permits);
                 let arguments = call.arguments.clone();
                 execute_blocking_search(
                     search_permits,
@@ -987,7 +987,7 @@ impl FffSearchIndex {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| anyhow::anyhow!("search index lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("search index lock was poisoned: {error}"))?;
         *state = None;
         Ok(())
     }
@@ -1057,7 +1057,7 @@ impl FffSearchIndex {
         let mut state = self
             .state
             .lock()
-            .map_err(|_| anyhow::anyhow!("search index lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("search index lock was poisoned: {error}"))?;
         if let Some(state) = state.as_ref() {
             return Ok(state.clone());
         }
@@ -1446,7 +1446,7 @@ async fn exec_command(
         cancellation,
     )
     .await?;
-    Ok(process_result_output(result))
+    Ok(process_result_output(&result))
 }
 
 async fn apply_patch(root: &Path, arguments: &str) -> Result<String> {
@@ -1638,7 +1638,7 @@ fn parse_grep_mode(mode: Option<&str>) -> Result<GrepMode> {
     let mode = mode.map(str::trim).filter(|mode| !mode.is_empty());
     let mode = mode.map(str::to_ascii_lowercase);
     match mode.as_deref() {
-        None | Some("plain") | Some("literal") => Ok(GrepMode::PlainText),
+        None | Some("plain" | "literal") => Ok(GrepMode::PlainText),
         Some("regex") => Ok(GrepMode::Regex),
         Some("fuzzy") => Ok(GrepMode::Fuzzy),
         Some(mode) => anyhow::bail!("unsupported search_text mode {mode:?}"),
@@ -1730,16 +1730,18 @@ fn format_line_read_result(
     let last_line = offset.saturating_add(lines.len()).saturating_sub(1);
     if cut_by_bytes {
         let next_offset = last_line.saturating_add(1);
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(Output capped at {MAX_FILE_BYTES} bytes. Showing lines {offset}-{last_line}. Use offset={next_offset} to continue.)"
-        ));
+        );
     } else if has_more {
         let next_offset = last_line.saturating_add(1);
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(Showing lines {offset}-{last_line}. Use offset={next_offset} to continue.)"
-        ));
+        );
     } else {
-        output.push_str(&format!("\n(End of file - total {line_count} lines)"));
+        let _ = write!(output, "\n(End of file - total {line_count} lines)");
     }
 
     output.push_str("\n</content>");
@@ -1787,10 +1789,11 @@ impl CappedText {
 
     fn finish(mut self, label: &str) -> String {
         if self.truncated {
-            self.output.push_str(&format!(
+            let _ = write!(
+                self.output,
                 "\n[truncated: {label} exceeds {} bytes]",
                 self.max_bytes
-            ));
+            );
         }
         self.output
     }
@@ -1939,7 +1942,7 @@ async fn kill_process(child_id: Option<u32>, child: &mut tokio::process::Child) 
         // SAFETY: Negative PID targets the process group created by
         // `configure_process_group`; errors are intentionally best-effort here.
         unsafe {
-            let _ = libc::kill(-(child_id as libc::pid_t), libc::SIGKILL);
+            let _ = libc::kill(-child_id.cast_signed(), libc::SIGKILL);
         }
         return;
     }
@@ -2032,7 +2035,7 @@ async fn create_command_output_artifact(
                     file,
                 });
             }
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("failed to create {}", display_path(root, &path)));
@@ -2090,7 +2093,7 @@ impl LimitedOutput {
     }
 }
 
-fn process_result_output(result: ProcessResult) -> ToolOutput {
+fn process_result_output(result: &ProcessResult) -> ToolOutput {
     let success = result
         .status
         .as_ref()
@@ -2098,7 +2101,7 @@ fn process_result_output(result: ProcessResult) -> ToolOutput {
         && !result.timed_out
         && !result.cancelled
         && !result.output_limit_exceeded;
-    let output = format_process_result(&result);
+    let output = format_process_result(result);
     ToolOutput { output, success }
 }
 
@@ -2115,19 +2118,16 @@ fn format_process_result(result: &ProcessResult) -> String {
     });
     output.push('\n');
     if result.timed_out {
-        output.push_str(&format!(
-            "status: timed out after {} ms\n",
-            result.timeout_ms
-        ));
+        let _ = writeln!(output, "status: timed out after {} ms", result.timeout_ms);
     } else if result.cancelled {
         output.push_str("status: cancelled\n");
     } else if result.output_limit_exceeded {
-        output.push_str(&format!(
-            "status: output exceeded {} bytes; process killed\n",
-            MAX_COMMAND_TOTAL_OUTPUT_BYTES
-        ));
-    } else if let Some(status) = result.status.as_ref() {
-        output.push_str(&format!("status: {}\n", format_exit_status(status)));
+        let _ = writeln!(
+            output,
+            "status: output exceeded {MAX_COMMAND_TOTAL_OUTPUT_BYTES} bytes; process killed"
+        );
+    } else if let Some(status) = result.status {
+        let _ = writeln!(output, "status: {}", format_exit_status(status));
     }
     push_limited_section(&mut output, "stdout", &result.stdout);
     push_limited_section(&mut output, "stderr", &result.stderr);
@@ -2139,17 +2139,19 @@ fn push_limited_section(output: &mut String, name: &str, limited: &LimitedOutput
     output.push_str(":\n");
     if limited.is_truncated() {
         if let Some(path) = limited.artifact_path.as_ref() {
-            output.push_str(&format!(
-                "[truncated: {name} showing last {} of {} bytes; full output saved to {path}]\n",
+            let _ = writeln!(
+                output,
+                "[truncated: {name} showing last {} of {} bytes; full output saved to {path}]",
                 limited.bytes.len(),
                 limited.total_bytes
-            ));
+            );
         } else {
-            output.push_str(&format!(
-                "[truncated: {name} showing last {} of {} bytes]\n",
+            let _ = writeln!(
+                output,
+                "[truncated: {name} showing last {} of {} bytes]",
                 limited.bytes.len(),
                 limited.total_bytes
-            ));
+            );
         }
     }
     output.push_str(&String::from_utf8_lossy(&limited.bytes));
@@ -2158,7 +2160,7 @@ fn push_limited_section(output: &mut String, name: &str, limited: &LimitedOutput
     }
 }
 
-fn format_exit_status(status: &std::process::ExitStatus) -> String {
+fn format_exit_status(status: std::process::ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit {code}"),
         None => "terminated by signal".to_string(),
@@ -2212,10 +2214,11 @@ fn format_file_search_results(
         }
         output.push('\n');
     }
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "[matched={} total_files={} total_dirs={} offset={} limit={}]",
         results.total_matched, results.total_files, results.total_dirs, offset, limit
-    ));
+    );
     output
 }
 
@@ -2607,13 +2610,7 @@ fn find_line_sequence(
         return Some(last_start);
     }
 
-    for index in start..=last_start {
-        if line_sequence_matches(lines, pattern, index, matcher) {
-            return Some(index);
-        }
-    }
-
-    None
+    (start..=last_start).find(|&index| line_sequence_matches(lines, pattern, index, matcher))
 }
 
 fn line_sequence_matches(
@@ -2765,6 +2762,9 @@ async fn rollback_applied_change(root: &Path, change: &PreparedChange) -> Result
             path,
             backup_path: Some(backup_path),
             ..
+        }
+        | PreparedChange::Delete {
+            path, backup_path, ..
         } => restore_backup_file(root, path, backup_path).await,
         PreparedChange::Write {
             path,
@@ -2773,9 +2773,6 @@ async fn rollback_applied_change(root: &Path, change: &PreparedChange) -> Result
         } => remove_file_if_exists(path)
             .await
             .with_context(|| format!("failed to remove added {}", display_path(root, path))),
-        PreparedChange::Delete {
-            path, backup_path, ..
-        } => restore_backup_file(root, path, backup_path).await,
     }
 }
 
@@ -2826,7 +2823,7 @@ async fn create_temp_sibling(path: &Path) -> Result<(PathBuf, tokio::fs::File)> 
             .await
         {
             Ok(file) => return Ok((temp_path, file)),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("failed to create {}", temp_path.display()));
@@ -2865,9 +2862,10 @@ fn format_patch_summary(changes: &[PreparedChange]) -> String {
                 after_bytes,
                 ..
             } => {
-                output.push_str(&format!(
+                let _ = write!(
+                    output,
                     "updated {display_path} ({before_bytes} -> {after_bytes} bytes)"
-                ));
+                );
             }
             PreparedChange::Write {
                 display_path,
@@ -2875,14 +2873,14 @@ fn format_patch_summary(changes: &[PreparedChange]) -> String {
                 after_bytes,
                 ..
             } => {
-                output.push_str(&format!("added {display_path} ({after_bytes} bytes)"));
+                let _ = write!(output, "added {display_path} ({after_bytes} bytes)");
             }
             PreparedChange::Delete {
                 display_path,
                 before_bytes,
                 ..
             } => {
-                output.push_str(&format!("deleted {display_path} ({before_bytes} bytes)"));
+                let _ = write!(output, "deleted {display_path} ({before_bytes} bytes)");
             }
         }
     }
@@ -2960,6 +2958,7 @@ fn display_path(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::fs;
 
     use serde_json::json;
@@ -2968,6 +2967,10 @@ mod tests {
     use crate::bench_support::DurationSummary;
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tool schema fixture intentionally covers every read-only tool"
+    )]
     fn serializes_tool_specs_without_allocating_json_values() {
         let specs = tool_specs_for_policy(ToolPolicy::ReadOnly);
 
@@ -3208,7 +3211,7 @@ mod tests {
                             "type": "integer",
                             "description": "Maximum command runtime in milliseconds.",
                             "minimum": 1,
-                            "maximum": MAX_COMMAND_TIMEOUT_MS as usize,
+                            "maximum": max_command_timeout_ms_usize(),
                         },
                         "max_output_bytes": {
                             "type": "integer",
@@ -3406,6 +3409,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "integration test covers command success, failure, caps, and artifact output"
+    )]
     async fn executes_shell_commands_and_allows_git() {
         let _shell_guard = SHELL_TEST_LOCK.lock().await;
         let temp = std::env::temp_dir().join(format!(
@@ -3892,7 +3899,7 @@ mod tests {
         assert!(fs::metadata(temp.join("b.txt")).unwrap().is_dir());
         let leaked_temp = fs::read_dir(&temp)
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .find(|name| name.contains(".rust-agent-"));
         assert_eq!(leaked_temp, None);
@@ -4621,10 +4628,10 @@ mod tests {
     fn patch_many_large_files(files: usize) -> String {
         let mut patch = String::from("*** Begin Patch\n");
         for index in 0..files {
-            patch.push_str(&format!("*** Update File: file-{index:02}.txt\n"));
+            let _ = writeln!(patch, "*** Update File: file-{index:02}.txt");
             patch.push_str("@@\n");
-            patch.push_str(&format!("-old-{index}\n"));
-            patch.push_str(&format!("+new-{index}\n"));
+            let _ = writeln!(patch, "-old-{index}");
+            let _ = writeln!(patch, "+new-{index}");
         }
         patch.push_str("*** End Patch\n");
         patch

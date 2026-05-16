@@ -338,7 +338,7 @@ fn emit_server_ready(
     Ok(())
 }
 
-fn log_server_event(name: &'static str, message: &'static str, fields: serde_json::Value) {
+fn log_server_event(name: &'static str, message: &'static str, fields: impl Serialize) {
     let entry = serde_json::json!({
         "event": name,
         "message": message,
@@ -648,7 +648,7 @@ impl SessionRegistry {
             let mut sessions = self
                 .sessions
                 .lock()
-                .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+                .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?;
             anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
             if sessions.insert(session_id) {
                 return Ok(session_id);
@@ -661,7 +661,7 @@ impl SessionRegistry {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?;
         if sessions.contains(&session_id) {
             return Ok(false);
         }
@@ -674,7 +674,7 @@ impl SessionRegistry {
         Ok(self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?
+            .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?
             .contains(&session_id))
     }
 
@@ -682,7 +682,7 @@ impl SessionRegistry {
         Ok(self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?
+            .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?
             .remove(&session_id))
     }
 
@@ -695,7 +695,7 @@ impl SessionRegistry {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("session registry lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("session registry lock was poisoned: {error}"))?;
         anyhow::ensure!(sessions.len() < self.max_sessions, "session limit exceeded");
         sessions.insert(session_id);
         Ok(())
@@ -744,7 +744,7 @@ impl EventBus {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("event bus lock was poisoned: {error}"))?;
         cleanup_empty_event_channels(&mut sessions);
         if let Some(sender) = sessions.get(&session_id) {
             return Ok(sender.clone());
@@ -765,7 +765,7 @@ impl EventBus {
         let mut sessions = self
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?;
+            .map_err(|error| anyhow::anyhow!("event bus lock was poisoned: {error}"))?;
         cleanup_empty_event_channels(&mut sessions);
         Ok(sessions.get(&session_id).cloned())
     }
@@ -773,7 +773,7 @@ impl EventBus {
     fn remove_session(&self, session_id: SessionId) -> Result<()> {
         self.sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("event bus lock was poisoned"))?
+            .map_err(|error| anyhow::anyhow!("event bus lock was poisoned: {error}"))?
             .remove(&session_id);
         Ok(())
     }
@@ -870,7 +870,7 @@ where
 {
     Json(PermissionsResponse {
         default_tool_policy: state.service.default_tool_policy().as_str().to_string(),
-        allowed_tool_policies: tool_policy_strings(state.service.tool_policies()),
+        allowed_tool_policies: tool_policy_strings(ToolPolicy::all()),
     })
 }
 
@@ -924,18 +924,15 @@ async fn list_sessions<M>(
 where
     M: ModelStreamer + Send + Sync + 'static,
 {
-    let (offset, limit) = match session_list_bounds(query) {
+    let (offset, limit) = match session_list_bounds(&query) {
         Ok(bounds) => bounds,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error),
     };
-    let fetch_limit = match limit.checked_add(1) {
-        Some(limit) => limit,
-        None => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                anyhow::anyhow!("session list limit overflowed"),
-            )
-        }
+    let Some(fetch_limit) = limit.checked_add(1) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("session list limit overflowed"),
+        );
     };
 
     match state
@@ -1030,11 +1027,11 @@ fn validated_session_id(session_id: u64) -> Result<SessionId> {
     Ok(SessionId::new(session_id))
 }
 
-fn session_list_bounds(query: ListSessionsQuery) -> Result<(usize, usize)> {
+fn session_list_bounds(query: &ListSessionsQuery) -> Result<(usize, usize)> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_SESSION_LIST_LIMIT);
     anyhow::ensure!(
-        offset <= i64::MAX as usize,
+        i64::try_from(offset).is_ok(),
         "offset exceeds SQLite signed integer range"
     );
     anyhow::ensure!(
@@ -1373,9 +1370,9 @@ impl<'a> TurnEventBuffer<'a> {
         }
 
         if self.pending_delta.is_none()
-            && self.last_flush_at.map_or(true, |last_flush| {
-                last_flush.elapsed() >= DIRECT_TURN_DELTA_FLUSH_INTERVAL
-            })
+            && self
+                .last_flush_at
+                .is_none_or(|last_flush| last_flush.elapsed() >= DIRECT_TURN_DELTA_FLUSH_INTERVAL)
         {
             self.last_flush_at = Some(Instant::now());
             return send_turn_event(self.tx, ServerEvent::TextDelta { session_id, delta });
@@ -1443,7 +1440,7 @@ fn sse_from_mpsc(
         let _guard = guard;
         let mut receiver = ReceiverStream::new(receiver);
         while let Some(event) = receiver.next().await {
-            yield encode_sse(event);
+            yield Ok::<Bytes, Infallible>(encode_sse_ref(&event));
         }
     };
     sse_response(Body::from_stream(stream))
@@ -1464,26 +1461,26 @@ fn sse_from_broadcast(
     mut receiver: broadcast::Receiver<ServerEvent>,
 ) -> axum::response::Response {
     let stream = stream! {
-        yield encode_sse_ref(&ServerEvent::ServerConnected {
+        yield Ok::<Bytes, Infallible>(encode_sse_ref(&ServerEvent::ServerConnected {
             session_id: session_id.get(),
-        });
+        }));
 
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    yield encode_sse_ref(&ServerEvent::ServerHeartbeat {
+                    yield Ok::<Bytes, Infallible>(encode_sse_ref(&ServerEvent::ServerHeartbeat {
                         session_id: session_id.get(),
-                    });
+                    }));
                 }
                 event = receiver.recv() => {
                     match event {
-                        Ok(event) => yield encode_sse(event),
+                        Ok(event) => yield Ok::<Bytes, Infallible>(encode_sse_ref(&event)),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            yield encode_sse_ref(&ServerEvent::EventsLagged {
+                            yield Ok::<Bytes, Infallible>(encode_sse_ref(&ServerEvent::EventsLagged {
                                 session_id: session_id.get(),
                                 skipped,
-                            });
+                            }));
                         }
                         Err(broadcast::error::RecvError::Closed) => return,
                     }
@@ -1506,12 +1503,8 @@ fn sse_response(body: Body) -> axum::response::Response {
         .into_response()
 }
 
-fn encode_sse(event: ServerEvent) -> std::result::Result<Bytes, Infallible> {
-    encode_sse_ref(&event)
-}
-
-fn encode_sse_ref(event: &ServerEvent) -> std::result::Result<Bytes, Infallible> {
-    Ok(encode_sse_bytes(event).expect("server event serialization should not fail"))
+fn encode_sse_ref(event: &ServerEvent) -> Bytes {
+    encode_sse_bytes(event).expect("server event serialization should not fail")
 }
 
 fn encode_sse_bytes(event: &ServerEvent) -> Result<Bytes> {
@@ -1525,6 +1518,10 @@ fn encode_sse_bytes(event: &ServerEvent) -> Result<Bytes> {
     Ok(Bytes::from(bytes))
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "handlers pass owned anyhow errors into a common JSON response builder"
+)]
 fn error_response(status: StatusCode, error: anyhow::Error) -> axum::response::Response {
     (
         status,
@@ -1547,10 +1544,10 @@ fn contract_schema_hash() -> String {
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
 }
@@ -1570,6 +1567,10 @@ fn zeus_api_contract_fixture() -> serde_json::Value {
     contract_fixture_with_schema_hash(&contract_schema_hash())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "contract fixture intentionally keeps the full API sample in one generator"
+)]
 fn contract_fixture_with_schema_hash(schema_hash: &str) -> serde_json::Value {
     serde_json::json!({
         "version": 1,
@@ -2046,6 +2047,10 @@ impl CacheHealthEvent {
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "SSE usage event fields mirror provider token counter names"
+)]
 struct TokenUsageEvent {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
@@ -2420,6 +2425,8 @@ mod tests {
     use crate::agent_loop::MessageId;
     use crate::agent_loop::ModelResponse;
     use crate::agent_loop::ModelToolCall;
+    use crate::bench_support::mib_per_second;
+    use crate::bench_support::usize_per_second;
     use crate::bench_support::DurationSummary;
     use crate::client::ConversationMessage;
     use crate::config::CompactionConfig;
@@ -2902,6 +2909,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "integration test exercises list and detail session metadata together"
+    )]
     async fn lists_session_metadata_for_frontend() {
         let database = SessionDatabase::in_memory().unwrap();
         let older_session_id = SessionId::new(76);
@@ -3871,9 +3882,8 @@ mod tests {
         }
 
         let summary = DurationSummary::from_samples(&mut samples);
-        let events_per_s = EVENTS as f64 / summary.median.as_secs_f64();
-        let throughput_mib_s =
-            encoded_bytes as f64 / summary.median.as_secs_f64() / 1024.0 / 1024.0;
+        let events_per_s = usize_per_second(EVENTS, summary.median);
+        let throughput_mib_s = mib_per_second(encoded_bytes, summary.median);
         println!(
             "sse_event_encoding events={EVENTS} bytes={encoded_bytes} samples={SAMPLES} min_ms={:.3} median_ms={:.3} max_ms={:.3} events_per_s={:.0} throughput_mib_s={:.1}",
             summary.min_ms(),
