@@ -42,9 +42,9 @@ struct HeaderBar: View {
                 }
 
                 HeaderActionButton(
-                    title: "new",
+                    title: "clear",
                     isEnabled: canClearContext,
-                    help: "New Session"
+                    help: "Clear Context"
                 ) {
                     isShowingSettings = false
                     onClearContext()
