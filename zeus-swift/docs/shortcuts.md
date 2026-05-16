@@ -12,12 +12,13 @@
 | `Cmd+Shift+G` | Move to the previous transcript search match. |
 | `Cmd+T` | Toggle terminal passthrough for the input field. Commands run through rust-agent, are recorded in the active session context, and do not change the selected model permissions. |
 | `Ctrl+C` | Clear the input field. |
+| `Tab` | Open path completion or accept the highlighted path suggestion. In chat mode, `@` at a token boundary opens file-reference completion automatically. |
 | `Ctrl+Enter` | Insert a newline in the input field. |
-| `Up Arrow` | Recall the previous submitted message while the input field is focused, open the focused footer menu, or move the highlighted option up while a footer dropdown is open. |
-| `Down Arrow` | Recall the next submitted message while the input field is focused, move to the footer controls when already at the current draft, exit footer controls, move the highlighted option down while a footer dropdown is open, or close that dropdown when already on its last option. |
+| `Up Arrow` | Move the highlighted path suggestion up, recall the previous submitted message while the input field is focused, open the focused footer menu, or move the highlighted option up while a footer dropdown is open. |
+| `Down Arrow` | Move the highlighted path suggestion down, recall the next submitted message while the input field is focused, move to the footer controls when already at the current draft, exit footer controls, move the highlighted option down while a footer dropdown is open, or close that dropdown when already on its last option. |
 | `Left Arrow` / `Right Arrow` | Move between footer controls while footer navigation is active. |
-| `Return` / `Enter` | Activate the focused footer control, or select the highlighted option while a footer dropdown is open. |
-| `Esc` | Cancel the current response, close transcript search, footer navigation, or the open footer dropdown menu. |
+| `Return` / `Enter` | Accept the highlighted path suggestion, activate the focused footer control, or select the highlighted option while a footer dropdown is open. |
+| `Esc` | Close path completion, cancel the current response, close transcript search, footer navigation, or the open footer dropdown menu. |
 
 ## Commands
 

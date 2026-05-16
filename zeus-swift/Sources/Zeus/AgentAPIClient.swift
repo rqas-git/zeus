@@ -53,6 +53,23 @@ struct AgentAPIClient: AgentClientProtocol {
         return try decode(WorkspaceResponse.self, from: data)
     }
 
+    func completePaths(
+        prefix: String,
+        kind: String,
+        limit: Int?
+    ) async throws -> PathCompletionResponse {
+        var request = authenticatedRequest(path: "workspace/paths:complete")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try encode(PathCompletionRequest(
+            prefix: prefix,
+            kind: kind,
+            limit: limit
+        ))
+        let data = try await data(for: request)
+        return try decode(PathCompletionResponse.self, from: data)
+    }
+
     func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse {
         var request = authenticatedRequest(path: "workspace/branch")
         request.httpMethod = "POST"

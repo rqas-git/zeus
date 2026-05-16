@@ -13,6 +13,7 @@ public enum ZeusCoreChecks {
         ZeusCheck("Response cache stats format compactly", testResponseCacheStatsDisplay),
         ZeusCheck("rust-agent API contract fixtures decode", testRustAgentAPIContractFixtures),
         ZeusCheck("PathDisplay abbreviates home paths", testPathDisplay),
+        ZeusCheck("PromptPathCompletion parses and applies completions", testPromptPathCompletion),
         ZeusCheck("PromptHistory navigates like a terminal", testPromptHistoryNavigation),
         ZeusCheck("PromptHistory resets and restores entries", testPromptHistoryResetAndReplace)
     ]
@@ -317,6 +318,103 @@ public enum ZeusCoreChecks {
         )
     }
 
+    public static func testPromptPathCompletion() throws {
+        let fileContext = try requireSome(
+            PromptPathCompletion.context(
+                in: "read @src/ma",
+                cursor: "read @src/ma".utf16.count,
+                explicitTab: false,
+                terminalMode: false
+            ),
+            "expected @file context"
+        )
+        try require(fileContext.kind == .fileReference, "expected file-reference context")
+        try require(fileContext.prefix == "@src/ma", "unexpected file-reference prefix")
+        try require(fileContext.replacementStart == 5, "unexpected replacement start")
+
+        let quotedContext = try requireSome(
+            PromptPathCompletion.context(
+                in: #"read @"/Users/example/My File"#,
+                cursor: #"read @"/Users/example/My File"#.utf16.count,
+                explicitTab: false,
+                terminalMode: false
+            ),
+            "expected quoted @file context"
+        )
+        try require(quotedContext.isQuotedPrefix, "expected quoted prefix")
+
+        let terminalAt = PromptPathCompletion.context(
+            in: "cat @src/ma",
+            cursor: "cat @src/ma".utf16.count,
+            explicitTab: false,
+            terminalMode: true
+        )
+        try require(terminalAt == nil, "terminal mode should not auto-trigger @ references")
+
+        let terminalTabAt = PromptPathCompletion.context(
+            in: "cat @src/ma",
+            cursor: "cat @src/ma".utf16.count,
+            explicitTab: true,
+            terminalMode: true
+        )
+        try require(terminalTabAt == nil, "terminal mode should not complete @ references")
+
+        let pathContext = try requireSome(
+            PromptPathCompletion.context(
+                in: "cat src/ma",
+                cursor: "cat src/ma".utf16.count,
+                explicitTab: true,
+                terminalMode: true
+            ),
+            "expected explicit path context"
+        )
+        try require(pathContext.kind == .path, "expected path context")
+        try require(pathContext.prefix == "src/ma", "unexpected path prefix")
+
+        let appliedFile = PromptPathCompletion.apply(
+            suggestion: PathCompletionSuggestion(
+                value: "@src/main.rs",
+                label: "main.rs",
+                detail: "src/main.rs",
+                isDirectory: false,
+                isExternal: false
+            ),
+            to: "read @src/ma",
+            context: fileContext
+        )
+        try require(appliedFile.text == "read @src/main.rs ", "file refs should append a space")
+        try require(appliedFile.cursor == appliedFile.text.utf16.count, "cursor should follow file ref")
+
+        let directoryContext = try requireSome(
+            PromptPathCompletion.context(
+                in: #"read @"/Users/example/My"#,
+                cursor: #"read @"/Users/example/My"#.utf16.count,
+                explicitTab: false,
+                terminalMode: false
+            ),
+            "expected directory @file context"
+        )
+        let appliedDirectory = PromptPathCompletion.apply(
+            suggestion: PathCompletionSuggestion(
+                value: #"@"/Users/example/My Dir/""#,
+                label: "My Dir/",
+                detail: "/Users/example/My Dir/",
+                isDirectory: true,
+                isExternal: true
+            ),
+            to: #"read @"/Users/example/My"#,
+            context: directoryContext
+        )
+        try require(
+            appliedDirectory.text == #"read @"/Users/example/My Dir/""#,
+            "directory refs should stay quoted without a trailing space"
+        )
+        try require(
+            appliedDirectory.cursor == appliedDirectory.text.utf16.count - 1,
+            "directory cursor should remain inside closing quote"
+        )
+    }
+
     public static func testPromptHistoryNavigation() throws {
         var history = PromptHistory()
         try require(history.previous(currentDraft: "draft") == nil, "empty history should not navigate up")
@@ -391,4 +489,11 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
     if !condition() {
         throw CheckFailure.message(message)
     }
+}
+
+private func requireSome<T>(_ value: T?, _ message: String) throws -> T {
+    guard let value else {
+        throw CheckFailure.message(message)
+    }
+    return value
 }

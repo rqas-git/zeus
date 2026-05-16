@@ -17,6 +17,15 @@ if readiness or `GET /` reports a different canonical path. Branch switches go
 through the backend workspace API so backend search state and UI state stay
 aligned.
 
+## File References
+
+Prompt `@` references are textual; Zeus preserves the submitted message and
+does not inline file contents. Workspace refs stay workspace-scoped. Explicit
+absolute and home refs, such as `@/tmp/log.txt` or `@~/notes/`, grant the
+backend read/list access for that referenced file or directory in the active
+session. The grants are read-only and do not change patch, exec, or terminal
+passthrough scope.
+
 ## Auth
 
 `RustAgentAuth` runs backend login commands and inherits the process

@@ -14,6 +14,8 @@ final class ChatViewModel {
             resetDraftHistoryNavigation()
         }
     }
+    var draftSelectionLocation: Int?
+    private(set) var pathCompletion: PromptPathCompletionState?
     var searchQuery = ""
     private(set) var isSearchVisible = false
     private(set) var searchResultSummary = ""
@@ -91,6 +93,8 @@ final class ChatViewModel {
     }
 
     private static let searchRefreshDebounceNanoseconds: UInt64 = 120_000_000
+    private static let pathCompletionDebounceNanoseconds: UInt64 = 20_000_000
+    private static let pathCompletionLimit = 20
     private static let assistantDisplayFlushNanoseconds: UInt64 = 33_000_000
     private static let assistantDisplayImmediateFlushCharacters = 2_000
     private static let assistantScrollThrottleSeconds: TimeInterval = 0.08
@@ -113,6 +117,7 @@ final class ChatViewModel {
     @ObservationIgnored private var terminalTask: Task<Void, Never>?
     @ObservationIgnored private var contextClearTask: Task<Void, Never>?
     @ObservationIgnored private var searchRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var pathCompletionTask: Task<Void, Never>?
     @ObservationIgnored private var markdownRenderTask: Task<Void, Never>?
     @ObservationIgnored private var assistantDisplayFlushTask: Task<Void, Never>?
     @ObservationIgnored private var pendingAssistantDisplayFragment = ""
@@ -127,6 +132,7 @@ final class ChatViewModel {
     @ObservationIgnored private var lineIndexesByID: [UUID: Int] = [:]
     @ObservationIgnored private var searchMatchedLineIDsInOrder: [UUID] = []
     @ObservationIgnored private var searchRefreshRevision = 0
+    @ObservationIgnored private var pathCompletionRevision = 0
     @ObservationIgnored private var transcriptScrollRevision = 0
     @ObservationIgnored private var submittedMessageHistory = PromptHistory()
     @ObservationIgnored private var isApplyingDraftFromHistory = false
@@ -150,6 +156,7 @@ final class ChatViewModel {
         terminalTask?.cancel()
         contextClearTask?.cancel()
         searchRefreshTask?.cancel()
+        pathCompletionTask?.cancel()
         markdownRenderTask?.cancel()
         assistantDisplayFlushTask?.cancel()
         auth.cancelLogin()
@@ -192,6 +199,11 @@ final class ChatViewModel {
     }
 
     func sendDraft() {
+        if acceptPathCompletion() {
+            return
+        }
+        cancelPathCompletion()
+
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         guard !isClearingContext else {
@@ -318,6 +330,9 @@ final class ChatViewModel {
         contextClearTask = nil
         searchRefreshTask?.cancel()
         searchRefreshTask = nil
+        pathCompletionTask?.cancel()
+        pathCompletionTask = nil
+        pathCompletion = nil
         markdownRenderTask?.cancel()
         markdownRenderTask = nil
         assistantDisplayFlushTask?.cancel()
@@ -365,10 +380,83 @@ final class ChatViewModel {
     }
 
     func clearDraft() {
+        cancelPathCompletion()
         draft = ""
+        draftSelectionLocation = nil
+    }
+
+    func updateDraftFromInput(_ value: String, cursor: Int) {
+        if draft != value {
+            draft = value
+        }
+        draftSelectionLocation = nil
+        requestAutomaticPathCompletion(cursor: cursor)
+    }
+
+    func triggerPathCompletion(cursor: Int) -> Bool {
+        guard isReady else {
+            cancelPathCompletion()
+            return true
+        }
+        guard let context = PromptPathCompletion.context(
+            in: draft,
+            cursor: cursor,
+            explicitTab: true,
+            terminalMode: isTerminalPassthroughEnabled
+        ) else {
+            cancelPathCompletion()
+            return true
+        }
+        requestPathCompletion(context: context, debounce: false, acceptsSingleSuggestion: true)
+        return true
+    }
+
+    func movePathCompletionSelection(by delta: Int) -> Bool {
+        guard var completion = pathCompletion, !completion.suggestions.isEmpty else {
+            return false
+        }
+        let count = completion.suggestions.count
+        completion.selectedIndex = (completion.selectedIndex + delta + count) % count
+        pathCompletion = completion
+        return true
+    }
+
+    func highlightPathCompletion(index: Int) {
+        guard var completion = pathCompletion,
+              completion.suggestions.indices.contains(index) else {
+            return
+        }
+        completion.selectedIndex = index
+        pathCompletion = completion
+    }
+
+    func selectPathCompletion(index: Int) {
+        highlightPathCompletion(index: index)
+        _ = acceptPathCompletion()
+    }
+
+    @discardableResult
+    func acceptPathCompletion() -> Bool {
+        guard let completion = pathCompletion,
+              let suggestion = completion.selectedSuggestion else {
+            return false
+        }
+        applyPathCompletion(suggestion, context: completion.context)
+        return true
+    }
+
+    @discardableResult
+    func cancelPathCompletion() -> Bool {
+        let hadCompletion = pathCompletion != nil || pathCompletionTask != nil
+        pathCompletionRevision += 1
+        pathCompletionTask?.cancel()
+        pathCompletionTask = nil
+        pathCompletion = nil
+        return hadCompletion
     }
 
     func clearContext() {
+        cancelPathCompletion()
         guard canClearContext else { return }
         guard let client, let previousSessionID = sessionID else {
             append(kind: .error, text: "No rust-agent session is available.")
@@ -410,6 +498,7 @@ final class ChatViewModel {
         guard let message = submittedMessageHistory.previous(currentDraft: draft) else {
             return false
         }
+        cancelPathCompletion()
         applyDraftFromHistory(message)
         return true
     }
@@ -418,11 +507,102 @@ final class ChatViewModel {
         guard let message = submittedMessageHistory.next() else {
             return false
         }
+        cancelPathCompletion()
         applyDraftFromHistory(message)
         return true
     }
 
+    private func requestAutomaticPathCompletion(cursor: Int) {
+        guard let context = PromptPathCompletion.context(
+            in: draft,
+            cursor: cursor,
+            explicitTab: false,
+            terminalMode: isTerminalPassthroughEnabled
+        ) else {
+            cancelPathCompletion()
+            return
+        }
+        requestPathCompletion(context: context, debounce: true, acceptsSingleSuggestion: false)
+    }
+
+    private func requestPathCompletion(
+        context: PromptPathCompletionContext,
+        debounce: Bool,
+        acceptsSingleSuggestion: Bool
+    ) {
+        guard isReady, let client else {
+            cancelPathCompletion()
+            return
+        }
+
+        pathCompletionRevision += 1
+        let revision = pathCompletionRevision
+        let draftSnapshot = draft
+        pathCompletionTask?.cancel()
+        pathCompletionTask = Task { [weak self] in
+            if debounce {
+                do {
+                    try await Task.sleep(nanoseconds: Self.pathCompletionDebounceNanoseconds)
+                } catch {
+                    return
+                }
+            }
+
+            do {
+                let response = try await client.completePaths(
+                    prefix: context.prefix,
+                    kind: context.kind.rawValue,
+                    limit: Self.pathCompletionLimit
+                )
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self,
+                          self.pathCompletionRevision == revision,
+                          self.draft == draftSnapshot else {
+                        return
+                    }
+                    self.pathCompletionTask = nil
+                    guard !response.suggestions.isEmpty else {
+                        self.pathCompletion = nil
+                        return
+                    }
+                    if acceptsSingleSuggestion, response.suggestions.count == 1 {
+                        self.applyPathCompletion(response.suggestions[0], context: context)
+                        return
+                    }
+                    self.pathCompletion = PromptPathCompletionState(
+                        context: context,
+                        suggestions: response.suggestions,
+                        selectedIndex: 0
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self, self.pathCompletionRevision == revision else { return }
+                    self.pathCompletionTask = nil
+                    self.pathCompletion = nil
+                }
+            }
+        }
+    }
+
+    private func applyPathCompletion(
+        _ suggestion: PathCompletionSuggestion,
+        context: PromptPathCompletionContext
+    ) {
+        let result = PromptPathCompletion.apply(
+            suggestion: suggestion,
+            to: draft,
+            context: context
+        )
+        cancelPathCompletion()
+        draft = result.text
+        draftSelectionLocation = result.cursor
+    }
+
     func toggleTerminalPassthrough() {
+        cancelPathCompletion()
         isTerminalPassthroughEnabled.toggle()
         append(
             kind: .status,
@@ -431,6 +611,7 @@ final class ChatViewModel {
     }
 
     func showSearch() {
+        cancelPathCompletion()
         isSearchVisible = true
         refreshSearchMatches(debounce: false)
     }
@@ -469,6 +650,7 @@ final class ChatViewModel {
             return
         }
 
+        cancelPathCompletion()
         isSwitchingBranch = true
         append(kind: .status, text: "switching branch to \(rawBranch)...")
 
@@ -1679,6 +1861,7 @@ final class ChatViewModel {
     private func applyDraftFromHistory(_ value: String) {
         isApplyingDraftFromHistory = true
         draft = value
+        draftSelectionLocation = value.utf16.count
         isApplyingDraftFromHistory = false
     }
 

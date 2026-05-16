@@ -8,8 +8,8 @@ uses typed `ZeusCore` request and response models.
 1. `RustAgentServer` creates `AgentAPIClient` with the readiness HTTP base URL
    and bearer token.
 2. Public health and compatibility routes are called without authorization.
-3. Session, workspace, model, permission, terminal, and restore routes include
-   `Authorization: Bearer <token>`.
+3. Session, workspace, path-completion, model, permission, terminal, and
+   restore routes include `Authorization: Bearer <token>`.
 4. JSON requests and responses use `AgentAPIContract.swift` types.
 5. Turn and session event streams are read as raw SSE bytes, preserving blank
    event-separator lines before decoding payloads into `AgentServerEvent`.
@@ -24,6 +24,7 @@ uses typed `ZeusCore` request and response models.
 - `GET /models`
 - `GET /permissions`
 - `GET /workspace`
+- `POST /workspace/paths:complete`
 - `POST /workspace/branch`
 - `POST /sessions`
 - `POST /sessions:restore`

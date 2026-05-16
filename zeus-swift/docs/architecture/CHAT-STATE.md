@@ -35,7 +35,10 @@ tasks are marked `@ObservationIgnored`.
    the previous session id needed for `/restore`.
 9. Transcript search refreshes are debounced and scan line snapshots off the
    main actor.
-10. Terminal passthrough applies the selected permission policy, sends commands
+10. Path and `@` file-reference completion requests are debounced, served by
+   `POST /workspace/paths:complete`, and dropped if the draft changes before
+   results return.
+11. Terminal passthrough applies the selected permission policy, sends commands
    to `terminal:run`, and appends bounded command output to the transcript.
 
 ## Responsibilities
@@ -47,6 +50,8 @@ tasks are marked `@ObservationIgnored`.
   selected permission before terminal passthrough commands.
 - Keep backend branch switches in the backend API path.
 - Keep prompt-history and transcript-search behavior local to the frontend.
+- Keep prompt path-completion parsing in `ZeusCore` and backend suggestion
+  requests in the view model.
 - Translate `AgentServerEvent` values into transcript lines.
 - Keep view-facing display strings compact.
 
@@ -58,6 +63,8 @@ tasks are marked `@ObservationIgnored`.
 - `branchSwitchTask` owns backend branch switching.
 - `terminalTask` owns user-initiated terminal commands.
 - `contextClearTask` owns fresh-session creation for the clear-context action.
+- `pathCompletionTask` owns the active autocomplete request and is cancelled on
+  draft changes, submission, mode switches, and newer completion requests.
 - Assistant text display buffering is synchronous within the active model turn,
   with a short main-actor flush task for smoother partial-line rendering.
 - `searchRefreshTask` debounces transcript search updates.

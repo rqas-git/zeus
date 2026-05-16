@@ -6,6 +6,11 @@ protocol AgentClientProtocol {
     func models() async throws -> ModelsResponse
     func permissions() async throws -> PermissionsResponse
     func workspace() async throws -> WorkspaceResponse
+    func completePaths(
+        prefix: String,
+        kind: String,
+        limit: Int?
+    ) async throws -> PathCompletionResponse
     func switchWorkspaceBranch(branch: String) async throws -> SwitchWorkspaceBranchResponse
     func createSession() async throws -> CreateSessionResponse
     func restoreSession(sessionID: UInt64) async throws -> RestoreSessionResponse

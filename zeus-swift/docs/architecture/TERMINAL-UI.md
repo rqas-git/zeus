@@ -8,7 +8,8 @@ to `ChatViewModel` actions.
 - `HeaderBar` shows app chrome, clear-context, and settings controls.
 - `TranscriptView` renders transcript lines, assistant markdown, tool rows, and
   search highlights.
-- `InputPrompt` renders the prompt marker and text field.
+- `InputPrompt` renders the prompt marker, text field, and path-completion
+  dropdown.
 - `FooterBar` exposes branch, model, effort, permission, and shortcut controls.
 - Dropdowns are rendered by footer menu components with keyboard-highlighted
   options.
@@ -20,6 +21,13 @@ shortcuts open footer menus, toggle terminal passthrough, search the transcript,
 or cancel the active turn. Arrow keys either navigate prompt history, move
 footer focus, or move the active dropdown highlight depending on current UI
 state.
+
+Typing `@` at a token boundary in chat mode opens backend-served file-reference
+completion. `Tab` opens path completion or accepts the highlighted suggestion.
+When the completion dropdown is visible, Up and Down move its highlight, Return
+accepts the highlighted suggestion before submitting, and Esc closes it.
+Terminal passthrough uses Tab path completion but does not auto-open
+file-reference completion for `@`.
 
 Keep `docs/shortcuts.md` synchronized with any user-visible key behavior.
 

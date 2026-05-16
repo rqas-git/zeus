@@ -98,12 +98,21 @@ private struct InputSection: View {
     var body: some View {
         InputPrompt(
             text: $viewModel.draft,
+            selectionLocation: $viewModel.draftSelectionLocation,
             prompt: viewModel.inputPrompt,
             placeholder: viewModel.inputPlaceholder,
+            pathCompletion: viewModel.pathCompletion,
             onSubmit: viewModel.sendDraft,
             onHistoryPrevious: viewModel.selectPreviousSubmittedMessage,
             onHistoryNext: viewModel.selectNextSubmittedMessage,
             onMoveDownFromCurrent: { footerMenuController.focusFirstMenu(viewModel: viewModel) },
+            onTextEdited: viewModel.updateDraftFromInput,
+            onCompletionTrigger: viewModel.triggerPathCompletion,
+            onCompletionMove: viewModel.movePathCompletionSelection,
+            onCompletionAccept: viewModel.acceptPathCompletion,
+            onCompletionCancel: viewModel.cancelPathCompletion,
+            onCompletionHighlight: viewModel.highlightPathCompletion,
+            onCompletionSelect: viewModel.selectPathCompletion,
             isCancelVisible: viewModel.canCancelTurn,
             onCancel: viewModel.cancelCurrentTurn
         )
@@ -203,6 +212,9 @@ extension ChatWindow {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if event.keyCode == KeyCode.escape, viewModel.cancelPathCompletion() {
+            return true
+        }
         if event.keyCode == KeyCode.escape, viewModel.canCancelTurn {
             viewModel.cancelCurrentTurn()
             return true

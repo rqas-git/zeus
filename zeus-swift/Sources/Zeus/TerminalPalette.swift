@@ -8,6 +8,7 @@ enum TerminalPalette {
     static let dimText = Color(red: 0.560, green: 0.558, blue: 0.588)
     static let cyan = Color(red: 0.366, green: 0.808, blue: 0.838)
     static let green = Color(red: 0.418, green: 0.770, blue: 0.482)
+    static let amber = Color(red: 0.922, green: 0.666, blue: 0.360)
     static let red = Color(red: 0.918, green: 0.380, blue: 0.348)
     static let border = Color(red: 0.256, green: 0.252, blue: 0.282)
     static let shadow = Color(red: 0.030, green: 0.028, blue: 0.040)

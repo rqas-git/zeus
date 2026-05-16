@@ -26,6 +26,10 @@ extension ZeusCoreChecks {
             capabilities.features.contains("turn_streaming"),
             "missing turn streaming feature"
         )
+        try contractRequire(
+            capabilities.features.contains("path_completion"),
+            "missing path completion feature"
+        )
 
         let models = try fixture.decodeResponse("models", as: ModelsResponse.self)
         try contractRequire(models.defaultModel == "gpt-5.5", "unexpected default model")
@@ -47,6 +51,15 @@ extension ZeusCoreChecks {
         )
         try contractRequire(branch.previousBranch == "main", "unexpected previous branch")
         try contractRequire(branch.workspace.branch == "feature", "unexpected switched branch")
+
+        let pathCompletion = try fixture.decodeResponse(
+            "path_completion",
+            as: PathCompletionResponse.self
+        )
+        try contractRequire(
+            pathCompletion.suggestions.first?.value == "@src/main.rs",
+            "unexpected path completion suggestion"
+        )
 
         let created = try fixture.decodeResponse("create_session", as: CreateSessionResponse.self)
         try contractRequire(created.sessionID == 42, "unexpected created session id")
@@ -97,11 +110,24 @@ extension ZeusCoreChecks {
                 "set_session_permissions",
                 "restore_session",
                 "list_sessions",
+                "path_completion",
                 "turn",
                 "terminal_command",
                 "compact_session"
             ],
             "contract request names changed"
+        )
+        let pathCompletionRequest = try fixture.decodeRequest(
+            "path_completion",
+            as: PathCompletionRequest.self
+        )
+        try contractRequire(
+            pathCompletionRequest == PathCompletionRequest(
+                prefix: "@src/ma",
+                kind: "file_reference",
+                limit: 20
+            ),
+            "unexpected path completion request"
         )
         let setModel = try fixture.decodeRequest("set_session_model", as: SetModelRequest.self)
         try contractRequire(

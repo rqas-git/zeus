@@ -120,6 +120,17 @@ struct TranscriptScrollTarget: Equatable {
     let revision: Int
 }
 
+struct PromptPathCompletionState: Equatable {
+    var context: PromptPathCompletionContext
+    var suggestions: [PathCompletionSuggestion]
+    var selectedIndex: Int
+
+    var selectedSuggestion: PathCompletionSuggestion? {
+        guard suggestions.indices.contains(selectedIndex) else { return nil }
+        return suggestions[selectedIndex]
+    }
+}
+
 struct ActiveAssistantStream: Equatable {
     let lineID: UUID
     let chunks: [StreamingTextChunk]

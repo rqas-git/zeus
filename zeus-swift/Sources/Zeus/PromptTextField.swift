@@ -5,11 +5,45 @@ struct PromptTextField: NSViewRepresentable {
     private static let textFont = TerminalTypography.chatSmallNSFont
 
     @Binding var text: String
+    @Binding var selectionLocation: Int?
     let placeholder: String
     let onSubmit: () -> Void
     let onHistoryPrevious: () -> Bool
     let onHistoryNext: () -> Bool
+    let onTextEdited: (String, Int) -> Void
+    let onCompletionTrigger: (Int) -> Bool
+    let onCompletionMove: (Int) -> Bool
+    let onCompletionAccept: () -> Bool
+    let onCompletionCancel: () -> Bool
     var onMoveDownFromCurrent: () -> Bool = { false }
+
+    init(
+        text: Binding<String>,
+        selectionLocation: Binding<Int?> = .constant(nil),
+        placeholder: String,
+        onSubmit: @escaping () -> Void,
+        onHistoryPrevious: @escaping () -> Bool,
+        onHistoryNext: @escaping () -> Bool,
+        onTextEdited: @escaping (String, Int) -> Void = { _, _ in },
+        onCompletionTrigger: @escaping (Int) -> Bool = { _ in false },
+        onCompletionMove: @escaping (Int) -> Bool = { _ in false },
+        onCompletionAccept: @escaping () -> Bool = { false },
+        onCompletionCancel: @escaping () -> Bool = { false },
+        onMoveDownFromCurrent: @escaping () -> Bool = { false }
+    ) {
+        _text = text
+        _selectionLocation = selectionLocation
+        self.placeholder = placeholder
+        self.onSubmit = onSubmit
+        self.onHistoryPrevious = onHistoryPrevious
+        self.onHistoryNext = onHistoryNext
+        self.onTextEdited = onTextEdited
+        self.onCompletionTrigger = onCompletionTrigger
+        self.onCompletionMove = onCompletionMove
+        self.onCompletionAccept = onCompletionAccept
+        self.onCompletionCancel = onCompletionCancel
+        self.onMoveDownFromCurrent = onMoveDownFromCurrent
+    }
 
     func makeNSView(context: Context) -> NSTextField {
         let textField = NSTextField()
@@ -39,9 +73,15 @@ struct PromptTextField: NSViewRepresentable {
 
     func updateNSView(_ textField: NSTextField, context: Context) {
         context.coordinator.text = $text
+        context.coordinator.selectionLocation = $selectionLocation
         context.coordinator.onSubmit = onSubmit
         context.coordinator.onHistoryPrevious = onHistoryPrevious
         context.coordinator.onHistoryNext = onHistoryNext
+        context.coordinator.onTextEdited = onTextEdited
+        context.coordinator.onCompletionTrigger = onCompletionTrigger
+        context.coordinator.onCompletionMove = onCompletionMove
+        context.coordinator.onCompletionAccept = onCompletionAccept
+        context.coordinator.onCompletionCancel = onCompletionCancel
         context.coordinator.onMoveDownFromCurrent = onMoveDownFromCurrent
 
         if textField.stringValue != text {
@@ -50,14 +90,27 @@ struct PromptTextField: NSViewRepresentable {
         if textField.placeholderAttributedString?.string != placeholder {
             textField.placeholderAttributedString = attributedPlaceholder
         }
+        if let selectionLocation {
+            applySelection(selectionLocation, to: textField)
+            let selection = $selectionLocation
+            DispatchQueue.main.async {
+                selection.wrappedValue = nil
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             text: $text,
+            selectionLocation: $selectionLocation,
             onSubmit: onSubmit,
             onHistoryPrevious: onHistoryPrevious,
             onHistoryNext: onHistoryNext,
+            onTextEdited: onTextEdited,
+            onCompletionTrigger: onCompletionTrigger,
+            onCompletionMove: onCompletionMove,
+            onCompletionAccept: onCompletionAccept,
+            onCompletionCancel: onCompletionCancel,
             onMoveDownFromCurrent: onMoveDownFromCurrent
         )
     }
@@ -74,6 +127,12 @@ struct PromptTextField: NSViewRepresentable {
         }
     }
 
+    private func applySelection(_ location: Int, to textField: NSTextField) {
+        guard let editor = textField.currentEditor() as? NSTextView else { return }
+        let clamped = max(0, min(location, textField.stringValue.utf16.count))
+        editor.setSelectedRange(NSRange(location: clamped, length: 0))
+    }
+
     private var attributedPlaceholder: NSAttributedString {
         NSAttributedString(
             string: placeholder,
@@ -86,23 +145,41 @@ struct PromptTextField: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var text: Binding<String>
+        var selectionLocation: Binding<Int?>
         var onSubmit: () -> Void
         var onHistoryPrevious: () -> Bool
         var onHistoryNext: () -> Bool
+        var onTextEdited: (String, Int) -> Void
+        var onCompletionTrigger: (Int) -> Bool
+        var onCompletionMove: (Int) -> Bool
+        var onCompletionAccept: () -> Bool
+        var onCompletionCancel: () -> Bool
         var onMoveDownFromCurrent: () -> Bool
         var didApplyInitialFocus = false
 
         init(
             text: Binding<String>,
+            selectionLocation: Binding<Int?>,
             onSubmit: @escaping () -> Void,
             onHistoryPrevious: @escaping () -> Bool,
             onHistoryNext: @escaping () -> Bool,
+            onTextEdited: @escaping (String, Int) -> Void,
+            onCompletionTrigger: @escaping (Int) -> Bool,
+            onCompletionMove: @escaping (Int) -> Bool,
+            onCompletionAccept: @escaping () -> Bool,
+            onCompletionCancel: @escaping () -> Bool,
             onMoveDownFromCurrent: @escaping () -> Bool
         ) {
             self.text = text
+            self.selectionLocation = selectionLocation
             self.onSubmit = onSubmit
             self.onHistoryPrevious = onHistoryPrevious
             self.onHistoryNext = onHistoryNext
+            self.onTextEdited = onTextEdited
+            self.onCompletionTrigger = onCompletionTrigger
+            self.onCompletionMove = onCompletionMove
+            self.onCompletionAccept = onCompletionAccept
+            self.onCompletionCancel = onCompletionCancel
             self.onMoveDownFromCurrent = onMoveDownFromCurrent
         }
 
@@ -112,7 +189,10 @@ struct PromptTextField: NSViewRepresentable {
 
         func controlTextDidChange(_ notification: Notification) {
             guard let textField = notification.object as? NSTextField else { return }
-            text.wrappedValue = textField.stringValue
+            let value = textField.stringValue
+            text.wrappedValue = value
+            selectionLocation.wrappedValue = nil
+            onTextEdited(value, currentCursorLocation(in: textField))
         }
 
         func control(
@@ -120,8 +200,24 @@ struct PromptTextField: NSViewRepresentable {
             textView: NSTextView,
             doCommandBy commandSelector: Selector
         ) -> Bool {
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)),
+               onCompletionCancel() {
+                return true
+            }
+
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if onCompletionAccept() {
+                    applyBoundText(to: textView)
+                    return true
+                }
+                return onCompletionTrigger(textView.selectedRange().location)
+            }
+
             if commandSelector == #selector(NSResponder.moveUp(_:)),
                hasNoNavigationModifiers {
+                if onCompletionMove(-1) {
+                    return true
+                }
                 guard onHistoryPrevious() else { return false }
                 applyBoundText(to: textView)
                 return true
@@ -129,9 +225,19 @@ struct PromptTextField: NSViewRepresentable {
 
             if commandSelector == #selector(NSResponder.moveDown(_:)),
                hasNoNavigationModifiers {
+                if onCompletionMove(1) {
+                    return true
+                }
                 guard onHistoryNext() else {
                     return onMoveDownFromCurrent()
                 }
+                applyBoundText(to: textView)
+                return true
+            }
+
+            if commandSelector == #selector(NSResponder.insertNewline(_:)),
+               hasNoNavigationModifiers,
+               onCompletionAccept() {
                 applyBoundText(to: textView)
                 return true
             }
@@ -140,12 +246,12 @@ struct PromptTextField: NSViewRepresentable {
                   NSApp.currentEvent?.modifierFlags
                     .intersection(.deviceIndependentFlagsMask)
                     .contains(.control) == true
-            else {
-                return false
-            }
+            else { return false }
 
             textView.insertNewlineIgnoringFieldEditor(nil)
             text.wrappedValue = textView.string
+            selectionLocation.wrappedValue = nil
+            onTextEdited(textView.string, textView.selectedRange().location)
             return true
         }
 
@@ -159,7 +265,17 @@ struct PromptTextField: NSViewRepresentable {
         private func applyBoundText(to textView: NSTextView) {
             let value = text.wrappedValue
             textView.string = value
-            textView.setSelectedRange(NSRange(location: value.utf16.count, length: 0))
+            let location = selectionLocation.wrappedValue ?? value.utf16.count
+            let clamped = max(0, min(location, value.utf16.count))
+            textView.setSelectedRange(NSRange(location: clamped, length: 0))
+            selectionLocation.wrappedValue = nil
+        }
+
+        private func currentCursorLocation(in textField: NSTextField) -> Int {
+            guard let editor = textField.currentEditor() as? NSTextView else {
+                return textField.stringValue.utf16.count
+            }
+            return editor.selectedRange().location
         }
     }
 }

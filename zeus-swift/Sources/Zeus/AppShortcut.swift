@@ -11,6 +11,7 @@ enum AppShortcut: CaseIterable, Identifiable {
     case searchPrevious
     case terminalPassthrough
     case clearInput
+    case pathCompletion
     case insertNewline
     case historyOrMenuPrevious
     case historyOrMenuNext
@@ -32,6 +33,7 @@ enum AppShortcut: CaseIterable, Identifiable {
         case .searchPrevious: "Cmd+Shift+G"
         case .terminalPassthrough: "Cmd+T"
         case .clearInput: "Ctrl+C"
+        case .pathCompletion: "Tab"
         case .insertNewline: "Ctrl+Enter"
         case .historyOrMenuPrevious: "Up Arrow"
         case .historyOrMenuNext: "Down Arrow"
@@ -53,12 +55,13 @@ enum AppShortcut: CaseIterable, Identifiable {
         case .searchPrevious: "Previous search match"
         case .terminalPassthrough: "Toggle terminal passthrough"
         case .clearInput: "Clear input"
+        case .pathCompletion: "Complete path or accept suggestion"
         case .insertNewline: "Insert newline"
         case .historyOrMenuPrevious: "Previous message, open footer menu, or previous option"
         case .historyOrMenuNext: "Next message, next option, or close menu at bottom"
         case .footerNavigation: "Move between footer controls"
         case .activateFooterItem: "Activate footer control or menu option"
-        case .escape: "Cancel response, close search, or close footer UI"
+        case .escape: "Cancel response, close completion, search, or footer UI"
         }
     }
 

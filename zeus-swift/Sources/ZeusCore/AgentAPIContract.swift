@@ -162,6 +162,58 @@ public struct SwitchWorkspaceBranchResponse: Decodable {
     }
 }
 
+public struct PathCompletionRequest: Codable, Equatable {
+    public let prefix: String
+    public let kind: String
+    public let limit: Int?
+
+    public init(prefix: String, kind: String, limit: Int? = nil) {
+        self.prefix = prefix
+        self.kind = kind
+        self.limit = limit
+    }
+}
+
+public struct PathCompletionResponse: Decodable, Equatable {
+    public let suggestions: [PathCompletionSuggestion]
+
+    public init(suggestions: [PathCompletionSuggestion]) {
+        self.suggestions = suggestions
+    }
+}
+
+public struct PathCompletionSuggestion: Decodable, Equatable, Identifiable {
+    public let value: String
+    public let label: String
+    public let detail: String
+    public let isDirectory: Bool
+    public let isExternal: Bool
+
+    public var id: String { "\(value)|\(detail)" }
+
+    public init(
+        value: String,
+        label: String,
+        detail: String,
+        isDirectory: Bool,
+        isExternal: Bool
+    ) {
+        self.value = value
+        self.label = label
+        self.detail = detail
+        self.isDirectory = isDirectory
+        self.isExternal = isExternal
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case value
+        case label
+        case detail
+        case isDirectory = "is_directory"
+        case isExternal = "is_external"
+    }
+}
+
 public struct TerminalCommandResponse: Decodable {
     public let output: String
     public let success: Bool

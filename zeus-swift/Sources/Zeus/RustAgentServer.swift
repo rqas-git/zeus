@@ -8,7 +8,8 @@ final class RustAgentServer: AgentServerProtocol {
     private let requiredFeatures = [
         "turn_streaming",
         "session_events",
-        "terminal_command"
+        "terminal_command",
+        "path_completion"
     ]
     private var process: Process?
     private let outputCapture = ProcessOutputCapture()
